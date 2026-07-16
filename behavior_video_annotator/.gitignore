@@ -1,0 +1,32 @@
+behavior_clips/
+sample_videos-annotations/
+
+# === Video / Media files (useful for your project) ===
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.wmv
+
+# === Python / uv ===
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# === OS / IDE ===
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

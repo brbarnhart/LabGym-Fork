@@ -1,0 +1,39 @@
+[project]
+name = "behavior-video-annotator"
+version = "0.1.0"
+description = "Desktop GUI for precise manual annotation of animal behaviors in video (LabGym companion)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Core GUI
+    "PyQt6>=6.7",
+    # Video handling (decord preferred for accurate random access; opencv fallback)
+    "opencv-python>=4.9",
+    # decord often lacks Windows wheels; app falls back to OpenCV on Windows
+    "decord>=0.6.0; platform_system != 'Windows'",
+    # Data & exports
+    "pandas>=2.2",
+    "openpyxl>=3.1",
+    "xlsxwriter>=3.2",
+    # Video clip export (robust ffmpeg handling)
+    "imageio>=2.34",
+    "imageio-ffmpeg>=0.4.9",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+# Optional polish / advanced UI (install with: uv sync --group polish)
+polish = [
+    "qdarkstyle>=3.2",
+    "pyqtgraph>=0.13",
+]
+
+[tool.uv]
+# Application project: manage deps/venv without packaging/installing the app itself
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
