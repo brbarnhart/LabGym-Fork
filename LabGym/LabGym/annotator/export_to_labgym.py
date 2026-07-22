@@ -113,7 +113,11 @@ def sort_unsorted_examples(
     window_len: int = 15,
     copy: bool = False,
 ) -> Dict[str, int]:
-    """Sort LabGym unsorted examples using annotation session; optional soft sidecar."""
+    """Sort LabGym unsorted examples using annotation session; optional soft sidecar.
+
+    Legacy path (dense generate_data then sort). Prefer
+    ``generate_training_pairs_from_ethogram`` for ethogram-first workflows.
+    """
     counts = sort_examples_from_annotations(
         annotations_path, examples_dir, out_dir, copy=copy
     )
@@ -127,3 +131,39 @@ def sort_unsorted_examples(
         else:
             write_soft_labels_sidecar(out_dir, session, window_len=window_len)
     return counts
+
+
+def generate_training_pairs_from_ethogram(
+    annotations_path: Union[str, Path],
+    tracklets_dir: Union[str, Path],
+    video_path: Union[str, Path],
+    output_dir: Union[str, Path],
+    *,
+    length: int = 15,
+    sampling: str = "dense_in_bout",
+    stride: int = 0,
+    min_bout_frames: int = 1,
+    social_distance: float = 0.0,
+    write_soft_labels: bool = True,
+    analysis_start_frame: Optional[int] = None,
+) -> Dict:
+    """Ethogram-first: bout windows → sorted LabGym .avi/.jpg pairs + soft_labels."""
+    from LabGym.training.ethogram_examples import (
+        GenerationConfig,
+        generate_examples_from_ethogram,
+    )
+
+    cfg = GenerationConfig(
+        video_path=str(video_path),
+        annotations_path=str(annotations_path),
+        tracklets_dir=str(tracklets_dir),
+        output_dir=str(output_dir),
+        length=int(length),
+        sampling=sampling,
+        stride=int(stride),
+        min_bout_frames=int(min_bout_frames),
+        social_distance=float(social_distance),
+        write_soft_labels=write_soft_labels,
+        analysis_start_frame=analysis_start_frame,
+    )
+    return generate_examples_from_ethogram(cfg)

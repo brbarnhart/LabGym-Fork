@@ -54,14 +54,17 @@
 
 ## Multi-animal behavior annotation (this fork / workspace build)
 
-This workspace includes an integrated **PySide6 Behavior Annotator** and soft-label training support:
+This workspace includes an integrated **PySide6 Behavior Annotator** and **ethogram-first** training:
 
 ```bash
-LabGym-annotate          # multi-subject frame-by-frame annotation
+LabGym-annotate          # multi-subject ethogram annotation
 LabGym-workflow          # lightweight step-by-step launcher
 ```
 
-See `docs/features/annotator-workflow.md` for detector → ID review → annotate → sort → train (hard/soft) → analyze.
+**Recommended training path:** detect → fix IDs → annotate ethogram →  
+**Tools → Generate LabGym training pairs from ethogram** → train categorizer.  
+Ethograms stay reusable when you change clip length.  
+See `docs/features/annotator-workflow.md`.
 
 ## Quantifies each user-defined behavior
 

@@ -31,9 +31,11 @@ dependencies=[
     'packaging',
     'requests',
     'numpy<=1.26.4',
-    'torch',
-    'torchvision',
-    'torchaudio',
+    # Pinned to CUDA 11.8 wheels on Win/Linux via [tool.uv.sources] + pytorch-cu118 index.
+    # On macOS (no CUDA), the same version resolves from PyPI (CPU/MPS).
+    'torch==2.7.1',
+    'torchvision==0.22.1',
+    'torchaudio==2.7.1',
     'PyYAML',
     'tomli',
     'Pillow>=7.1',
@@ -109,4 +111,22 @@ ignore-init-module-imports=true
 [tool.uv]
 required-environments = [
     "sys_platform == 'win32' and platform_machine == 'AMD64'"
+]
+
+# Prefer PyTorch CUDA 11.8 wheels on Windows/Linux so `uv sync` does not
+# silently install CPU-only torch from PyPI (breaks Detector batch-size UI).
+[[tool.uv.index]]
+name = "pytorch-cu118"
+url = "https://download.pytorch.org/whl/cu118"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu118", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchvision = [
+    { index = "pytorch-cu118", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
+torchaudio = [
+    { index = "pytorch-cu118", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
 ]

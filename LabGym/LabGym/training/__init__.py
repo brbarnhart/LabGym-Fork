@@ -15,6 +15,12 @@ from .example_sort import (
     sort_examples_from_annotations,
     sort_examples_from_csv_subject_aware,
 )
+from .ethogram_examples import (
+    GenerationConfig,
+    collect_windows,
+    generate_examples_from_ethogram,
+    sample_windows_from_bout,
+)
 
 __all__ = [
     "LABEL_MODE_HARD_ONLY",
@@ -29,4 +35,8 @@ __all__ = [
     "parse_labgym_example_basename",
     "sort_examples_from_annotations",
     "sort_examples_from_csv_subject_aware",
+    "GenerationConfig",
+    "collect_windows",
+    "generate_examples_from_ethogram",
+    "sample_windows_from_bout",
 ]

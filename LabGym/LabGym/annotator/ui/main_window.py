@@ -142,6 +142,17 @@ class MainWindow(QMainWindow):
         act_export_labgym.triggered.connect(self.export_labgym_tables)
         tools_menu.addAction(act_export_labgym)
 
+        act_from_ethogram = QAction(
+            "Generate LabGym training pairs from ethogram…", self
+        )
+        act_from_ethogram.setToolTip(
+            "Ethogram-first: build sorted animation+pattern examples from bouts "
+            "and fixed tracklets (recommended). Re-run with a new length without "
+            "re-annotating."
+        )
+        act_from_ethogram.triggered.connect(self.generate_pairs_from_ethogram)
+        tools_menu.addAction(act_from_ethogram)
+
         act_soft = QAction("Export soft_labels.csv for examples folder…", self)
         act_soft.triggered.connect(self.export_soft_labels_for_examples)
         tools_menu.addAction(act_soft)
@@ -903,6 +914,32 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.critical(self, "Export failed", str(e))
+
+    def generate_pairs_from_ethogram(self):
+        if not self.manager or not self.video.is_loaded:
+            QMessageBox.information(
+                self,
+                "Generate pairs",
+                "Load a video, load tracklets (ID-corrected), and annotate ethograms first.",
+            )
+            return
+        if self.manager.is_empty():
+            QMessageBox.information(
+                self, "Generate pairs", "No bouts annotated yet."
+            )
+            return
+        from LabGym.annotator.ui.generate_pairs_dialog import GeneratePairsDialog
+
+        # Close open bouts so ethogram is complete
+        self.manager.close_all_open_bouts(self._current_frame)
+        self._refresh_display_overlay()
+        dlg = GeneratePairsDialog(
+            self.manager,
+            self.video.metadata.path,
+            loaded_tracklets=self._loaded_tracklets,
+            parent=self,
+        )
+        dlg.exec()
 
     def export_soft_labels_for_examples(self):
         if not self.manager:

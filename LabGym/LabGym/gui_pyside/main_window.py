@@ -34,34 +34,36 @@ WORKFLOW_STEPS = [
     ),
     (
         "2. Detect & track",
-        "Train/load a Detector and run analysis (or generate examples) so tracklets exist.",
+        "Run the detector so each subject gets an initial ID. Export id_review tracklets.",
         "legacy",
     ),
     (
-        "3. ID review",
-        "Review contact-risk identity switches in the legacy Analysis → ID review UI.",
+        "3. Fix ID swaps",
+        "Scrub contact events in ID review; apply remaps and save corrected tracklets "
+        "(frozen identities for later steps).",
         "legacy",
     ),
     (
-        "4. Annotate behaviors",
-        "Open the PySide6 Behavior Annotator for multi-subject frame-by-frame labels.",
+        "4. Annotate ethogram",
+        "Open the Behavior Annotator with the video + corrected tracklets. Label behaviors "
+        "per subject (or group/roles). Save video.annotations.json — this is durable ground truth.",
         "annotator",
     ),
     (
-        "5. Extract / sort training data",
-        "Generate LabGym examples, then sort with annotation session or subject-aware CSV "
-        "(Training → Sort Behavior Examples).",
-        "legacy",
+        "5. Generate examples FROM ethogram",
+        "In the annotator: Tools → Generate LabGym training pairs from ethogram. "
+        "Creates sorted animation+pattern pairs from bouts (change length later without re-labeling). "
+        "Legacy alternative: dense Generate Examples + sort by annotation.",
+        "annotator",
     ),
     (
         "6. Train categorizer (hard / soft)",
-        "Train with hard_only, hard_soft_aux (default), or soft_primary. Place soft_labels.csv "
-        "beside prepared examples.",
+        "Train Categorizers on the sorted folders. Optional hard_soft_aux with soft_labels.csv.",
         "legacy",
     ),
     (
         "7. Analyze videos",
-        "Run the legacy Analysis module with the trained categorizer.",
+        "Run Analysis with the trained categorizer.",
         "legacy",
     ),
 ]

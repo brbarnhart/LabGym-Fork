@@ -1,85 +1,116 @@
-# Multi-animal annotation & soft-label training
+# Ethogram-first training workflow
 
-This document describes the merged **LabGym Behavior Annotator** (PySide6) and
-how frame-by-frame labels feed categorizer training.
+This is the **recommended** path for multi-animal behavior categorizer training in
+this LabGym workspace build. Ethograms are the durable ground truth; training
+clip length and sampling can change later **without re-annotating**.
 
-## Workflow
+## Pipeline
 
-1. **Preprocess** videos (legacy wx module).
-2. **Detect & track** with a Detector so identity tracklets exist.
-3. **ID review** (legacy) to correct identity switches.
-4. **Annotate** with `LabGym-annotate` or **Tools → Behavior Annotator** /
-   `LabGym-workflow`.
-5. **Extract / sort** training examples (annotation session or subject-aware CSV).
-6. **Train** categorizer with hard / soft label modes.
-7. **Analyze** videos with the trained categorizer.
+```text
+Raw video
+  → Detect & track (LabGym detector)
+  → Fix ID swaps (ID review → save remapped tracklets)
+  → Annotate ethograms (LabGym Behavior Annotator)
+  → Save video.annotations.json  ← source of truth
+  → Generate LabGym pairs FROM ethogram + fixed tracklets
+  → Train categorizer (hard ± soft labels)
+  → Analyze new videos
+```
+
+**Not** the classic path: generate many unlabeled windows → manually sort clips.
+Sorting dense `generate_data*` output is still available as a **legacy** option.
 
 ## Launch
 
 ```bash
-# Full legacy GUI
-LabGym
-
-# Annotator only
-LabGym-annotate
-# or
-python -m LabGym.annotator
-
-# Lightweight PySide workflow shell (launches tools as needed)
-LabGym-workflow
+LabGym                 # full legacy GUI (detect, ID review, train, analyze)
+LabGym-annotate        # multi-subject ethogram annotator
+LabGym-workflow        # step checklist launcher
 ```
 
-## Multi-subject annotation
+```bash
+# CLI ethogram → training pairs
+python -m LabGym.training.ethogram_examples \
+  --annotations path/to/video.annotations.json \
+  --tracklets path/to/id_review \
+  --video path/to/video.avi \
+  --out path/to/examples \
+  --length 15 \
+  --sampling dense_in_bout
+```
 
-- Load tracklets from an `id_review` folder (**Tracks → Load Tracklets…** or
-  auto-detect next to the video).
-- Cycle subjects with **`[` / `]`**.
-- Behavior modes:
-  - **Non-interactive (0):** per-subject ethogram
-  - **Interactive basic (1):** group ethogram → `interaction_bouts.group`
-  - **Interactive advanced (2):** per-subject roles + optional **partner** IDs
+## Stage details
 
-Schema v2 JSON is written on save (v1 files auto-migrate to subject `0`).
+### 1–2. Detect & track; fix IDs
 
-## Exports
+Use LabGym analysis / detector so that `id_review/{kind}_tracklets.npz` exists
+**after** ID remaps are applied. These tracklets are the frozen identity layer
+for annotation and example generation (no re-detection required).
 
-| Export | Purpose |
-|--------|---------|
-| `frame_labels_subject{N}.csv` | Per-subject one-hot frames |
-| `frame_labels_all_subjects.csv` | Combined multi-subject table |
-| `soft_labels.csv` | Window soft targets for training |
-| `interaction_role_bouts.csv` | Mode-2 partner-aware bout table |
-| Clips `{video}_sub{id}_{behavior}_…` | Curated examples |
+### 3. Annotate ethogram
 
-## Sorting examples
+```bash
+python -m LabGym.annotator
+```
 
-In **Training → Sort Behavior Examples (from .csv)**:
+- Open the video; tracklets auto-load when found beside the video.
+- Mode **0 / 1 / 2** = non-interactive / interactive basic / interactive advanced.
+- Annotate with hotkeys; save **`video.annotations.json`**.
+- Ethogram does **not** bake in training window length.
 
-- Classic CSV sort (unchanged)
-- **Subject-aware CSV** (parses animal id + frame from filenames)
-- **Sort from annotation session** (`.annotations.json`)
+### 4. Generate examples from ethogram (Stage C)
 
-## Soft-label training
+In the annotator: **Tools → Generate LabGym training pairs from ethogram…**
 
-In **Train Categorizers → Specify label mode**:
+| Parameter | Meaning |
+|-----------|---------|
+| Window length | LabGym `time_step` (animation length) |
+| Sampling | `dense_in_bout`, `bout_end`, `bout_center`, `coverage` |
+| Stride | For dense sampling (0 = length/3) |
+| Tracklets folder | Post–ID-review directory |
 
-| Mode | Loss |
-|------|------|
-| `hard_only` | Folder hard labels only (legacy) |
-| `hard_soft_aux` **(default)** | `L_hard + λ L_soft` |
-| `soft_primary` | Soft primary + small hard term |
+**Outputs** (already sorted by behavior):
 
-Place `soft_labels.csv` in the **prepared examples** folder (or pick a path).
-If soft labels are missing, training falls back to `hard_only`.
+```text
+examples/
+  approach/
+    clip_mouse_0_123_len15.avi
+    clip_mouse_0_123_len15.jpg
+  fight/
+    ...
+  soft_labels.csv
+  generation_config.json
+```
 
-Generate soft labels from the annotator:
+Re-run with a new `--length` anytime; ethogram stays the same.
 
-**Tools → Export soft_labels.csv for examples folder…**
+### 5. Train categorizer
 
-Recommended: `λ ≈ 0.3–0.5`, exclusive ethograms for categorizer export.
+LabGym **Train Categorizers** → select the sorted folders from Stage C.
 
-## Related modules
+- Optional **hard_soft_aux** with `soft_labels.csv` next to prepared examples.
+- Then analyze with the trained model as usual.
 
-- `LabGym.annotator` — GUI + session schema
-- `LabGym.training` — soft labels, losses, example sort
-- `LabGym.gui_pyside` — workflow shell
+## Modes (behavior)
+
+| Code | Ethogram | Example geometry |
+|------|----------|------------------|
+| 0 | Per subject | Per-ID blob + pattern |
+| 1 | Group `interaction_bouts` | All animals in joint crop (`_itbs`) |
+| 2 | Per subject + partners | Main + costars (`_itadv`) |
+
+## Legacy path
+
+1. LabGym **Generate Behavior Examples** (dense sample).  
+2. **Sort from annotation session** or subject-aware CSV.  
+
+Prefer ethogram-first generation so only labeled windows become examples.
+
+## Modules
+
+| Module | Role |
+|--------|------|
+| `LabGym.annotator` | Ethogram GUI |
+| `LabGym.training.ethogram_examples` | Bout → LabGym pairs |
+| `LabGym.training.soft_labels` | Soft targets |
+| `LabGym.id_review` | Tracklets + ID fixes |
