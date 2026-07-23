@@ -274,6 +274,70 @@ class AnnotationManager:
             self.exclusive_mode = exclusive
             self.session.exclusive_mode = exclusive
 
+    def _behavior_bout_maps(self, subject_id: Optional[int] = None) -> Dict[str, List[Bout]]:
+        """All completed-bout maps for the active ethogram scope (group or subject)."""
+        if self.uses_group_ethogram() and subject_id is None:
+            return self._group_bouts_map()
+        if self.uses_group_ethogram():
+            # Group mode still writes to group ethogram by default
+            return self._group_bouts_map()
+        return self.session.bouts_for_subject(subject_id)
+
+    def _subtract_interval_from_ethogram(
+        self,
+        start: int,
+        end: int,
+        *,
+        subject_id: Optional[int] = None,
+        exclude_behavior: Optional[str] = None,
+    ) -> None:
+        """Remove [start, end] from completed bouts (exclusive overwrite).
+
+        Bouts wholly inside the interval are deleted. Bouts that straddle it are
+        split into left and/or right remnants. Used so a new exclusive annotation
+        replaces prior labels instead of failing with an overlap error.
+        """
+        if end < start:
+            start, end = end, start
+        start = max(0, int(start))
+        end = max(0, int(end))
+
+        bmap = self._behavior_bout_maps(subject_id)
+        for bname in list(bmap.keys()):
+            if exclude_behavior is not None and bname == exclude_behavior:
+                continue
+            old_list = list(bmap.get(bname, []))
+            if not old_list:
+                continue
+            new_list: List[Bout] = []
+            for bout in old_list:
+                # no overlap
+                if bout.end_frame < start or bout.start_frame > end:
+                    new_list.append(bout)
+                    continue
+                # left remnant [bout.start, start-1]
+                if bout.start_frame < start:
+                    new_list.append(
+                        Bout(
+                            bout.start_frame,
+                            start - 1,
+                            partner_ids=list(bout.partner_ids),
+                            subjects=list(bout.subjects),
+                        )
+                    )
+                # right remnant [end+1, bout.end]
+                if bout.end_frame > end:
+                    new_list.append(
+                        Bout(
+                            end + 1,
+                            bout.end_frame,
+                            partner_ids=list(bout.partner_ids),
+                            subjects=list(bout.subjects),
+                        )
+                    )
+            new_list.sort(key=lambda b: b.start_frame)
+            bmap[bname] = new_list
+
     def _close_behavior(
         self,
         name: str,
@@ -298,10 +362,17 @@ class AnnotationManager:
             partners = list(
                 self._pending_partners.get(str(subject_id), {}).pop(name, [])
             )
+        # Exclusive: new bout replaces any prior labels on this interval
+        if self.exclusive_mode:
+            self._subtract_interval_from_ethogram(
+                start, end, subject_id=bout_subject, exclude_behavior=None
+            )
+        else:
+            self._validate_no_overlap(
+                name, start, end, subject_id=bout_subject
+            )
         bout = Bout(start, end, partner_ids=partners)
-        self._validate_no_overlap(
-            name, start, end, subject_id=bout_subject
-        )
+        bouts = self._get_bouts(name, bout_subject)
         bouts.append(bout)
         bouts.sort(key=lambda b: b.start_frame)
         omap[name] = None
@@ -351,28 +422,15 @@ class AnnotationManager:
             bout = self._close_behavior(name, frame, subject_id=sid)
             return ("closed", bout)
 
+        # Starting a new bout
         if self.exclusive_mode:
-            if self.uses_group_ethogram():
-                bmap = self._group_bouts_map()
-            else:
-                bmap = self.session.bouts_for_subject(sid)
-            for other_name in list(bmap.keys()):
-                if other_name == name:
-                    continue
-                blist = bmap.get(other_name, [])
-                if not blist:
-                    continue
-                last = blist[-1]
-                if last.end_frame == frame and last.start_frame <= frame:
-                    if last.start_frame <= frame - 1:
-                        blist[-1] = Bout(
-                            last.start_frame,
-                            frame - 1,
-                            partner_ids=list(last.partner_ids),
-                            subjects=list(last.subjects),
-                        )
-                    else:
-                        blist.pop()
+            # Clear any completed label at this frame (all behaviors) so a
+            # re-annotation immediately overwrites prior ethogram labels.
+            # Full interval carve happens on close for [start, end].
+            bout_subject = None if self.uses_group_ethogram() else sid
+            self._subtract_interval_from_ethogram(
+                frame, frame, subject_id=bout_subject, exclude_behavior=None
+            )
 
         omap[name] = frame
         self._pending_partners.setdefault(sk, {})[name] = list(partner_ids or [])

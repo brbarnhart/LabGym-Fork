@@ -170,8 +170,22 @@ class MainWindow(QMainWindow):
         self.act_show_tracks = QAction("Show track &overlays", self)
         self.act_show_tracks.setCheckable(True)
         self.act_show_tracks.setChecked(True)
+        self.act_show_tracks.setToolTip(
+            "Master switch for identity dots and (optionally) outlines"
+        )
         self.act_show_tracks.toggled.connect(self._on_show_tracks_toggled)
         tracks_menu.addAction(self.act_show_tracks)
+
+        self.act_show_outlines = QAction("Show animal &outlines", self)
+        self.act_show_outlines.setCheckable(True)
+        self.act_show_outlines.setChecked(True)
+        self.act_show_outlines.setShortcut(QKeySequence("O"))
+        self.act_show_outlines.setToolTip(
+            "Toggle contour polygons only. Identity dots and ID numbers stay visible "
+            "when track overlays are on. Shortcut: O"
+        )
+        self.act_show_outlines.toggled.connect(self._on_show_outlines_toggled)
+        tracks_menu.addAction(self.act_show_outlines)
 
         # Central: video + subjects/palette on right
         center_layout = QHBoxLayout()
@@ -411,7 +425,14 @@ class MainWindow(QMainWindow):
     def _on_show_tracks_toggled(self, checked: bool):
         self._show_track_overlays = bool(checked)
         self.video_widget.set_show_tracks(checked)
+        # Outlines option only applies when overlays are enabled
+        if hasattr(self, "act_show_outlines"):
+            self.act_show_outlines.setEnabled(bool(checked))
         self._refresh_display_overlay()
+
+    def _on_show_outlines_toggled(self, checked: bool):
+        self.video_widget.set_show_outlines(checked)
+        self.video_widget.update()
 
     def load_tracklets_dialog(self):
         if not self.manager:

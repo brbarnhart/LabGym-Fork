@@ -40,9 +40,11 @@ class BehaviorPalette(QWidget):
         # Mode toggle (multi vs exclusive)
         self.mode_checkbox = QCheckBox("Exclusive mode (only one active at a time)")
         self.mode_checkbox.setToolTip(
-            "Exclusive: toggling one behavior automatically ends any other.\n"
-            "Pressing the hotkey of the current behavior turns it off.\n"
-            "Multi (unchecked): behaviors are independent."
+            "Exclusive: only one behavior at a time.\n"
+            "Starting a new bout overwrites any existing labels on those frames "
+            "(splits/removes prior bouts) — useful for revising annotations.\n"
+            "Pressing the active behavior's hotkey ends it.\n"
+            "Multi (unchecked): behaviors are independent; no overwrite."
         )
         self.mode_checkbox.toggled.connect(self._on_mode_toggled)
         layout.addWidget(self.mode_checkbox)

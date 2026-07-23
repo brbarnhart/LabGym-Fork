@@ -42,7 +42,8 @@ class VideoDisplayWidget(QLabel):
         # Track overlays (image coords)
         self._track_overlays: List = []
         self._active_subject_id: Optional[int] = None
-        self._show_tracks: bool = True
+        self._show_tracks: bool = True  # master: any track overlay
+        self._show_outlines: bool = True  # contours; identity dots stay if tracks on
 
     def set_behavior_colors(self, mapping: dict) -> None:
         self._behavior_colors = dict(mapping)
@@ -57,6 +58,11 @@ class VideoDisplayWidget(QLabel):
 
     def set_show_tracks(self, show: bool) -> None:
         self._show_tracks = bool(show)
+        self.update()
+
+    def set_show_outlines(self, show: bool) -> None:
+        """Show/hide animal contour polygons; centers + ID labels still draw."""
+        self._show_outlines = bool(show)
         self.update()
 
     def show_frame(
@@ -236,7 +242,11 @@ class VideoDisplayWidget(QLabel):
             painter.setBrush(Qt.BrushStyle.NoBrush)
 
             contour = getattr(ov, "contour", None)
-            if contour is not None and getattr(ov, "valid", True):
+            if (
+                self._show_outlines
+                and contour is not None
+                and getattr(ov, "valid", True)
+            ):
                 arr = np.asarray(contour).reshape(-1, 2)
                 if arr.shape[0] >= 2:
                     poly = QPolygonF(

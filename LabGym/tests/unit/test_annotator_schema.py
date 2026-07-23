@@ -115,6 +115,54 @@ def test_exclusive_mode_switches_close_previous():
     assert a_bouts[0].end_frame == 9
 
 
+def test_exclusive_mode_overwrites_existing_on_revise():
+    """New exclusive bout replaces prior labels on the same interval."""
+    sess = AnnotationSession(
+        video_path="x.avi",
+        fps=30.0,
+        total_frames=100,
+        behaviors=[Behavior("grooming"), Behavior("rearing")],
+        exclusive_mode=True,
+    )
+    mgr = AnnotationManager(sess)
+    mgr.set_exclusive_mode(True)
+    mgr.add_bout("grooming", 10, 50)
+    # Re-annotate frames 20-30 as rearing
+    mgr.toggle_bout("rearing", 20)
+    # Start clears frame 20 from grooming
+    groom = mgr.get_bouts_for_behavior("grooming")
+    assert all(not b.contains(20) for b in groom)
+    mgr.toggle_bout("rearing", 30)
+    rear = mgr.get_bouts_for_behavior("rearing")
+    assert len(rear) == 1
+    assert rear[0].start_frame == 20 and rear[0].end_frame == 30
+    groom = mgr.get_bouts_for_behavior("grooming")
+    # Left remnant [10,19] and right remnant [31,50]
+    assert len(groom) == 2
+    assert groom[0].start_frame == 10 and groom[0].end_frame == 19
+    assert groom[1].start_frame == 31 and groom[1].end_frame == 50
+
+
+def test_exclusive_mode_overwrites_same_behavior():
+    sess = AnnotationSession(
+        video_path="x.avi",
+        fps=30.0,
+        total_frames=100,
+        behaviors=[Behavior("grooming")],
+        exclusive_mode=True,
+    )
+    mgr = AnnotationManager(sess)
+    mgr.set_exclusive_mode(True)
+    mgr.add_bout("grooming", 0, 40)
+    mgr.toggle_bout("grooming", 10)
+    mgr.toggle_bout("grooming", 20)
+    bouts = mgr.get_bouts_for_behavior("grooming")
+    # [0,9] remnant + [10,20] new (start cleared frame 10 then full carve on close)
+    assert any(b.start_frame == 10 and b.end_frame == 20 for b in bouts)
+    assert any(b.start_frame == 0 and b.end_frame == 9 for b in bouts)
+    assert any(b.start_frame == 21 and b.end_frame == 40 for b in bouts)
+
+
 def test_per_subject_independence():
     sess = AnnotationSession(
         video_path="x.avi",
