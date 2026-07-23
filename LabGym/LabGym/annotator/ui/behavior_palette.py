@@ -11,7 +11,7 @@ from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QPushButton, QColorDialog, QInputDialog, QLineEdit, QLabel, QCheckBox
+    QPushButton, QInputDialog, QLabel, QCheckBox
 )
 
 from LabGym.annotator.core.annotation_manager import AnnotationManager
@@ -51,18 +51,18 @@ class BehaviorPalette(QWidget):
 
         # Buttons
         btn_row = QHBoxLayout()
+        self.btn_edit = QPushButton("Edit…")
+        self.btn_edit.setToolTip(
+            "Open a table to edit names, hotkeys, colors, and order of all behaviors"
+        )
+        self.btn_edit.clicked.connect(self.open_edit_dialog)
         self.btn_add = QPushButton("+ Add")
         self.btn_add.clicked.connect(self.add_behavior)
         self.btn_del = QPushButton("− Delete")
         self.btn_del.clicked.connect(self.delete_selected)
-        self.btn_color = QPushButton("Color")
-        self.btn_color.clicked.connect(self.change_color)
-        self.btn_hotkey = QPushButton("Hotkey")
-        self.btn_hotkey.clicked.connect(self.assign_hotkey)
+        btn_row.addWidget(self.btn_edit)
         btn_row.addWidget(self.btn_add)
         btn_row.addWidget(self.btn_del)
-        btn_row.addWidget(self.btn_color)
-        btn_row.addWidget(self.btn_hotkey)
         layout.addLayout(btn_row)
 
         # Template save/load (reusable behavior sets with hotkeys + colors)
@@ -119,6 +119,22 @@ class BehaviorPalette(QWidget):
 
     # --- Actions ---
 
+    def open_edit_dialog(self):
+        """Table editor for names, hotkeys, colors, and reorder."""
+        from LabGym.annotator.ui.behavior_edit_dialog import BehaviorEditDialog
+
+        dlg = BehaviorEditDialog(self.manager, self)
+        if dlg.exec():
+            # Selection may have been renamed
+            if self._selected_name and self.manager.session.get_behavior(
+                self._selected_name
+            ) is None:
+                self._selected_name = None
+                if self.manager.session.behaviors:
+                    self._selected_name = self.manager.session.behaviors[0].name
+            self.refresh()
+            self.behaviors_changed.emit()
+
     def add_behavior(self):
         name, ok = QInputDialog.getText(self, "Add Behavior", "Behavior name:")
         if not ok or not name.strip():
@@ -142,29 +158,6 @@ class BehaviorPalette(QWidget):
             return
         self.manager.remove_behavior(name)
         self._selected_name = None
-        self.refresh()
-        self.behaviors_changed.emit()
-
-    def change_color(self):
-        name = self.selected_behavior()
-        if not name:
-            return
-        current = self.manager.session.get_behavior(name).color if self.manager.session.get_behavior(name) else "#FF5555"
-        color = QColorDialog.getColor(QColor(current), self, "Pick color for " + name)
-        if color.isValid():
-            self.manager.set_color(name, color.name())
-            self.refresh()
-            self.behaviors_changed.emit()
-
-    def assign_hotkey(self):
-        name = self.selected_behavior()
-        if not name:
-            return
-        hk, ok = QInputDialog.getText(self, "Hotkey", f"Hotkey for '{name}' (single char or empty):")
-        if not ok:
-            return
-        hk = hk.strip()[:1] or None
-        self.manager.set_hotkey(name, hk)
         self.refresh()
         self.behaviors_changed.emit()
 

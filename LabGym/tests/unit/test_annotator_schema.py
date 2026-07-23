@@ -183,6 +183,35 @@ def test_per_subject_independence():
     assert len(mgr.get_bouts_for_behavior("grooming", subject_id=1)) == 1
 
 
+def test_apply_behavior_table_rename_reorder():
+    sess = AnnotationSession(
+        video_path="x.avi",
+        fps=30.0,
+        total_frames=50,
+        behaviors=[
+            Behavior("grooming", "#00AAFF", "1"),
+            Behavior("rearing", "#FFAA00", "2"),
+        ],
+    )
+    mgr = AnnotationManager(sess)
+    mgr.add_bout("grooming", 1, 5)
+    # Rename grooming→clean, swap order, change colors/hotkeys
+    mgr.apply_behavior_table(
+        [
+            (None, "sniff", "#112233", "3"),  # new first
+            ("rearing", "rear", "#AABBCC", "r"),
+            ("grooming", "clean", "#00FF00", "g"),
+        ]
+    )
+    names = [b.name for b in mgr.session.behaviors]
+    assert names == ["sniff", "rear", "clean"]
+    assert mgr.session.get_behavior("clean").hotkey == "g"
+    assert mgr.session.get_behavior("clean").color == "#00FF00"
+    # Bouts followed rename
+    assert len(mgr.get_bouts_for_behavior("clean")) == 1
+    assert mgr.get_bouts_for_behavior("grooming") == []
+
+
 def test_undo_restores_bouts():
     sess = AnnotationSession(
         video_path="x.avi",
@@ -212,3 +241,46 @@ def test_annotated_at_frame_active_subject():
     assert "grooming" in mgr.get_annotated_behaviors_at_frame(15)
     mgr.set_active_subject(1)
     assert mgr.get_annotated_behaviors_at_frame(15) == []
+
+
+def test_update_bouts_partners_bulk_and_undo():
+    sess = AnnotationSession(
+        video_path="x.avi",
+        fps=30.0,
+        total_frames=200,
+        behaviors=[Behavior("approach"), Behavior("retreat")],
+        subjects=[
+            Subject(0, display_name="m0"),
+            Subject(1, display_name="m1"),
+            Subject(2, display_name="m2"),
+        ],
+        active_subject_id=0,
+    )
+    mgr = AnnotationManager(sess)
+    mgr.add_bout("approach", 10, 20, subject_id=0)
+    mgr.add_bout("approach", 30, 40, subject_id=0)
+    mgr.add_bout("retreat", 50, 60, subject_id=0)
+
+    n = mgr.update_bouts_partners(
+        [("approach", 0), ("approach", 1), ("retreat", 0)],
+        partner_ids=[1, 2],
+    )
+    assert n == 3
+    for b in mgr.get_bouts_for_behavior("approach"):
+        assert b.partner_ids == [1, 2]
+    assert mgr.get_bouts_for_behavior("retreat")[0].partner_ids == [1, 2]
+
+    # No-op when partners already match
+    assert mgr.update_bouts_partners([("approach", 0)], [1, 2]) == 0
+
+    # Clear partners in one undoable step
+    n = mgr.update_bouts_partners(
+        [("approach", 0), ("approach", 1)], partner_ids=[]
+    )
+    assert n == 2
+    assert mgr.get_bouts_for_behavior("approach")[0].partner_ids == []
+    assert mgr.get_bouts_for_behavior("approach")[1].partner_ids == []
+    assert mgr.get_bouts_for_behavior("retreat")[0].partner_ids == [1, 2]
+
+    mgr.undo()
+    assert mgr.get_bouts_for_behavior("approach")[0].partner_ids == [1, 2]

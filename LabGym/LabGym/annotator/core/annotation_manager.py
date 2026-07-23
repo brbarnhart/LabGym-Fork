@@ -112,6 +112,81 @@ class AnnotationManager:
     def set_hotkey(self, name: str, hotkey: Optional[str]) -> None:
         self.session.set_behavior_hotkey(name, hotkey)
 
+    def apply_behavior_table(
+        self,
+        rows: List[Tuple[Optional[str], str, str, Optional[str]]],
+    ) -> None:
+        """Apply a full behavior definition table (edit dialog).
+
+        Each row is ``(original_name_or_None, new_name, color_hex, hotkey_or_None)``.
+        Row order becomes the session behavior order. Renames preserve bouts.
+        ``original_name`` is None for newly added behaviors.
+        """
+        if not rows:
+            raise ValueError("At least one behavior is required")
+
+        new_names = [r[1].strip() for r in rows]
+        if any(not n for n in new_names):
+            raise ValueError("Behavior names cannot be empty")
+        if len(new_names) != len(set(new_names)):
+            raise ValueError("Behavior names must be unique")
+
+        # Normalize rows
+        norm: List[Tuple[Optional[str], str, str, Optional[str]]] = []
+        for orig, name, color, hk in rows:
+            name = name.strip()
+            color = (color or "#FF5555").strip()
+            if not color.startswith("#"):
+                color = "#" + color
+            hk_n = (hk.strip()[:1] if hk and str(hk).strip() else None)
+            orig_n = orig.strip() if orig and str(orig).strip() else None
+            norm.append((orig_n, name, color, hk_n))
+
+        self._snapshot("Edit behaviors table")
+
+        kept_origs = {o for o, _, _, _ in norm if o}
+        for b in list(self.session.behaviors):
+            if b.name not in kept_origs:
+                self.session.remove_behavior(b.name)
+                for omap in self._active_starts.values():
+                    omap.pop(b.name, None)
+
+        # Temp-rename to avoid collisions (e.g. A→B and B→A)
+        for i, (orig, _new, _c, _h) in enumerate(norm):
+            if orig and self.session.get_behavior(orig) is not None:
+                tmp = f"__tmp_beh_{i}__"
+                self.session.rename_behavior(orig, tmp)
+                for omap in self._active_starts.values():
+                    if orig in omap:
+                        omap[tmp] = omap.pop(orig)
+
+        for i, (orig, new, color, hk) in enumerate(norm):
+            if orig:
+                tmp = f"__tmp_beh_{i}__"
+                if self.session.get_behavior(tmp) is not None:
+                    self.session.rename_behavior(tmp, new)
+                    for omap in self._active_starts.values():
+                        if tmp in omap:
+                            omap[new] = omap.pop(tmp)
+                elif self.session.get_behavior(new) is None:
+                    self.session.add_behavior(Behavior(name=new, color=color, hotkey=hk))
+            else:
+                if self.session.get_behavior(new) is None:
+                    self.session.add_behavior(Behavior(name=new, color=color, hotkey=hk))
+            self.session.set_behavior_color(new, color)
+            self.session.set_behavior_hotkey(new, hk)
+
+        by_name = {b.name: b for b in self.session.behaviors}
+        self.session.behaviors = [by_name[n] for _, n, _, _ in norm]
+        self.session._ensure_bout_maps()
+
+        # Drop active starts for names that no longer exist
+        valid = {b.name for b in self.session.behaviors}
+        for sk in list(self._active_starts.keys()):
+            self._active_starts[sk] = {
+                k: v for k, v in self._active_starts[sk].items() if k in valid
+            }
+
     # --- Bout logic (active subject / group for interactive basic) ---
 
     def uses_group_ethogram(self) -> bool:
@@ -267,6 +342,81 @@ class AnnotationManager:
             if b.start_frame == start_frame and b.end_frame == end_frame:
                 return b
         return Bout(start_frame, end_frame)
+
+    def update_bout_partners(
+        self,
+        name: str,
+        index: int,
+        partner_ids: Optional[List[int]] = None,
+        subject_id: Optional[int] = None,
+    ) -> Bout:
+        """Set partner_ids on a single bout (mode-2 interaction costars)."""
+        blist = self._get_bouts(name, subject_id)
+        if not (0 <= index < len(blist)):
+            raise IndexError(f"Bout index {index} out of range for '{name}'")
+        old = blist[index]
+        new_partners = [int(x) for x in (partner_ids or [])]
+        if list(old.partner_ids) == new_partners:
+            return old
+        self._snapshot(
+            f"Set partners on {name} [{old.start_frame}-{old.end_frame}] → {new_partners}"
+        )
+        blist[index] = Bout(
+            old.start_frame,
+            old.end_frame,
+            partner_ids=new_partners,
+            subjects=list(old.subjects),
+        )
+        return blist[index]
+
+    def update_bouts_partners(
+        self,
+        refs: List[Tuple[str, int]],
+        partner_ids: Optional[List[int]] = None,
+        subject_id: Optional[int] = None,
+    ) -> int:
+        """Set the same partner_ids on many bouts in one undo step.
+
+        ``refs`` is a list of ``(behavior_name, bout_index)`` for the active
+        (or given) subject ethogram. Returns how many bouts actually changed.
+        """
+        if not refs:
+            return 0
+        new_partners = [int(x) for x in (partner_ids or [])]
+        # Deduplicate while preserving first occurrence; apply high→low index
+        # per behavior so indices stay valid if callers ever mix ops.
+        unique: List[Tuple[str, int]] = []
+        seen = set()
+        for name, index in refs:
+            key = (str(name), int(index))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(key)
+        unique.sort(key=lambda t: (t[0], -t[1]))
+
+        to_apply: List[Tuple[str, int]] = []
+        for name, index in unique:
+            blist = self._get_bouts(name, subject_id)
+            if not (0 <= index < len(blist)):
+                raise IndexError(f"Bout index {index} out of range for '{name}'")
+            if list(blist[index].partner_ids) != new_partners:
+                to_apply.append((name, index))
+        if not to_apply:
+            return 0
+
+        self._snapshot(
+            f"Set partners on {len(to_apply)} bout(s) → {new_partners}"
+        )
+        for name, index in to_apply:
+            old = self._get_bouts(name, subject_id)[index]
+            self._get_bouts(name, subject_id)[index] = Bout(
+                old.start_frame,
+                old.end_frame,
+                partner_ids=list(new_partners),
+                subjects=list(old.subjects),
+            )
+        return len(to_apply)
 
     def set_exclusive_mode(self, exclusive: bool) -> None:
         if self.exclusive_mode != exclusive:

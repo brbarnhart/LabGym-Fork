@@ -758,8 +758,8 @@ class MainWindow(QMainWindow):
             return
 
         dlg = QDialog(self)
-        dlg.setWindowTitle("Bout List - Edit Type / Filter / Delete / Jump")
-        dlg.resize(720, 420)
+        dlg.setWindowTitle("Bout List - Edit / Filter / Partners / Delete / Jump")
+        dlg.resize(860, 460)
         dlg.setModal(False)
         dlg.setWindowModality(Qt.WindowModality.NonModal)
         # Stay on top of the main window as a tool panel, but do not block it
