@@ -133,7 +133,14 @@ def load_tracklets_for_annotator(
     With multiple kinds, subjects get sequential unique ids while still storing
     the original track id in ``subject_to_track``.
     """
-    from LabGym.id_review.tracklets import load_tracklets
+    from LabGym.id_review.tracklets import load_tracklets, save_tracklets
+    from LabGym.id_review.apply import (
+        apply_decisions_to_store,
+        load_decisions,
+        read_tracklets_identity_status,
+        write_tracklets_identity_status,
+    )
+    from LabGym.id_review.dataset import load_switches, switches_to_decisions
 
     directory = Path(directory)
     if not directory.is_dir():
@@ -148,6 +155,33 @@ def load_tracklets_for_annotator(
     stores = {}
     for kind in kinds:
         stores[kind] = load_tracklets(str(directory), kind)
+
+    # Ensure ID remaps from review are reflected in geometry.
+    # New analysis runs re-save corrected npz; older packs only had switches on disk.
+    status = read_tracklets_identity_status(str(directory))
+    if not status.get("corrected"):
+        markers = load_switches(str(directory))
+        if markers:
+            decisions = switches_to_decisions(markers)
+        else:
+            decisions = load_decisions(
+                str(directory / "decisions.jsonl")
+            )
+        if decisions:
+            n_total = 0
+            for kind, store in stores.items():
+                n_total += apply_decisions_to_store(store, decisions, animal_kind=kind)
+                try:
+                    save_tracklets(store, str(directory))
+                except Exception:
+                    pass
+            if n_total > 0:
+                write_tracklets_identity_status(
+                    str(directory),
+                    corrected=True,
+                    n_decisions=n_total,
+                    source="annotator_lazy_apply",
+                )
 
     # Infer start frame from first store meta if not provided
     first = stores[kinds[0]]

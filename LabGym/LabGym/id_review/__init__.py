@@ -41,7 +41,10 @@ from .tracklets import (
 from .apply import (
 	apply_decision_to_analyzer,
 	apply_decisions_to_analyzer,
+	apply_decisions_to_store,
 	load_decisions,
+	write_tracklets_identity_status,
+	read_tracklets_identity_status,
 )
 from .dataset import (
 	export_review_pack,
@@ -72,7 +75,10 @@ __all__ = [
 	'apply_mapping_to_store',
 	'apply_decision_to_analyzer',
 	'apply_decisions_to_analyzer',
+	'apply_decisions_to_store',
 	'load_decisions',
+	'write_tracklets_identity_status',
+	'read_tracklets_identity_status',
 	'export_review_pack',
 	'append_decision',
 	'write_pair_label',

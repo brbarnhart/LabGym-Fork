@@ -463,4 +463,110 @@ def run_id_review_pipeline(
 	if applied:
 		write_applied_corrections(out_dir, applied)
 
+	# Re-export tracklets AFTER remaps so annotator / ethogram tools load corrected IDs.
+	# Previously only in-memory analyzer state was remapped; disk npz stayed uncorrected.
+	try:
+		_resave_tracklets_after_id_review(
+			analyzer,
+			out_dir,
+			all_decisions,
+			kind_lookup=kind_lookup,
+			applied=applied,
+		)
+	except Exception as exc:
+		print(
+			f'ID review: WARNING — failed to re-save corrected tracklets: {exc}',
+			flush=True,
+		)
+
 	return out_dir, events, all_decisions
+
+
+def _resave_tracklets_after_id_review(
+	analyzer,
+	out_dir: str,
+	all_decisions: Sequence[ReviewDecision],
+	*,
+	kind_lookup: Optional[Dict[str, str]] = None,
+	applied: Optional[Sequence[ReviewDecision]] = None,
+) -> None:
+	'''
+	Write remapped tracklets to id_review so Behavior Annotator sees fixed IDs.
+
+	Primary path: rebuild stores from the (already remapped) analyzer.
+	Fallback: load disk stores and apply decisions via apply_mapping_to_store.
+	'''
+	from .apply import (
+		apply_decisions_to_store,
+		write_tracklets_identity_status,
+	)
+	from .tracklets import (
+		tracklets_from_analyzer_all,
+		save_tracklets,
+		load_tracklets,
+	)
+
+	applied = list(applied or [])
+	n_applied = len(applied)
+
+	# Preferred: analyzer already has remapped per-frame series
+	try:
+		stores = tracklets_from_analyzer_all(analyzer)
+		if stores:
+			for kind, store in stores.items():
+				save_tracklets(store, out_dir)
+				print(
+					f'ID review: re-saved corrected tracklets for {kind} '
+					f'({len(store.ids)} ids, {store.n_frames} frames, '
+					f'{n_applied} remap decision(s) applied in analyzer)',
+					flush=True,
+				)
+			write_tracklets_identity_status(
+				out_dir,
+				corrected=True,
+				n_decisions=n_applied,
+				source='analyzer_after_remap',
+			)
+			return
+	except Exception as exc:
+		print(
+			f'ID review: analyzer rebuild failed ({exc}); '
+			'falling back to on-disk remap…',
+			flush=True,
+		)
+
+	# Fallback: remap existing npz files
+	# Discover kinds from directory
+	kinds = []
+	for name in os.listdir(out_dir):
+		if name.endswith('_tracklets_meta.json'):
+			kinds.append(name[: -len('_tracklets_meta.json')])
+	if not kinds and getattr(analyzer, 'animal_kinds', None):
+		kinds = list(analyzer.animal_kinds)
+
+	# Group decisions by kind when possible
+	for kind in kinds:
+		try:
+			store = load_tracklets(out_dir, kind)
+		except Exception:
+			continue
+		# Prefer decisions that match this kind via lookup; else try all
+		kind_decs = []
+		for d in all_decisions:
+			k = (kind_lookup or {}).get(d.event_id)
+			if k is None or k == kind:
+				kind_decs.append(d)
+		n = apply_decisions_to_store(store, kind_decs, animal_kind=kind)
+		save_tracklets(store, out_dir)
+		print(
+			f'ID review: re-saved disk-remapped tracklets for {kind} '
+			f'({n} decision(s) applied to store)',
+			flush=True,
+		)
+
+	write_tracklets_identity_status(
+		out_dir,
+		corrected=True,
+		n_decisions=n_applied,
+		source='disk_remap_fallback',
+	)

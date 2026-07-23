@@ -160,3 +160,73 @@ def write_applied_corrections(directory: str, decisions: Sequence[ReviewDecision
 	with open(path, 'w', encoding='utf-8') as f:
 		json.dump(payload, f, indent=2)
 	return path
+
+
+def apply_decisions_to_store(
+	store,
+	decisions: Sequence[ReviewDecision],
+	animal_kind: Optional[str] = None,
+) -> int:
+	'''
+	Apply remap decisions to a TrackletStore (in place).
+
+	Returns number of decisions applied that remapped this store's kind.
+	'''
+	from .tracklets import apply_mapping_to_store
+
+	ordered = sorted(decisions, key=lambda d: (d.remap_from_frame, d.event_id))
+	n = 0
+	for d in ordered:
+		if not d.applies_remap:
+			continue
+		# Skip if decision is tagged for a different kind (when known)
+		# ReviewDecision has no animal_kind field; filter via event_id only at caller.
+		mapping = {int(k): int(v) for k, v in d.mapping.items()}
+		if not mapping:
+			continue
+		# Only apply if involved ids exist in this store
+		if not any(int(i) in store.ids for i in mapping.keys()):
+			continue
+		try:
+			apply_mapping_to_store(store, mapping, int(d.remap_from_frame))
+			n += 1
+		except ValueError:
+			# Non-permutation or missing ids — skip this decision
+			continue
+	return n
+
+
+def write_tracklets_identity_status(
+	directory: str,
+	*,
+	corrected: bool,
+	n_decisions: int = 0,
+	source: str = '',
+) -> str:
+	'''Mark whether on-disk tracklets already include ID remaps.'''
+	os.makedirs(directory, exist_ok=True)
+	path = os.path.join(directory, 'tracklets_identity_status.json')
+	payload = {
+		'corrected': bool(corrected),
+		'n_decisions': int(n_decisions),
+		'source': source,
+	}
+	with open(path, 'w', encoding='utf-8') as f:
+		json.dump(payload, f, indent=2)
+	return path
+
+
+def read_tracklets_identity_status(directory: str) -> Dict[str, Any]:
+	path = os.path.join(directory, 'tracklets_identity_status.json')
+	if not os.path.isfile(path):
+		return {'corrected': False, 'n_decisions': 0, 'source': ''}
+	try:
+		with open(path, 'r', encoding='utf-8') as f:
+			d = json.load(f)
+		return {
+			'corrected': bool(d.get('corrected', False)),
+			'n_decisions': int(d.get('n_decisions') or 0),
+			'source': str(d.get('source') or ''),
+		}
+	except Exception:
+		return {'corrected': False, 'n_decisions': 0, 'source': ''}
