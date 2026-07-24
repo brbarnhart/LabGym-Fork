@@ -140,6 +140,10 @@ class WorkbenchMainWindow(QMainWindow):
         act_review.triggered.connect(self._goto_review_ids)
         project_menu.addAction(act_review)
 
+        act_process = QAction("Go to &Process videos", self)
+        act_process.triggered.connect(self._goto_process_videos)
+        project_menu.addAction(act_process)
+
         tools_menu = menubar.addMenu("&Tools")
         act_legacy = QAction("Open LabGym (legacy wx)…", self)
         act_legacy.triggered.connect(self._launch_legacy)
@@ -294,6 +298,9 @@ class WorkbenchMainWindow(QMainWindow):
     def _goto_review_ids(self) -> None:
         self.goto("detector", "review_ids")
 
+    def _goto_process_videos(self) -> None:
+        self.goto("categorizer", "process")
+
     def _rebuild_recent_menu(self) -> None:
         self.recent_menu.clear()
         paths = self.project.recent_paths()
@@ -333,10 +340,10 @@ class WorkbenchMainWindow(QMainWindow):
             "Ethogram-first workflow:\n"
             "Detect → Review IDs → Annotate ethogram → Generate pairs → "
             "Train → Process\n\n"
-            "Phases 2–6 live: Generate training data, Review IDs,\n"
-            "Detect + track, Preprocess / Draw markers,\n"
-            "Train/Test detector & categorizer.\n"
-            "Phase 7 (Process videos) still pending.\n"
+            "Workbench shell (Phases 2–7):\n"
+            "Preprocess, Detect + track, Review IDs,\n"
+            "Annotate / Generate, Train/Test models,\n"
+            "Process videos with categorizer.\n"
             "See specifications.md and implementation-plan.md.",
         )
 

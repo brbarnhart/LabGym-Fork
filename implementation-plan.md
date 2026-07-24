@@ -248,14 +248,14 @@ Phases are ordered for **daily-usable ethogram-first path first**, then fill the
 
 ---
 
-### Phase 7 — Process videos (categorizer batch)
+### Phase 7 — Process videos (categorizer batch) ✅
 
-| Work | Detail |
-|------|--------|
-| Inputs | Project videos + identity package (+ categorizer) |
-| Backend | Headless path from `analyzebehavior*` categorizer-on-tracks pipeline |
-| Outputs | Behavior time series / LabGym analysis products under project output root |
-| Queue | Sequential per video |
+| Work | Detail | Status |
+|------|--------|--------|
+| Inputs | Project videos + detector + categorizer; optional id_review remaps | Done |
+| Backend | `LabGym.analysis.process_videos.process_video` | Done |
+| Outputs | LabGym analysis folder + annotated video + `process_video_job.json` | Done |
+| Queue | Sequential job queue in Process videos tab | Done |
 
 **Acceptance:** end-to-end without wx: detect → review → (optional annotate/train) → process.
 

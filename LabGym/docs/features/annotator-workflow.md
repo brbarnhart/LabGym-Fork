@@ -38,7 +38,7 @@ FreeCAD-style **workbenches** (top bar) with **tabs** per subtask. See repo-root
 |-----------|------|
 | **Preprocess** | **Preprocess videos** + **Draw markers** |
 | **Detector** | Detect + track, Review IDs, **Train/Test detector** |
-| **Categorizer** | Generate training data, **Train/Test categorizer**; Process videos still Phase 7 |
+| **Categorizer** | Generate training data, Train/Test categorizer, **Process videos** |
 | **Results** | Coming soon placeholder |
 
 **Projects** (`*.labproj.json`): root folder + explicit video list + defaults.
