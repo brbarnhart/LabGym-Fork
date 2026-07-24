@@ -218,13 +218,23 @@ def load_tracklets_for_annotator(
             )
             subject_to_track[sid] = (str(kind), int(track_id))
 
-    return LoadedTracklets(
+    loaded = LoadedTracklets(
         directory=str(directory.resolve()),
         stores=stores,
         analysis_start_frame=int(analysis_start_frame),
         subjects=subjects,
         subject_to_track=subject_to_track,
     )
+    # Merge experimental names/roles/colors from subjects.json when present
+    try:
+        from LabGym.identity.package import load_subjects, merge_subjects_into_loaded
+
+        recs = load_subjects(directory)
+        if recs:
+            merge_subjects_into_loaded(loaded, recs)
+    except Exception:
+        pass
+    return loaded
 
 
 def video_to_analysis_frame(video_frame: int, analysis_start_frame: int) -> int:

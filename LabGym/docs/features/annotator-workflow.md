@@ -29,20 +29,24 @@ LabGym-workflow        # PySide6 ethogram-first shell (recommended)
 python -m LabGym.gui_pyside
 ```
 
-### LabGym-workflow (PySide6 shell)
+### LabGym-workflow (PySide6 workbench shell)
 
-Tabbed UI for the ethogram-first path:
+FreeCAD-style **workbenches** (top bar) with **tabs** per subtask. See repo-root
+`specifications.md` and `implementation-plan.md`.
 
-| Tab | Role |
-|-----|------|
-| **Overview** | Pipeline checklist; jump to each step |
-| **Project** | Video, tracklets (`id_review`), annotations JSON, mode, generate defaults |
-| **Annotate** | Embedded Behavior Annotator (or detach to a separate window) |
-| **Generate** | Ethogram → sorted LabGym training pairs (Stage C) |
-| **Detect / ID / Train / Analyze** | Opens legacy wx LabGym until those steps are ported |
+| Workbench | Role |
+|-----------|------|
+| **Preprocess** | **Preprocess videos** + **Draw markers** |
+| **Detector** | Detect + track, Review IDs, **Train/Test detector** |
+| **Categorizer** | Generate training data, **Train/Test categorizer**; Process videos still Phase 7 |
+| **Results** | Coming soon placeholder |
 
-Set paths on **Project**, then **Apply to Annotate** / **Load project into annotator**.
-Settings persist via Qt `QSettings` (`LabGym` / `workflow`).
+**Projects** (`*.labproj.json`): root folder + explicit video list + defaults.
+File → New/Open/Save; Project → Edit Project.
+
+**Annotate / Generate:** pick a project video, load tracklets from `id_review` (or
+per-video `detection_dir`), save `*.annotations.json`, then generate sorted pairs.
+Temporary **legacy wx** remains on unported tabs only.
 
 ```bash
 # CLI ethogram → training pairs

@@ -58,7 +58,7 @@ This workspace includes an integrated **PySide6 Behavior Annotator** and **ethog
 
 ```bash
 LabGym-annotate          # standalone multi-subject ethogram annotation
-LabGym-workflow          # PySide6 ethogram-first shell (Project / Annotate / Generate)
+LabGym-workflow          # PySide6 workbench shell (projects + workbenches)
 ```
 
 **Recommended training path:** detect → fix IDs → annotate ethogram →  

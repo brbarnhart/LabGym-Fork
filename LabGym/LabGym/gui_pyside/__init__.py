@@ -1,4 +1,4 @@
-"""PySide6 ethogram-first workflow shell (incremental GUI migration).
+"""PySide6 ethogram-first workbench shell.
 
 Launch:
   LabGym-workflow

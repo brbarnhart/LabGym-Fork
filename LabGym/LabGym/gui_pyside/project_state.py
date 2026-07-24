@@ -1,4 +1,8 @@
-"""Shared project settings for the ethogram-first PySide workflow shell."""
+"""Legacy flat-shell project settings (pre–Phase 1 workbench).
+
+Prefer ``LabGym.gui_pyside.project`` (``*.labproj.json`` + ProjectController).
+This module remains for older ``tabs/*`` helpers until Phase 2 rewires them.
+"""
 
 from __future__ import annotations
 

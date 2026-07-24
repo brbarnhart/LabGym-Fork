@@ -81,6 +81,7 @@ Issues='http://github.com/umyelab/LabGym/issues'
 LabGym='LabGym.__main__:main'
 LabGym-annotate='LabGym.annotator.__main__:main'
 LabGym-workflow='LabGym.gui_pyside.main_window:main'
+# Alias: python -m LabGym.gui_pyside
 
 [tool.pdm]
 distribution=true
