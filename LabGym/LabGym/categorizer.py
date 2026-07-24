@@ -19,6 +19,7 @@ Email: bingye@umich.edu
 
 # Standard library imports.
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import datetime
 import itertools
 import os
@@ -66,7 +67,13 @@ from keras.utils import (
 	)
 
 # Local application/library specific imports.
-# (none)
+from LabGym.augment_export import (
+	augment_export_task,
+	augment_one_example,
+	default_aug_workers,
+	init_augment_worker,
+	resolve_aug_methods,
+)
 
 
 matplotlib.use('Agg')
@@ -232,46 +239,6 @@ class DatasetFromPath(Sequence):
 		return pattern_images,labels
 
 
-def resolve_aug_methods(aug_methods):
-	'''Expand user-facing aug method names into internal method code strings.'''
-	if not aug_methods:
-		return ['orig']
-
-	remove=[]
-	all_methods=['orig','rot1','rot2','rot3','rot4','rot5','rot6','shrp','shrn','sclh','sclw','del1','del2']
-	options=['rot7','flph','flpv','brih','bril','shrr','sclr','delr']
-	for r in range(1,len(options)+1):
-		all_methods.extend([''.join(c) for c in itertools.combinations(options,r)])
-
-	for i in all_methods:
-		if 'random rotation' not in aug_methods:
-			if 'rot' in i:
-				remove.append(i)
-		if 'horizontal flipping' not in aug_methods:
-			if 'flph' in i:
-				remove.append(i)
-		if 'vertical flipping' not in aug_methods:
-			if 'flpv' in i:
-				remove.append(i)
-		if 'random brightening' not in aug_methods:
-			if 'brih' in i:
-				remove.append(i)
-		if 'random dimming' not in aug_methods:
-			if 'bril' in i:
-				remove.append(i)
-		if 'random shearing' not in aug_methods:
-			if 'shr' in i:
-				remove.append(i)
-		if 'random rescaling' not in aug_methods:
-			if 'scl' in i:
-				remove.append(i)
-		if 'random deletion' not in aug_methods:
-			if 'del' in i:
-				remove.append(i)
-
-	return list(set(all_methods)-set(remove))
-
-
 def apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode):
 	'''Build stacked [hard|soft] targets; soft from class means or hard copy.'''
 	from LabGym.training.losses import maybe_stack_soft_targets
@@ -304,286 +271,6 @@ def apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode):
 				elif len(m)==C:
 					soft[i]=m
 	return maybe_stack_soft_targets(hard,soft,label_mode)
-
-
-def augment_one_example(
-		animation_path,
-		methods,
-		dim_tconv=0,
-		dim_conv=64,
-		channel=1,
-		time_step=15,
-		background_free=True,
-		black_background=True,
-		behavior_mode=0,
-		out_path=None,
-		seed=None,
-	):
-	'''
-	Augment a single source example with all method codes in ``methods``.
-
-	Picklable top-level function for future process-pool use (PR2).
-
-	Parameters
-	----------
-	animation_path : str
-		Path to the source animation (.avi) or pattern image (.jpg) used by
-		LabGym's train entry points (videos for combnet / animation analyzer;
-		images for pattern-only).
-	methods : list[str]
-		Internal method codes (from :func:`resolve_aug_methods`).
-	out_path : str or None
-		If set, write augmented files to this folder and return
-		``(None, None, None, amount, warnings)``.
-		If None, return in-memory arrays as
-		``(animations_list, pattern_list, labels_list, amount, warnings)``.
-
-	Returns
-	-------
-	tuple
-		``(animations, pattern_images, labels, amount, warnings)`` where the
-		first three are lists (or None when exporting) and ``warnings`` is a
-		list of log strings.
-	'''
-	if seed is not None:
-		random.seed(seed)
-		np.random.seed(seed % (2**32-1))
-
-	methods=list(methods)
-	random.shuffle(methods)
-
-	name=os.path.splitext(os.path.basename(animation_path))[0].split('_')[0]
-	label=os.path.splitext(animation_path)[0].split('_')[-1]
-	path_to_pattern_image=os.path.splitext(animation_path)[0]+'.jpg'
-
-	animations_out=[]
-	patterns_out=[]
-	labels_out=[]
-	warnings=[]
-	amount=0
-
-	for m in methods:
-
-		if 'rot1' in m:
-			angle=np.random.uniform(5,45)
-		elif 'rot2' in m:
-			angle=np.random.uniform(45,85)
-		elif 'rot3' in m:
-			angle=90.0
-		elif 'rot4' in m:
-			angle=np.random.uniform(95,135)
-		elif 'rot5' in m:
-			angle=np.random.uniform(135,175)
-		elif 'rot6' in m:
-			angle=180.0
-		elif 'rot7' in m:
-			angle=np.random.uniform(5,175)
-		else:
-			angle=None
-
-		if 'flphflpv' in m:
-			code=-1
-		elif 'flph' in m:
-			code=1
-		elif 'flpv' in m:
-			code=0
-		else:
-			code=None
-
-		if 'brihbril' in m:
-			beta=np.random.uniform(-50,50)
-		elif 'brih' in m:
-			beta=np.random.uniform(10,50)
-		elif 'bril' in m:
-			beta=np.random.uniform(-50,-10)
-		else:
-			beta=None
-
-		if 'shrp' in m:
-			shear=np.random.uniform(0.15,0.21)
-		elif 'shrn' in m:
-			shear=np.random.uniform(-0.21,-0.15)
-		elif 'shrr' in m:
-			shear=np.random.uniform(-0.21,0.21)
-		else:
-			shear=None
-
-		if 'sclh' in m:
-			width=0
-			scale=np.random.uniform(0.6,0.9)
-		elif 'sclw' in m:
-			width=1
-			scale=np.random.uniform(0.6,0.9)
-		elif 'sclr' in m:
-			width=random.randint(0,1)
-			scale=np.random.uniform(0.6,0.9)
-		else:
-			scale=None
-
-		if 'del1' in m:
-			if time_step>=30:
-				idx1=random.randint(0,round(time_step/3))
-				idx2=random.randint(round(time_step/3)+1,round(time_step*2/3))
-				to_delete=[idx1,idx2]
-			else:
-				to_delete=[random.randint(0,round(time_step/3))]
-		elif 'del2' in m:
-			to_delete=[random.randint(0,round(time_step/2)+1)]
-		elif 'delr' in m:
-			to_delete=[random.randint(0,time_step-1)]
-		else:
-			to_delete=None
-
-		if dim_tconv!=0:
-
-			capture=cv2.VideoCapture(animation_path)
-			if out_path is not None:
-				fps=round(capture.get(cv2.CAP_PROP_FPS))
-				w=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-				h=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-				writer=cv2.VideoWriter(
-					os.path.join(out_path,name+'_'+m+'_'+label+'.avi'),
-					cv2.VideoWriter_fourcc(*'MJPG'),int(fps),(w,h),True)
-			animation=deque()
-			frames=deque(maxlen=time_step)
-			original_frame=None
-			n=0
-
-			while True:
-				retval,frame=capture.read()
-				if original_frame is None:
-					original_frame=frame
-				if frame is None:
-					break
-				frames.append(frame)
-
-			capture.release()
-
-			frames_length=len(frames)
-			if frames_length<time_step:
-				for diff in range(time_step-frames_length):
-					frames.append(np.zeros_like(original_frame))
-				warnings.append('Inconsistent duration of animation detected at: '+str(animation_path)+'.')
-				warnings.append('Zero padding has been used, which may decrease the training accuracy.')
-
-			for frame in frames:
-
-				if to_delete is not None and n in to_delete:
-
-					if black_background is False:
-						frame=np.uint8(np.zeros_like(original_frame)+255)
-					else:
-						frame=np.zeros_like(original_frame)
-
-				else:
-
-					if code is not None:
-						frame=cv2.flip(frame,code)
-
-					if beta is not None:
-						frame=frame.astype('float')
-						if background_free:
-							if black_background:
-								frame[frame>30]+=beta
-							else:
-								frame[frame<225]+=beta
-						else:
-							frame+=beta
-						frame=np.uint8(np.clip(frame,0,255))
-
-					if angle is not None:
-						frame=ndimage.rotate(frame,angle,reshape=False,prefilter=False)
-
-					if shear is not None:
-						tf=AffineTransform(shear=shear)
-						frame=transform.warp(frame,tf,order=1,preserve_range=True,mode='constant')
-
-					if scale is not None:
-						frame_black=np.zeros_like(frame)
-						if black_background is False:
-							frame_black=np.uint8(frame_black+255)
-						if width==0:
-							frame_scl=cv2.resize(frame,(frame.shape[1],int(frame.shape[0]*scale)),interpolation=cv2.INTER_AREA)
-						else:
-							frame_scl=cv2.resize(frame,(int(frame.shape[1]*scale),frame.shape[0]),interpolation=cv2.INTER_AREA)
-						frame_scl=img_to_array(frame_scl)
-						x=(frame_black.shape[1]-frame_scl.shape[1])//2
-						y=(frame_black.shape[0]-frame_scl.shape[0])//2
-						frame_black[y:y+frame_scl.shape[0],x:x+frame_scl.shape[1]]=frame_scl
-						frame=frame_black
-
-				if out_path is None:
-					if channel==1:
-						frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
-					frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
-					frame=img_to_array(frame)
-					animation.append(frame)
-				else:
-					writer.write(np.uint8(frame))
-
-				n+=1
-
-			if out_path is None:
-				animations_out.append(np.array(animation))
-			else:
-				writer.release()
-
-		pattern_image=cv2.imread(path_to_pattern_image)
-
-		if code is not None:
-			pattern_image=cv2.flip(pattern_image,code)
-
-		if behavior_mode==3:
-			if beta is not None:
-				pattern_image=pattern_image.astype('float')
-				if background_free:
-					if black_background:
-						pattern_image[pattern_image>30]+=beta
-					else:
-						pattern_image[pattern_image<225]+=beta
-				else:
-					pattern_image+=beta
-				pattern_image=np.uint8(np.clip(pattern_image,0,255))
-
-		if angle is not None:
-			pattern_image=ndimage.rotate(pattern_image,angle,reshape=False,prefilter=False)
-
-		if shear is not None:
-			tf=AffineTransform(shear=shear)
-			pattern_image=transform.warp(pattern_image,tf,order=1,preserve_range=True,mode='constant')
-
-		if scale is not None:
-			pattern_image_black=np.zeros_like(pattern_image)
-			if width==0:
-				pattern_image_scl=cv2.resize(pattern_image,(pattern_image.shape[1],int(pattern_image.shape[0]*scale)),interpolation=cv2.INTER_AREA)
-			else:
-				pattern_image_scl=cv2.resize(pattern_image,(int(pattern_image.shape[1]*scale),pattern_image.shape[0]),interpolation=cv2.INTER_AREA)
-			x=(pattern_image_black.shape[1]-pattern_image_scl.shape[1])//2
-			y=(pattern_image_black.shape[0]-pattern_image_scl.shape[0])//2
-			pattern_image_black[y:y+pattern_image_scl.shape[0],
-			x:x+pattern_image_scl.shape[1],:]=pattern_image_scl
-			pattern_image=pattern_image_black
-
-		if out_path is None:
-
-			if behavior_mode==3:
-				if channel==1:
-					pattern_image=cv2.cvtColor(np.uint8(pattern_image),cv2.COLOR_BGR2GRAY)
-
-			pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
-			patterns_out.append(img_to_array(pattern_image))
-			labels_out.append(label)
-			amount+=1
-
-		else:
-
-			cv2.imwrite(os.path.join(out_path,name+'_'+m+'_'+label+'.jpg'),np.uint8(pattern_image))
-			amount+=1
-
-	if out_path is not None:
-		return None,None,None,amount,warnings
-	return animations_out,patterns_out,labels_out,amount,warnings
-
 
 
 class Categorizers():
@@ -752,7 +439,7 @@ class Categorizers():
 			print('All prepared training examples stored in: '+str(new_path))
 
 
-	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None):
+	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None,num_workers=1,progress_cb=None):
 
 		# path_to_animations: list of paths to prepared training examples (videos or images)
 		# dim_tconv: the input dimension of Animation Analyzer
@@ -764,48 +451,125 @@ class Categorizers():
 		# black_background: whether to set background black
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# out_path: if not None, will output all the augmented data to this path
-		#
-		# PR1: sequential only (num_workers=1). Per-example work lives in
-		# :func:`augment_one_example` so PR2 can parallelize the export path.
+		# num_workers: process-pool size for export path only (>1). In-memory stays sequential.
+		# progress_cb: optional callable(done_sources, total_sources, message)
 
 		animations=deque()
 		pattern_images=deque()
 		labels=deque()
 		amount=0
 
+		path_to_animations=list(path_to_animations)
+		total_sources=len(path_to_animations)
 		methods=resolve_aug_methods(aug_methods)
 
-		for i in path_to_animations:
-			anims,patterns,labs,n_done,warnings=augment_one_example(
-				i,
-				methods,
-				dim_tconv=dim_tconv,
-				dim_conv=dim_conv,
-				channel=channel,
-				time_step=time_step,
-				background_free=background_free,
-				black_background=black_background,
-				behavior_mode=behavior_mode,
-				out_path=out_path,
-				seed=None,
-			)
-			for w in warnings:
-				print(w)
-				self.log.append(w)
+		def _report(done_sources,msg=None):
+			if progress_cb is None:
+				return
+			try:
+				progress_cb(
+					done_sources,
+					total_sources,
+					msg or ('Augmenting… %d/%d sources (%d outputs)'%(done_sources,total_sources,amount)),
+				)
+			except Exception:
+				pass
 
-			if out_path is None:
-				if dim_tconv!=0 and anims:
-					animations.extend(anims)
-				if patterns:
-					pattern_images.extend(patterns)
-				if labs:
-					labels.extend(labs)
-			amount+=n_done
-			if amount>0 and amount%10000==0:
-				print('The augmented example amount: '+str(amount))
-				self.log.append('The augmented example amount: '+str(amount))
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
+		# Parallel export only; in-memory stays sequential (PR2, not PR's deferred P2 in-memory parallel).
+		use_pool=(
+			out_path is not None
+			and int(num_workers or 1)>1
+			and total_sources>=16
+		)
+		workers=1
+		if use_pool:
+			workers=max(1,min(int(num_workers),total_sources))
+			msg='Augmenting with %d workers (%d sources)…'%(workers,total_sources)
+			print(msg)
+			self.log.append(msg)
+
+		if use_pool and workers>1:
+			payloads=[]
+			for idx,path in enumerate(path_to_animations):
+				payloads.append({
+					'animation_path':path,
+					'methods':methods,
+					'dim_tconv':dim_tconv,
+					'dim_conv':dim_conv,
+					'channel':channel,
+					'time_step':time_step,
+					'background_free':background_free,
+					'black_background':black_background,
+					'behavior_mode':behavior_mode,
+					'out_path':out_path,
+					'seed':(idx+1)*10007,
+				})
+			done_sources=0
+			_report(0)
+			try:
+				with ProcessPoolExecutor(
+					max_workers=workers,
+					initializer=init_augment_worker,
+				) as pool:
+					futures={pool.submit(augment_export_task,p):p for p in payloads}
+					for fut in as_completed(futures):
+						anims,patterns,labs,n_done,warnings=fut.result()
+						for w in warnings:
+							print(w)
+							self.log.append(w)
+						amount+=n_done
+						done_sources+=1
+						if amount>0 and amount%10000<max(n_done,1):
+							print('The augmented example amount: '+str(amount))
+							self.log.append('The augmented example amount: '+str(amount))
+							print(datetime.datetime.now())
+							self.log.append(str(datetime.datetime.now()))
+						_report(done_sources)
+			except Exception as exc:
+				print('Parallel augmentation failed (%s); falling back to sequential.'%exc)
+				self.log.append('Parallel augmentation failed: '+str(exc)+'; using sequential.')
+				# Sequential fallback for remaining would be complex; re-run all sequential
+				# only if nothing written yet — otherwise re-raise.
+				if done_sources==0:
+					return self.build_data(
+						path_to_animations,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,
+						time_step=time_step,aug_methods=aug_methods,background_free=background_free,
+						black_background=black_background,behavior_mode=behavior_mode,
+						out_path=out_path,num_workers=1,progress_cb=progress_cb)
+				raise
+		else:
+			for idx,i in enumerate(path_to_animations):
+				anims,patterns,labs,n_done,warnings=augment_one_example(
+					i,
+					methods,
+					dim_tconv=dim_tconv,
+					dim_conv=dim_conv,
+					channel=channel,
+					time_step=time_step,
+					background_free=background_free,
+					black_background=black_background,
+					behavior_mode=behavior_mode,
+					out_path=out_path,
+					seed=None,
+				)
+				for w in warnings:
+					print(w)
+					self.log.append(w)
+
+				if out_path is None:
+					if dim_tconv!=0 and anims:
+						animations.extend(anims)
+					if patterns:
+						pattern_images.extend(patterns)
+					if labs:
+						labels.extend(labs)
+				amount+=n_done
+				if amount>0 and amount%10000==0:
+					print('The augmented example amount: '+str(amount))
+					self.log.append('The augmented example amount: '+str(amount))
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
+				_report(idx+1)
 
 		if out_path is None:
 
@@ -814,6 +578,7 @@ class Categorizers():
 			pattern_images=np.array(pattern_images,dtype='float32')/255.0
 			labels=np.array(labels)
 
+		_report(total_sources,'Augmentation complete (%d outputs).'%amount)
 		return animations,pattern_images,labels
 
 
@@ -1198,7 +963,7 @@ class Categorizers():
 		return model
 
 
-	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None):
+	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1216,6 +981,8 @@ class Categorizers():
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
 		# out_folder: if not None, will output all the augmented data to this folder
+		# num_workers: process workers for export augmentation (1 = sequential)
+		# progress_cb: optional callable(done, total, message) for export augmentation
 
 		filters=8
 
@@ -1421,15 +1188,24 @@ class Categorizers():
 				self.log.append('Start to augment training examples...')
 				train_folder=os.path.join(out_folder,'train')
 				os.makedirs(train_folder,exist_ok=True)
-				_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder)
+				n_train=len(train_files)
+				n_val=len(test_files)
+				aug_total=n_train+n_val
+				def _phase_cb(offset):
+					if progress_cb is None:
+						return None
+					def _cb(done,tot,msg):
+						progress_cb(offset+done,aug_total,msg)
+					return _cb
+				_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0))
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				validation_folder=os.path.join(out_folder,'validation')
 				os.makedirs(validation_folder,exist_ok=True)
 				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 
 				self.train_pattern_recognizer_onfly(
 					out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,
@@ -1439,7 +1215,7 @@ class Categorizers():
 					soft_source_path=data_path)
 
 
-	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None):
+	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1630,20 +1406,29 @@ class Categorizers():
 				self.log.append('Start to augment training examples...')
 				train_folder=os.path.join(out_folder,'train')
 				os.makedirs(train_folder,exist_ok=True)
-				_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder)
+				n_train=len(train_files)
+				n_val=len(test_files)
+				aug_total=n_train+n_val
+				def _phase_cb(offset):
+					if progress_cb is None:
+						return None
+					def _cb(done,tot,msg):
+						progress_cb(offset+done,aug_total,msg)
+					return _cb
+				_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0))
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				validation_folder=os.path.join(out_folder,'validation')
 				os.makedirs(validation_folder,exist_ok=True)
 				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 
 				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
 
 
-	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None):
+	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Categorizer
@@ -1664,6 +1449,8 @@ class Categorizers():
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
 		# out_folder: if not None, will output all the augmented data to this folder
+		# num_workers: process workers for export augmentation (1 = sequential)
+		# progress_cb: optional callable(done, total, message) for export augmentation
 
 		print('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
 		self.log.append('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
@@ -1862,15 +1649,24 @@ class Categorizers():
 				self.log.append('Start to augment training examples...')
 				train_folder=os.path.join(out_folder,'train')
 				os.makedirs(train_folder,exist_ok=True)
-				_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder)
+				n_train=len(train_files)
+				n_val=len(test_files)
+				aug_total=n_train+n_val
+				def _phase_cb(offset):
+					if progress_cb is None:
+						return None
+					def _cb(done,tot,msg):
+						progress_cb(offset+done,aug_total,msg)
+					return _cb
+				_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0))
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				validation_folder=os.path.join(out_folder,'validation')
 				os.makedirs(validation_folder,exist_ok=True)
 				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 
 				self.train_combnet_onfly(
 					out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTextEdit,
@@ -27,6 +29,16 @@ from PySide6.QtWidgets import (
 # QFormLayout used for prepare + train groups
 
 from LabGym.gui_pyside.project.controller import ProjectController
+
+
+def _auto_aug_workers() -> int:
+    try:
+        from LabGym.augment_export import default_aug_workers
+
+        return int(default_aug_workers(export=True))
+    except Exception:
+        cpu = os.cpu_count() or 1
+        return max(1, min(8, cpu - 1 if cpu > 1 else 1))
 
 
 class _PrepWorker(QObject):
@@ -53,6 +65,7 @@ class _TrainWorker(QObject):
     finished = Signal(str)
     error = Signal(str)
     progress = Signal(str)
+    progress_aug = Signal(int, int, str)  # done, total, message
 
     def __init__(self, params: dict):
         super().__init__()
@@ -71,8 +84,14 @@ class _TrainWorker(QObject):
             if not out_folder:
                 out_folder = str(Path(p["model_path"]) / "augmented_data")
             Path(out_folder).mkdir(parents=True, exist_ok=True)
+            n_workers = int(p.get("num_workers") or 1)
+
+            def _aug_cb(done: int, total: int, msg: str) -> None:
+                self.progress_aug.emit(int(done), int(total), str(msg))
+
             self.progress.emit(
-                f"Export-augment then train onfly → {out_folder} (sequential, 1 worker)…"
+                f"Export-augment then train onfly → {out_folder} "
+                f"({n_workers} worker{'s' if n_workers != 1 else ''})…"
             )
             if not p["animation_analyzer"]:
                 CA.train_pattern_recognizer(
@@ -95,6 +114,8 @@ class _TrainWorker(QObject):
                     label_mode=p["label_mode"],
                     lambda_soft=p["lambda_soft"],
                     soft_labels_path=p.get("soft_labels_path"),
+                    num_workers=n_workers,
+                    progress_cb=_aug_cb,
                 )
             else:
                 CA.train_combnet(
@@ -120,6 +141,8 @@ class _TrainWorker(QObject):
                     label_mode=p["label_mode"],
                     lambda_soft=p["lambda_soft"],
                     soft_labels_path=p.get("soft_labels_path"),
+                    num_workers=n_workers,
+                    progress_cb=_aug_cb,
                 )
             self.finished.emit(p["model_path"])
         except Exception as exc:
@@ -318,8 +341,8 @@ class TrainCategorizerTab(QWidget):
         tip_export = (
             "Folder for augmented train/validation examples written before on-the-fly "
             "training. Default is <models parent>/<categorizer name>/augmented_data. "
-            "Export is always used (lower RAM than loading all augments into memory). "
-            "PR2 will add multi-worker parallelization for this path."
+            "Export is always used (lower RAM). Multi-worker parallelization applies "
+            "to this export path when workers > 1 and there are enough source examples."
         )
         self.ed_export.setToolTip(tip_export)
         b_ex = QPushButton("Browse…")
@@ -328,6 +351,32 @@ class TrainCategorizerTab(QWidget):
             self._lab("Augmented export folder:", tip_export),
             self._row(self.ed_export, b_ex),
         )
+
+        # Augmentation workers
+        self.chk_auto_workers = QCheckBox("Auto workers")
+        self.chk_auto_workers.setChecked(True)
+        tip_auto = (
+            "When checked, use a conservative default: min(8, CPU−1). "
+            "Uncheck to set the count manually."
+        )
+        self.chk_auto_workers.setToolTip(tip_auto)
+        self.spin_workers = QSpinBox()
+        self.spin_workers.setRange(1, max(32, (os.cpu_count() or 8) * 2))
+        self.spin_workers.setValue(_auto_aug_workers())
+        tip_workers = (
+            "Number of CPU processes for export augmentation. More workers = faster "
+            "aug but more RAM/CPU. Set to 1 if unstable or low memory. Does not "
+            "speed up GPU training epochs themselves. Small jobs (<16 sources) stay sequential."
+        )
+        self.spin_workers.setToolTip(tip_workers)
+        self.spin_workers.setEnabled(False)
+        self.chk_auto_workers.toggled.connect(self._on_auto_workers)
+        workers_row = QWidget()
+        wh = QHBoxLayout(workers_row)
+        wh.setContentsMargins(0, 0, 0, 0)
+        wh.addWidget(self.chk_auto_workers)
+        wh.addWidget(self.spin_workers, 1)
+        form.addRow(self._lab("Augmentation workers:", tip_workers), workers_row)
 
         self.ed_report = QLineEdit()
         self.ed_report.setToolTip(
@@ -342,6 +391,18 @@ class TrainCategorizerTab(QWidget):
 
         layout.addWidget(train)
 
+        self.lbl_phase = QLabel("Idle")
+        layout.addWidget(self.lbl_phase)
+        self.progress_aug = QProgressBar()
+        self.progress_aug.setRange(0, 100)
+        self.progress_aug.setValue(0)
+        self.progress_aug.setFormat("Augmentation: %p%")
+        self.progress_aug.setToolTip(
+            "Progress while exporting augmented train/validation examples "
+            "(by source example count)."
+        )
+        layout.addWidget(self.progress_aug)
+
         self.btn = QPushButton("Train categorizer")
         self.btn.clicked.connect(self._train)
         layout.addWidget(self.btn)
@@ -350,6 +411,11 @@ class TrainCategorizerTab(QWidget):
         layout.addWidget(self.log, 1)
 
         self._defaults()
+
+    def _on_auto_workers(self, checked: bool) -> None:
+        self.spin_workers.setEnabled(not checked)
+        if checked:
+            self.spin_workers.setValue(_auto_aug_workers())
 
     def _defaults(self) -> None:
         p = self.project.project
@@ -360,6 +426,7 @@ class TrainCategorizerTab(QWidget):
         idx = self.combo_mode.findData(int(p.defaults.behavior_mode))
         if idx >= 0:
             self.combo_mode.setCurrentIndex(idx)
+        self.spin_workers.setValue(_auto_aug_workers())
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -413,6 +480,11 @@ class TrainCategorizerTab(QWidget):
         self.log.append(f"Prepared examples in {path}")
         QMessageBox.information(self, "Prepare", f"Prepared:\n{path}")
 
+    def _resolved_workers(self) -> int:
+        if self.chk_auto_workers.isChecked():
+            return _auto_aug_workers()
+        return int(self.spin_workers.value())
+
     def _train(self) -> None:
         if self._thread is not None:
             QMessageBox.information(self, "Busy", "A job is already running.")
@@ -440,6 +512,7 @@ class TrainCategorizerTab(QWidget):
         export = self.ed_export.text().strip() or str(Path(model_path) / "augmented_data")
         mode = int(self.combo_mode.currentData())
         channel = 3 if mode == 2 else 1
+        n_workers = self._resolved_workers()
         params = dict(
             data_path=data,
             model_path=model_path,
@@ -470,15 +543,20 @@ class TrainCategorizerTab(QWidget):
             label_mode=str(self.combo_label.currentData()),
             lambda_soft=float(self.spin_lambda.value()),
             soft_labels_path=soft,
+            num_workers=n_workers,
         )
         self.btn.setEnabled(False)
+        self.progress_aug.setValue(0)
+        self.lbl_phase.setText("Starting…")
         self.log.append(f"Training → {model_path}")
         self.log.append(f"Augmented export → {export}")
+        self.log.append(f"Augmentation workers → {n_workers}")
         self._thread = QThread(self)
         worker = _TrainWorker(params)
         worker.moveToThread(self._thread)
         self._thread.started.connect(worker.run)
-        worker.progress.connect(lambda m: self.log.append(m))
+        worker.progress.connect(self._on_status)
+        worker.progress_aug.connect(self._on_aug_progress)
         worker.finished.connect(self._train_done)
         worker.error.connect(self._err)
         worker.finished.connect(self._thread.quit)
@@ -487,16 +565,31 @@ class TrainCategorizerTab(QWidget):
         self._worker = worker
         self._thread.start()
 
+    def _on_status(self, msg: str) -> None:
+        self.log.append(msg)
+        self.lbl_phase.setText(msg)
+
+    def _on_aug_progress(self, done: int, total: int, msg: str) -> None:
+        if total > 0:
+            self.progress_aug.setValue(int(100 * done / total))
+        self.lbl_phase.setText(msg)
+        # Log sparsely to avoid flooding
+        if total > 0 and (done == total or done % max(1, total // 20) == 0):
+            self.log.append(msg)
+
     def _cleanup(self) -> None:
         self._thread = None
         self.btn.setEnabled(True)
 
     def _train_done(self, path: str) -> None:
+        self.progress_aug.setValue(100)
+        self.lbl_phase.setText("Done")
         self.log.append(f"Done: {path}")
         self.project.project.defaults.categorizer_name = path
         self.project.mark_dirty()
         QMessageBox.information(self, "Train categorizer", f"Saved:\n{path}")
 
     def _err(self, msg: str) -> None:
+        self.lbl_phase.setText("Failed")
         self.log.append(f"ERROR: {msg}")
         QMessageBox.critical(self, "Failed", msg)
