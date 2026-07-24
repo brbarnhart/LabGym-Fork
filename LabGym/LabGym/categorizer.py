@@ -19,6 +19,7 @@ Email: bingye@umich.edu
 
 # Standard library imports.
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import datetime
 import itertools
 import os
@@ -66,7 +67,13 @@ from keras.utils import (
 	)
 
 # Local application/library specific imports.
-# (none)
+from LabGym.augment_export import (
+	augment_export_task,
+	augment_one_example,
+	default_aug_workers,
+	init_augment_worker,
+	resolve_aug_methods,
+)
 
 
 matplotlib.use('Agg')
@@ -78,7 +85,7 @@ class DatasetFromPath_AA(Sequence):
 	Load batches of training examples (including animations) from path
 	'''
 
-	def __init__(self,path_to_examples,length=15,batch_size=32,dim_tconv=16,dim_conv=32,channel=1):
+	def __init__(self,path_to_examples,length=15,batch_size=32,dim_tconv=16,dim_conv=32,channel=1,label_mode='hard_only',class_means=None):
 
 		self.path_to_examples=path_to_examples
 		self.length=length
@@ -86,7 +93,10 @@ class DatasetFromPath_AA(Sequence):
 		self.dim_tconv=dim_tconv
 		self.dim_conv=dim_conv
 		self.channel=channel
+		self.label_mode=label_mode
+		self.class_means=class_means
 		self.pattern_image_paths,self.classmapping=self.load_info()
+		self.classnames=list(self.classmapping.keys())
 
 
 	def load_info(self):
@@ -150,6 +160,8 @@ class DatasetFromPath_AA(Sequence):
 		pattern_images=np.array(pattern_images)
 		pattern_images=pattern_images.astype('float32')/255.0
 		labels=np.array(labels)
+		labels=apply_class_mean_soft_to_labels(
+			labels,self.classnames,self.class_means,self.label_mode)
 
 		return [animations,pattern_images],labels
 
@@ -161,13 +173,16 @@ class DatasetFromPath(Sequence):
 	Load batches of training examples (not including animations) from path
 	'''
 
-	def __init__(self,path_to_examples,batch_size=32,dim_conv=32,channel=3):
+	def __init__(self,path_to_examples,batch_size=32,dim_conv=32,channel=3,label_mode='hard_only',class_means=None):
 
 		self.path_to_examples=path_to_examples
 		self.batch_size=batch_size
 		self.dim_conv=dim_conv
 		self.channel=channel
+		self.label_mode=label_mode
+		self.class_means=class_means
 		self.pattern_image_paths,self.classmapping=self.load_info()
+		self.classnames=list(self.classmapping.keys())
 
 
 	def load_info(self):
@@ -218,9 +233,44 @@ class DatasetFromPath(Sequence):
 		pattern_images=np.array(pattern_images)
 		pattern_images=pattern_images.astype('float32')/255.0
 		labels=np.array(labels)
+		labels=apply_class_mean_soft_to_labels(
+			labels,self.classnames,self.class_means,self.label_mode)
 
 		return pattern_images,labels
 
+
+def apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode):
+	'''Build stacked [hard|soft] targets; soft from class means or hard copy.'''
+	from LabGym.training.losses import maybe_stack_soft_targets
+
+	hard=np.asarray(hard_Y,dtype=np.float32)
+	if hard.ndim==1:
+		if hard.shape[0]>0 and hard.max()<=1.0 and len(classnames)==2:
+			hard=hard.reshape(-1,1)
+		else:
+			C=len(classnames)
+			oh=np.zeros((hard.shape[0],C),dtype=np.float32)
+			for i,v in enumerate(hard.astype(int)):
+				if 0<=v<C:
+					oh[i,v]=1.0
+			hard=oh
+	soft=hard.copy()
+	if class_means and str(label_mode)!='hard_only':
+		C=hard.shape[1]
+		for i in range(hard.shape[0]):
+			if C==1 and len(classnames)==2:
+				idx=1 if hard[i,0]>=0.5 else 0
+				cname=classnames[idx] if idx<len(classnames) else classnames[0]
+			else:
+				idx=int(np.argmax(hard[i]))
+				cname=classnames[idx]
+			if cname in class_means:
+				m=class_means[cname]
+				if C==1 and len(m)==2:
+					soft[i,0]=m[1]
+				elif len(m)==C:
+					soft[i]=m
+	return maybe_stack_soft_targets(hard,soft,label_mode)
 
 
 class Categorizers():
@@ -288,12 +338,9 @@ class Categorizers():
 			for hard,soft in table.rows.values():
 				if hard in buckets:
 					buckets[hard].append(soft)
-			# also align by soft classname order
-			name_to_i={n:i for i,n in enumerate(table.classnames)}
 			for c in classnames:
 				vecs=buckets.get(c) or []
 				if not vecs:
-					# try reindex
 					continue
 				m=np.mean(np.stack(vecs,axis=0),axis=0)
 				# map table class order -> training class order
@@ -313,37 +360,55 @@ class Categorizers():
 
 	def _apply_soft_to_batch_labels(self,hard_Y,classnames,class_means,label_mode):
 		'''Build stacked [hard|soft] targets; soft from class means or hard copy.'''
-		hard=np.asarray(hard_Y,dtype=np.float32)
-		if hard.ndim==1:
-			# binary single column or integer labels
-			if hard.shape[0]>0 and hard.max()<=1.0 and len(classnames)==2:
-				hard=hard.reshape(-1,1)
-			else:
-				# one-hot from integers
-				C=len(classnames)
-				oh=np.zeros((hard.shape[0],C),dtype=np.float32)
-				for i,v in enumerate(hard.astype(int)):
-					if 0<=v<C:
-						oh[i,v]=1.0
-				hard=oh
-		soft=hard.copy()
-		if class_means and str(label_mode)!='hard_only':
-			C=hard.shape[1]
-			for i in range(hard.shape[0]):
-				if C==1 and len(classnames)==2:
-					# binary: positive class index 1 convention varies; use soft means if both exist
-					idx=1 if hard[i,0]>=0.5 else 0
-					cname=classnames[idx] if idx<len(classnames) else classnames[0]
-				else:
-					idx=int(np.argmax(hard[i]))
-					cname=classnames[idx]
-				if cname in class_means:
-					m=class_means[cname]
-					if C==1 and len(m)==2:
-						soft[i,0]=m[1]  # positive class prob
-					elif len(m)==C:
-						soft[i]=m
-		return self._stack_soft_targets(hard,soft,label_mode)
+		return apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode)
+
+
+	def _standard_fit_callbacks(self,model_path,train_progress_cb=None,cancel_event=None):
+		'''Checkpoint + early stop + LR plateau + optional epoch progress / cancel callbacks.'''
+		from LabGym.training.progress import (
+			is_cancelled,
+			make_cancel_callback,
+			make_epoch_progress_callback,
+			TrainingCancelled,
+		)
+
+		cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
+		es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
+		rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
+		cbs=[cp,es,rl]
+		ep=make_epoch_progress_callback(train_progress_cb)
+		if ep is not None:
+			cbs.append(ep)
+		cc=make_cancel_callback(cancel_event)
+		if cc is not None:
+			cbs.append(cc)
+		return cbs
+
+
+	def _raise_if_fit_cancelled(self,cancel_event,phase='Training'):
+		from LabGym.training.progress import is_cancelled,TrainingCancelled
+		if is_cancelled(cancel_event):
+			msg=phase+' cancelled by user.'
+			print(msg)
+			self.log.append(msg)
+			raise TrainingCancelled(msg)
+
+
+	@staticmethod
+	def has_exported_aug_data(out_folder):
+		'''True if out_folder has train/ and validation/ with at least one .jpg each.'''
+		if not out_folder:
+			return False
+		train_folder=os.path.join(out_folder,'train')
+		validation_folder=os.path.join(out_folder,'validation')
+		if not (os.path.isdir(train_folder) and os.path.isdir(validation_folder)):
+			return False
+		def _has_jpg(folder):
+			try:
+				return any(name.endswith('.jpg') for name in os.listdir(folder))
+			except OSError:
+				return False
+		return _has_jpg(train_folder) and _has_jpg(validation_folder)
 
 
 	def rename_label(self,file_path,new_path,resize=None):
@@ -422,9 +487,9 @@ class Categorizers():
 			print('All prepared training examples stored in: '+str(new_path))
 
 
-	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None):
+	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None,num_workers=1,progress_cb=None,cancel_event=None):
 
-		# path_to_animations: the folder that stores all the prepared training examples
+		# path_to_animations: list of paths to prepared training examples (videos or images)
 		# dim_tconv: the input dimension of Animation Analyzer
 		# dim_conv: the input dimension of Pattern Recognizer
 		# channel: the input color channel of Animation Analyzer, 1 is gray scale, 3 is RGB
@@ -434,284 +499,161 @@ class Categorizers():
 		# black_background: whether to set background black
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# out_path: if not None, will output all the augmented data to this path
+		# num_workers: process-pool size for export path only (>1). In-memory stays sequential.
+		# progress_cb: optional callable(done_sources, total_sources, message)
+		# cancel_event: optional threading.Event / callable; cooperative cancel between sources
+
+		from LabGym.training.progress import is_cancelled,raise_if_cancelled,TrainingCancelled
 
 		animations=deque()
 		pattern_images=deque()
 		labels=deque()
 		amount=0
 
-		if len(aug_methods)==0:
+		path_to_animations=list(path_to_animations or [])
+		total_sources=len(path_to_animations)
+		methods=resolve_aug_methods(aug_methods)
+		try:
+			num_workers=max(1,int(num_workers or 1))
+		except (TypeError,ValueError):
+			num_workers=1
 
-			methods=['orig']
+		def _report(done_sources,msg=None):
+			if progress_cb is None:
+				return
+			try:
+				progress_cb(
+					done_sources,
+					total_sources,
+					msg or ('Augmenting… %d/%d sources (%d outputs)'%(done_sources,total_sources,amount)),
+				)
+			except Exception:
+				pass
 
-		else:
-
-			remove=[]
-
-			all_methods=['orig','rot1','rot2','rot3','rot4','rot5','rot6','shrp','shrn','sclh','sclw','del1','del2']
-			options=['rot7','flph','flpv','brih','bril','shrr','sclr','delr']
-			for r in range(1,len(options)+1):
-				all_methods.extend([''.join(c) for c in itertools.combinations(options,r)])
-
-			for i in all_methods:
-				if 'random rotation' not in aug_methods:
-					if 'rot' in i:
-						remove.append(i)
-				if 'horizontal flipping' not in aug_methods:
-					if 'flph' in i:
-						remove.append(i)
-				if 'vertical flipping' not in aug_methods:
-					if 'flpv' in i:
-						remove.append(i)
-				if 'random brightening' not in aug_methods:
-					if 'brih' in i:
-						remove.append(i)
-				if 'random dimming' not in aug_methods:
-					if 'bril' in i:
-						remove.append(i)
-				if 'random shearing' not in aug_methods:
-					if 'shr' in i:
-						remove.append(i)
-				if 'random rescaling' not in aug_methods:
-					if 'scl' in i:
-						remove.append(i)
-				if 'random deletion' not in aug_methods:
-					if 'del' in i:
-						remove.append(i)
-
-			methods=list(set(all_methods)-set(remove))
-
-		for i in path_to_animations:
-
-			name=os.path.splitext(os.path.basename(i))[0].split('_')[0]
-			label=os.path.splitext(i)[0].split('_')[-1]
-			path_to_pattern_image=os.path.splitext(i)[0]+'.jpg'
-
-			random.shuffle(methods)
-
-			for m in methods:
-
-				if 'rot1' in m:
-					angle=np.random.uniform(5,45)
-				elif 'rot2' in m:
-					angle=np.random.uniform(45,85)
-				elif 'rot3' in m:
-					angle=90.0
-				elif 'rot4' in m:
-					angle=np.random.uniform(95,135)
-				elif 'rot5' in m:
-					angle=np.random.uniform(135,175)
-				elif 'rot6' in m:
-					angle=180.0
-				elif 'rot7' in m:
-					angle=np.random.uniform(5,175)
-				else:
-					angle=None
-
-				if 'flphflpv' in m:
-					code=-1
-				elif 'flph' in m:
-					code=1
-				elif 'flpv' in m:
-					code=0
-				else:
-					code=None
-
-				if 'brihbril' in m:
-					beta=np.random.uniform(-50,50)
-				elif 'brih' in m:
-					beta=np.random.uniform(10,50)
-				elif 'bril' in m:
-					beta=np.random.uniform(-50,-10)
-				else:
-					beta=None
-
-				if 'shrp' in m:
-					shear=np.random.uniform(0.15,0.21)
-				elif 'shrn' in m:
-					shear=np.random.uniform(-0.21,-0.15)
-				elif 'shrr' in m:
-					shear=np.random.uniform(-0.21,0.21)
-				else:
-					shear=None
-
-				if 'sclh' in m:
-					width=0
-					scale=np.random.uniform(0.6,0.9)
-				elif 'sclw' in m:
-					width=1
-					scale=np.random.uniform(0.6,0.9)
-				elif 'sclr' in m:
-					width=random.randint(0,1)
-					scale=np.random.uniform(0.6,0.9)
-				else:
-					scale=None
-
-				if 'del1' in m:
-					if time_step>=30:
-						idx1=random.randint(0,round(time_step/3))
-						idx2=random.randint(round(time_step/3)+1,round(time_step*2/3))
-						to_delete=[idx1,idx2]
-					else:
-						to_delete=[random.randint(0,round(time_step/3))]
-				elif 'del2' in m:
-					to_delete=[random.randint(0,round(time_step/2)+1)]
-				elif 'delr' in m:
-					to_delete=[random.randint(0,time_step-1)]
-				else:
-					to_delete=None
-
+		if total_sources==0:
+			msg='No source examples to augment.'
+			print(msg)
+			self.log.append(msg)
+			_report(0,msg)
+			if out_path is None:
 				if dim_tconv!=0:
+					animations=np.array([],dtype='float32')
+				pattern_images=np.array([],dtype='float32')
+				labels=np.array([])
+			return animations,pattern_images,labels
 
-					capture=cv2.VideoCapture(i)
-					if out_path is not None:
-						fps=round(capture.get(cv2.CAP_PROP_FPS))
-						w=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-						h=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-						writer=cv2.VideoWriter(os.path.join(out_path,name+'_'+m+'_'+label+'.avi'),cv2.VideoWriter_fourcc(*'MJPG'),int(fps),(w,h),True)
-					animation=deque()
-					frames=deque(maxlen=time_step)
-					original_frame=None
-					n=0
+		# Parallel export only; in-memory stays sequential.
+		use_pool=(
+			out_path is not None
+			and num_workers>1
+			and total_sources>=16
+		)
+		workers=1
+		if use_pool:
+			workers=max(1,min(num_workers,total_sources))
+			msg='Augmenting with %d workers (%d sources)…'%(workers,total_sources)
+			print(msg)
+			self.log.append(msg)
 
-					while True:
-						retval,frame=capture.read()
-						if original_frame is None:
-							original_frame=frame
-						if frame is None:
-							break
-						frames.append(frame)
+		raise_if_cancelled(cancel_event,'Augmentation cancelled by user')
 
-					capture.release()
-
-					frames_length=len(frames)
-					if frames_length<time_step:
-						for diff in range(time_step-frames_length):
-							frames.append(np.zeros_like(original_frame))
-						print('Inconsistent duration of animation detected at: '+str(i)+'.')
-						self.log.append('Inconsistent duration of animation detected at: '+str(i)+'.')
-						print('Zero padding has been used, which may decrease the training accuracy.')
-						self.log.append('Zero padding has been used, which may decrease the training accuracy.')
-
-					for frame in frames:
-
-						if to_delete is not None and n in to_delete:
-
-							if black_background is False:
-								frame=np.uint8(np.zeros_like(original_frame)+255)
-							else:
-								frame=np.zeros_like(original_frame)
-
-						else:
-
-							if code is not None:
-								frame=cv2.flip(frame,code)
-
-							if beta is not None:
-								frame=frame.astype('float')
-								if background_free:
-									if black_background:
-										frame[frame>30]+=beta
-									else:
-										frame[frame<225]+=beta
-								else:
-									frame+=beta
-								frame=np.uint8(np.clip(frame,0,255))
-
-							if angle is not None:
-								frame=ndimage.rotate(frame,angle,reshape=False,prefilter=False)
-
-							if shear is not None:
-								tf=AffineTransform(shear=shear)
-								frame=transform.warp(frame,tf,order=1,preserve_range=True,mode='constant')
-
-							if scale is not None:
-								frame_black=np.zeros_like(frame)
-								if black_background is False:
-									frame_black=np.uint8(frame_black+255)
-								if width==0:
-									frame_scl=cv2.resize(frame,(frame.shape[1],int(frame.shape[0]*scale)),interpolation=cv2.INTER_AREA)
-								else:
-									frame_scl=cv2.resize(frame,(int(frame.shape[1]*scale),frame.shape[0]),interpolation=cv2.INTER_AREA)
-								frame_scl=img_to_array(frame_scl)
-								x=(frame_black.shape[1]-frame_scl.shape[1])//2
-								y=(frame_black.shape[0]-frame_scl.shape[0])//2
-								frame_black[y:y+frame_scl.shape[0],x:x+frame_scl.shape[1]]=frame_scl
-								frame=frame_black
-
-						if out_path is None:
-							if channel==1:
-								frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
-							frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
-							frame=img_to_array(frame)
-							animation.append(frame)
-						else:
-							writer.write(np.uint8(frame))
-
-						n+=1
-
-					if out_path is None:
-						animations.append(np.array(animation))
-					else:
-						writer.release()
-
-				pattern_image=cv2.imread(path_to_pattern_image)
-
-				if code is not None:
-					pattern_image=cv2.flip(pattern_image,code)
-
-				if behavior_mode==3:
-					if beta is not None:
-						pattern_image=pattern_image.astype('float')
-						if background_free:
-							if black_background:
-								pattern_image[pattern_image>30]+=beta
-							else:
-								pattern_image[pattern_image<225]+=beta
-						else:
-							pattern_image+=beta
-						pattern_image=np.uint8(np.clip(pattern_image,0,255))
-
-				if angle is not None:
-					pattern_image=ndimage.rotate(pattern_image,angle,reshape=False,prefilter=False)
-
-				if shear is not None:
-					tf=AffineTransform(shear=shear)
-					pattern_image=transform.warp(pattern_image,tf,order=1,preserve_range=True,mode='constant')
-
-				if scale is not None:
-					pattern_image_black=np.zeros_like(pattern_image)
-					if width==0:
-						pattern_image_scl=cv2.resize(pattern_image,(pattern_image.shape[1],int(pattern_image.shape[0]*scale)),interpolation=cv2.INTER_AREA)
-					else:
-						pattern_image_scl=cv2.resize(pattern_image,(int(pattern_image.shape[1]*scale),pattern_image.shape[0]),interpolation=cv2.INTER_AREA)
-					x=(pattern_image_black.shape[1]-pattern_image_scl.shape[1])//2
-					y=(pattern_image_black.shape[0]-pattern_image_scl.shape[0])//2
-					pattern_image_black[y:y+pattern_image_scl.shape[0],
-					x:x+pattern_image_scl.shape[1],:]=pattern_image_scl
-					pattern_image=pattern_image_black
+		if use_pool and workers>1:
+			payloads=[]
+			for idx,path in enumerate(path_to_animations):
+				payloads.append({
+					'animation_path':path,
+					'methods':methods,
+					'dim_tconv':dim_tconv,
+					'dim_conv':dim_conv,
+					'channel':channel,
+					'time_step':time_step,
+					'background_free':background_free,
+					'black_background':black_background,
+					'behavior_mode':behavior_mode,
+					'out_path':out_path,
+					'seed':(idx+1)*10007,
+				})
+			done_sources=0
+			_report(0)
+			try:
+				with ProcessPoolExecutor(
+					max_workers=workers,
+					initializer=init_augment_worker,
+				) as pool:
+					futures={pool.submit(augment_export_task,p):p for p in payloads}
+					for fut in as_completed(futures):
+						if is_cancelled(cancel_event):
+							# Stop waiting; cancel pending (Python 3.9+)
+							try:
+								pool.shutdown(wait=False,cancel_futures=True)
+							except TypeError:
+								for f in futures:
+									f.cancel()
+							msg='Augmentation cancelled by user after %d/%d sources.'%(done_sources,total_sources)
+							print(msg)
+							self.log.append(msg)
+							_report(done_sources,msg)
+							raise TrainingCancelled(msg)
+						anims,patterns,labs,n_done,warnings=fut.result()
+						for w in warnings:
+							print(w)
+							self.log.append(w)
+						amount+=n_done
+						done_sources+=1
+						if amount>0 and amount%10000<max(n_done,1):
+							print('The augmented example amount: '+str(amount))
+							self.log.append('The augmented example amount: '+str(amount))
+							print(datetime.datetime.now())
+							self.log.append(str(datetime.datetime.now()))
+						_report(done_sources)
+			except TrainingCancelled:
+				raise
+			except Exception as exc:
+				print('Parallel augmentation failed (%s); falling back to sequential.'%exc)
+				self.log.append('Parallel augmentation failed: '+str(exc)+'; using sequential.')
+				# Sequential fallback for remaining would be complex; re-run all sequential
+				# only if nothing written yet — otherwise re-raise.
+				if done_sources==0:
+					return self.build_data(
+						path_to_animations,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,
+						time_step=time_step,aug_methods=aug_methods,background_free=background_free,
+						black_background=black_background,behavior_mode=behavior_mode,
+						out_path=out_path,num_workers=1,progress_cb=progress_cb,cancel_event=cancel_event)
+				raise
+		else:
+			for idx,i in enumerate(path_to_animations):
+				raise_if_cancelled(cancel_event,'Augmentation cancelled by user')
+				anims,patterns,labs,n_done,warnings=augment_one_example(
+					i,
+					methods,
+					dim_tconv=dim_tconv,
+					dim_conv=dim_conv,
+					channel=channel,
+					time_step=time_step,
+					background_free=background_free,
+					black_background=black_background,
+					behavior_mode=behavior_mode,
+					out_path=out_path,
+					seed=None,
+				)
+				for w in warnings:
+					print(w)
+					self.log.append(w)
 
 				if out_path is None:
-
-					if behavior_mode==3:
-						if channel==1:
-							pattern_image=cv2.cvtColor(np.uint8(pattern_image),cv2.COLOR_BGR2GRAY)
-
-					pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
-					pattern_images.append(img_to_array(pattern_image))
-
-					labels.append(label)
-
-					amount+=1
-					if amount%10000==0:
-						print('The augmented example amount: '+str(amount))
-						self.log.append('The augmented example amount: '+str(amount))
-						print(datetime.datetime.now())
-						self.log.append(str(datetime.datetime.now()))
-
-				else:
-
-					cv2.imwrite(os.path.join(out_path,name+'_'+m+'_'+label+'.jpg'),np.uint8(pattern_image))
+					if dim_tconv!=0 and anims:
+						animations.extend(anims)
+					if patterns:
+						pattern_images.extend(patterns)
+					if labs:
+						labels.extend(labs)
+				amount+=n_done
+				if amount>0 and amount%10000==0:
+					print('The augmented example amount: '+str(amount))
+					self.log.append('The augmented example amount: '+str(amount))
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
+				_report(idx+1)
 
 		if out_path is None:
 
@@ -720,6 +662,7 @@ class Categorizers():
 			pattern_images=np.array(pattern_images,dtype='float32')/255.0
 			labels=np.array(labels)
 
+		_report(total_sources,'Augmentation complete (%d outputs).'%amount)
 		return animations,pattern_images,labels
 
 
@@ -1104,7 +1047,7 @@ class Categorizers():
 		return model
 
 
-	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None):
+	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None,skip_augment=False):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1122,6 +1065,9 @@ class Categorizers():
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
 		# out_folder: if not None, will output all the augmented data to this folder
+		# num_workers: process workers for export augmentation (1 = sequential)
+		# progress_cb: optional callable(done, total, message) for export augmentation
+		# train_progress_cb: optional callable(epoch_1based, logs_dict) each training epoch
 
 		filters=8
 
@@ -1205,14 +1151,14 @@ class Categorizers():
 
 				print('Start to augment training examples...')
 				self.log.append('Start to augment training examples...')
-				_,trainX,trainY=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+				_,trainX,trainY=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				trainY=lb.fit_transform(trainY)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				if augvalid:
-					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				else:
-					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				testY=lb.fit_transform(testY)
 				trainY=self._apply_soft_to_batch_labels(trainY,list(self.classnames),class_means,label_mode)
 				testY=self._apply_soft_to_batch_labels(testY,list(self.classnames),class_means,label_mode)
@@ -1247,13 +1193,10 @@ class Categorizers():
 					model=self.simple_resnet(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
 				self._compile_model(model,label_mode=label_mode,lambda_soft=lambda_soft)
 
-				cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-				es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-				rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
 				# validation tensors may be hard-only in older paths; ensure soft stack
 				testY_tensor=testY
-				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=[cp,es,rl])
+				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+				self._raise_if_fit_cancelled(cancel_event)
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1304,30 +1247,72 @@ class Categorizers():
 
 				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
 
-				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				print('This might take hours or days, depending on the capacity of your computer.')
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
+				self.label_mode=label_mode
+				self.lambda_soft=lambda_soft
+				if str(label_mode)!='hard_only':
+					class_means=self._class_mean_soft(data_path,list(self.classnames),soft_labels_path)
+					if class_means is None:
+						print('Soft labels not found; falling back to hard_only.')
+						self.log.append('Soft labels not found; falling back to hard_only.')
+						label_mode='hard_only'
+						self.label_mode=label_mode
+					else:
+						print('Using soft-label mode: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+						self.log.append('Using soft-label mode: '+str(label_mode))
 
-				print('Start to augment training examples...')
-				self.log.append('Start to augment training examples...')
-				train_folder=os.path.join(out_folder,'train')
-				os.makedirs(train_folder,exist_ok=True)
-				_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder)
-				print('Start to augment validation examples...')
-				self.log.append('Start to augment validation examples...')
-				validation_folder=os.path.join(out_folder,'validation')
-				os.makedirs(validation_folder,exist_ok=True)
-				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
+				if reuse:
+					msg='Reusing existing augmented export (skip re-augment): '+str(out_folder)
+					print(msg)
+					self.log.append(msg)
+					if progress_cb is not None:
+						try:
+							progress_cb(1,1,'Reusing existing augmented data…')
+						except Exception:
+							pass
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					if skip_augment:
+						msg='skip_augment requested but export incomplete; re-augmenting to: '+str(out_folder)
+						print(msg)
+						self.log.append(msg)
+					print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					print('This might take hours or days, depending on the capacity of your computer.')
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
 
-				self.train_pattern_recognizer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
+					print('Start to augment training examples...')
+					self.log.append('Start to augment training examples...')
+					train_folder=os.path.join(out_folder,'train')
+					os.makedirs(train_folder,exist_ok=True)
+					n_train=len(train_files)
+					n_val=len(test_files)
+					aug_total=n_train+n_val
+					def _phase_cb(offset):
+						if progress_cb is None:
+							return None
+						def _cb(done,tot,msg):
+							progress_cb(offset+done,aug_total,msg)
+						return _cb
+					_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
+					print('Start to augment validation examples...')
+					self.log.append('Start to augment validation examples...')
+					validation_folder=os.path.join(out_folder,'validation')
+					os.makedirs(validation_folder,exist_ok=True)
+					if augvalid:
+						_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					else:
+						_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+
+				self.train_pattern_recognizer_onfly(
+					out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,
+					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
+					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
+					label_mode=label_mode,lambda_soft=lambda_soft,soft_labels_path=soft_labels_path,
+					soft_source_path=data_path,train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None):
+	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None,skip_augment=False):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1418,14 +1403,14 @@ class Categorizers():
 
 				print('Start to augment training examples...')
 				self.log.append('Start to augment training examples...')
-				trainX,_,trainY=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+				trainX,_,trainY=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				trainY=lb.fit_transform(trainY)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				if augvalid:
-					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				else:
-					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				testY=lb.fit_transform(testY)
 
 				with tf.device('CPU'):
@@ -1461,11 +1446,8 @@ class Categorizers():
 
 				self._compile_model(model,label_mode=getattr(self,'label_mode','hard_only'),lambda_soft=getattr(self,'lambda_soft',0.4))
 
-				cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-				es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-				rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=[cp,es,rl])
+				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+				self._raise_if_fit_cancelled(cancel_event)
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1508,30 +1490,54 @@ class Categorizers():
 
 				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
 
-				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				print('This might take hours or days, depending on the capacity of your computer.')
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
-
-				print('Start to augment training examples...')
-				self.log.append('Start to augment training examples...')
-				train_folder=os.path.join(out_folder,'train')
-				os.makedirs(train_folder,exist_ok=True)
-				_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder)
-				print('Start to augment validation examples...')
-				self.log.append('Start to augment validation examples...')
-				validation_folder=os.path.join(out_folder,'validation')
-				os.makedirs(validation_folder,exist_ok=True)
-				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
+				if reuse:
+					msg='Reusing existing augmented export (skip re-augment): '+str(out_folder)
+					print(msg)
+					self.log.append(msg)
+					if progress_cb is not None:
+						try:
+							progress_cb(1,1,'Reusing existing augmented data…')
+						except Exception:
+							pass
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					if skip_augment:
+						msg='skip_augment requested but export incomplete; re-augmenting to: '+str(out_folder)
+						print(msg)
+						self.log.append(msg)
+					print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					print('This might take hours or days, depending on the capacity of your computer.')
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
 
-				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
+					print('Start to augment training examples...')
+					self.log.append('Start to augment training examples...')
+					train_folder=os.path.join(out_folder,'train')
+					os.makedirs(train_folder,exist_ok=True)
+					n_train=len(train_files)
+					n_val=len(test_files)
+					aug_total=n_train+n_val
+					def _phase_cb(offset):
+						if progress_cb is None:
+							return None
+						def _cb(done,tot,msg):
+							progress_cb(offset+done,aug_total,msg)
+						return _cb
+					_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
+					print('Start to augment validation examples...')
+					self.log.append('Start to augment validation examples...')
+					validation_folder=os.path.join(out_folder,'validation')
+					os.makedirs(validation_folder,exist_ok=True)
+					if augvalid:
+						_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					else:
+						_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+
+				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None):
+	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None,skip_augment=False):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Categorizer
@@ -1552,6 +1558,8 @@ class Categorizers():
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
 		# out_folder: if not None, will output all the augmented data to this folder
+		# num_workers: process workers for export augmentation (1 = sequential)
+		# progress_cb: optional callable(done, total, message) for export augmentation
 
 		print('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
 		self.log.append('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
@@ -1630,14 +1638,14 @@ class Categorizers():
 
 				print('Start to augment training examples...')
 				self.log.append('Start to augment training examples...')
-				train_animations,train_pattern_images,trainY=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+				train_animations,train_pattern_images,trainY=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				trainY=lb.fit_transform(trainY)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				if augvalid:
-					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				else:
-					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				testY=lb.fit_transform(testY)
 				trainY=self._apply_soft_to_batch_labels(trainY,list(self.classnames),class_means,label_mode)
 				testY=self._apply_soft_to_batch_labels(testY,list(self.classnames),class_means,label_mode)
@@ -1673,11 +1681,8 @@ class Categorizers():
 				model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
 				self._compile_model(model,label_mode=label_mode,lambda_soft=lambda_soft)
 
-				cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-				es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-				rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=[cp,es,rl])
+				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+				self._raise_if_fit_cancelled(cancel_event)
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1727,30 +1732,74 @@ class Categorizers():
 
 				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
 
-				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				print('This might take hours or days, depending on the capacity of your computer.')
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
+				self.label_mode=label_mode
+				self.lambda_soft=lambda_soft
+				if str(label_mode)!='hard_only':
+					class_means=self._class_mean_soft(data_path,list(self.classnames),soft_labels_path)
+					if class_means is None:
+						print('Soft labels not found; falling back to hard_only.')
+						self.log.append('Soft labels not found; falling back to hard_only.')
+						label_mode='hard_only'
+						self.label_mode=label_mode
+					else:
+						print('Using soft-label mode: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+						self.log.append('Using soft-label mode: '+str(label_mode))
 
-				print('Start to augment training examples...')
-				self.log.append('Start to augment training examples...')
-				train_folder=os.path.join(out_folder,'train')
-				os.makedirs(train_folder,exist_ok=True)
-				_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder)
-				print('Start to augment validation examples...')
-				self.log.append('Start to augment validation examples...')
-				validation_folder=os.path.join(out_folder,'validation')
-				os.makedirs(validation_folder,exist_ok=True)
-				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
+				if reuse:
+					msg='Reusing existing augmented export (skip re-augment): '+str(out_folder)
+					print(msg)
+					self.log.append(msg)
+					if progress_cb is not None:
+						try:
+							progress_cb(1,1,'Reusing existing augmented data…')
+						except Exception:
+							pass
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
+					if skip_augment:
+						msg='skip_augment requested but export incomplete; re-augmenting to: '+str(out_folder)
+						print(msg)
+						self.log.append(msg)
+					print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					print('This might take hours or days, depending on the capacity of your computer.')
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
 
-				self.train_combnet_onfly(out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,level_tconv=level_tconv,level_conv=level_conv,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
+					print('Start to augment training examples...')
+					self.log.append('Start to augment training examples...')
+					train_folder=os.path.join(out_folder,'train')
+					os.makedirs(train_folder,exist_ok=True)
+					n_train=len(train_files)
+					n_val=len(test_files)
+					aug_total=n_train+n_val
+					def _phase_cb(offset):
+						if progress_cb is None:
+							return None
+						def _cb(done,tot,msg):
+							progress_cb(offset+done,aug_total,msg)
+						return _cb
+					_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
+					print('Start to augment validation examples...')
+					self.log.append('Start to augment validation examples...')
+					validation_folder=os.path.join(out_folder,'validation')
+					os.makedirs(validation_folder,exist_ok=True)
+					if augvalid:
+						_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					else:
+						_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+
+				self.train_combnet_onfly(
+					out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,
+					time_step=time_step,level_tconv=level_tconv,level_conv=level_conv,
+					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
+					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
+					color_costar=color_costar,label_mode=label_mode,lambda_soft=lambda_soft,
+					soft_labels_path=soft_labels_path,soft_source_path=data_path,
+					train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0):
+	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1765,6 +1814,7 @@ class Categorizers():
 		# black_background: whether to set background black
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
+		# soft_source_path: original prepared-examples folder (for soft_labels.csv); defaults to data_path
 
 		filters=8
 
@@ -1773,8 +1823,8 @@ class Categorizers():
 
 		inputs=Input(shape=(dim,dim,channel))
 
-		print('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
-		self.log.append('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
+		print('Training Pattern Recognizer on-the-fly using the behavior examples in: '+str(data_path))
+		self.log.append('Training Pattern Recognizer on-the-fly using the behavior examples in: '+str(data_path))
 		print(datetime.datetime.now())
 		self.log.append(str(datetime.datetime.now()))
 
@@ -1795,8 +1845,24 @@ class Categorizers():
 			else:
 				channel=3
 
-			train_data=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel)
-			validation_data=DatasetFromPath(validation_folder,batch_size=batch_size,dim_conv=dim,channel=channel)
+			# Probe class names first so soft class-means align
+			_probe=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel)
+			classnames=list(_probe.classmapping.keys())
+			class_means=None
+			effective_label_mode=label_mode
+			if str(label_mode)!='hard_only':
+				src=soft_source_path or data_path
+				class_means=self._class_mean_soft(src,classnames,soft_labels_path)
+				if class_means is None:
+					print('Soft labels not found for onfly train; falling back to hard_only.')
+					self.log.append('Soft labels not found for onfly train; falling back to hard_only.')
+					effective_label_mode='hard_only'
+				else:
+					print('Using soft-label mode onfly: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+					self.log.append('Using soft-label mode onfly: '+str(label_mode))
+
+			train_data=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
+			validation_data=DatasetFromPath(validation_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 
 
 			if include_bodyparts:
@@ -1818,24 +1884,19 @@ class Categorizers():
 				time_step=std=0
 				inner_code=1
 
-			parameters={'classnames':list(train_data.classmapping.keys()),'dim_conv':int(dim),'channel':int(channel),'time_step':int(time_step),'network':0,'level_conv':int(level),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance)}
+			parameters={'classnames':list(train_data.classmapping.keys()),'dim_conv':int(dim),'channel':int(channel),'time_step':int(time_step),'network':0,'level_conv':int(level),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance),'label_mode':str(effective_label_mode),'lambda_soft':float(lambda_soft)}
 			pd_parameters=pd.DataFrame.from_dict(parameters)
 			pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
+			self.classnames=list(train_data.classmapping.keys())
 			if level<5:
-				model=self.simple_vgg(inputs,filters,classes=len(list(train_data.classmapping.keys())),level=level,with_classifier=True)
+				model=self.simple_vgg(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
 			else:
-				model=self.simple_resnet(inputs,filters,classes=len(list(train_data.classmapping.keys())),level=level,with_classifier=True)
-			if len(list(train_data.classmapping.keys()))==2:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='binary_crossentropy',metrics=['accuracy'])
-			else:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
+				model=self.simple_resnet(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
+			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
-			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-			rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=[cp,es,rl])
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+			self._raise_if_fit_cancelled(cancel_event)
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
@@ -1867,7 +1928,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_animation_analyzer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=1,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False):
+	def train_animation_analyzer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=1,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1947,11 +2008,8 @@ class Categorizers():
 			else:
 				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
 
-			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-			rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=[cp,es,rl])
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+			self._raise_if_fit_cancelled(cancel_event)
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
@@ -1983,7 +2041,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False):
+	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -2001,6 +2059,7 @@ class Categorizers():
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
+		# soft_source_path: original prepared-examples folder (for soft_labels.csv); defaults to data_path
 
 		print('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
 		self.log.append('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
@@ -2021,8 +2080,23 @@ class Categorizers():
 			else:
 				batch_size=4
 
-			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
-			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
+			_probe=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
+			classnames=list(_probe.classmapping.keys())
+			class_means=None
+			effective_label_mode=label_mode
+			if str(label_mode)!='hard_only':
+				src=soft_source_path or data_path
+				class_means=self._class_mean_soft(src,classnames,soft_labels_path)
+				if class_means is None:
+					print('Soft labels not found for onfly train; falling back to hard_only.')
+					self.log.append('Soft labels not found for onfly train; falling back to hard_only.')
+					effective_label_mode='hard_only'
+				else:
+					print('Using soft-label mode onfly: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+					self.log.append('Using soft-label mode onfly: '+str(label_mode))
+
+			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
+			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2044,21 +2118,16 @@ class Categorizers():
 			else:
 				color_code=1
 
-			parameters={'classnames':list(train_data.classmapping.keys()),'dim_tconv':int(dim_tconv),'dim_conv':int(dim_conv),'channel':int(channel),'time_step':int(time_step),'network':2,'level_tconv':int(level_tconv),'level_conv':int(level_conv),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance),'color_code':int(color_code)}
+			self.classnames=list(train_data.classmapping.keys())
+			parameters={'classnames':list(self.classnames),'dim_tconv':int(dim_tconv),'dim_conv':int(dim_conv),'channel':int(channel),'time_step':int(time_step),'network':2,'level_tconv':int(level_tconv),'level_conv':int(level_conv),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance),'color_code':int(color_code),'label_mode':str(effective_label_mode),'lambda_soft':float(lambda_soft)}
 			pd_parameters=pd.DataFrame.from_dict(parameters)
 			pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-			model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(list(train_data.classmapping.keys())),level_tconv=level_tconv,level_conv=level_conv)
-			if len(list(train_data.classmapping.keys()))==2:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='binary_crossentropy',metrics=['accuracy'])
-			else:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
+			model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
+			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
-			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-			rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=[cp,es,rl])
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+			self._raise_if_fit_cancelled(cancel_event)
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
