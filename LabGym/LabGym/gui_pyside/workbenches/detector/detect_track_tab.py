@@ -74,72 +74,179 @@ class DetectTrackTab(QWidget):
         self.ed_detector = QComboBox()
         self.ed_detector.setEditable(True)
         self.ed_detector.setMinimumWidth(280)
+        self.ed_detector.setToolTip(
+            "Folder of a trained LabGym detector (contains model_final.pth, "
+            "config.yaml, model_parameters.txt). Animal category names are read "
+            "from model_parameters.txt."
+        )
         btn_browse = QPushButton("Browse…")
+        btn_browse.setToolTip("Choose a detector folder on disk.")
         btn_browse.clicked.connect(self._browse_detector)
         btn_scan = QPushButton("Scan models folder")
+        btn_scan.setToolTip(
+            "Search the project models folder and LabGym’s bundled detectors "
+            "for folders that contain model_parameters.txt."
+        )
         btn_scan.clicked.connect(self._scan_detectors)
         row = QHBoxLayout()
         row.addWidget(self.ed_detector, 1)
         row.addWidget(btn_browse)
         row.addWidget(btn_scan)
-        det_form.addRow("Detector folder:", row)
+        det_form.addRow(
+            self._lab(
+                "Detector folder:",
+                "Path to a trained LabGym Mask R-CNN detector used to find and "
+                "track animals in each video.",
+            ),
+            row,
+        )
         self.lbl_kinds = QLabel("—")
-        det_form.addRow("Animal kinds:", self.lbl_kinds)
+        self.lbl_kinds.setToolTip(
+            "Animal/object category names defined inside the selected detector."
+        )
+        det_form.addRow(
+            self._lab(
+                "Animal kinds:",
+                "Categories the detector was trained to find (e.g. mouse). "
+                "Filled automatically when a valid detector is selected.",
+            ),
+            self.lbl_kinds,
+        )
         self.ed_detector.currentTextChanged.connect(self._on_detector_changed)
         layout.addWidget(det_box)
 
         # Params
         p_box = QGroupBox("Tracking parameters")
+        p_box.setToolTip(
+            "Controls how far/how long tracking runs and how identity packages "
+            "are exported for later ID review."
+        )
         p_form = QFormLayout(p_box)
         self.spin_animals = QSpinBox()
         self.spin_animals.setRange(1, 50)
         self.spin_animals.setValue(2)
-        self.spin_animals.setToolTip(
-            "Number of individuals of each animal kind (same count for every kind)"
+        tip_animals = (
+            "How many individuals of each animal kind are expected in the video "
+            "(same count applied to every kind). Used to allocate track IDs "
+            "(e.g. 2 mice → IDs 0 and 1). Set this to the typical number of "
+            "animals you want tracked."
         )
-        p_form.addRow("Animals per kind:", self.spin_animals)
+        self.spin_animals.setToolTip(tip_animals)
+        p_form.addRow(self._lab("Animals per kind:", tip_animals), self.spin_animals)
 
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("0 — Non-interactive", 0)
         self.combo_mode.addItem("2 — Interactive advanced (tracking)", 2)
-        p_form.addRow("Behavior mode:", self.combo_mode)
+        tip_mode = (
+            "LabGym behavior/tracking geometry:\n"
+            "• 0 Non-interactive — track each animal alone (standard multi-animal "
+            "tracking; recommended for most ID-review work).\n"
+            "• 2 Interactive advanced — tracking suited to social/interaction "
+            "setups (main animal + nearby others / costars).\n"
+            "Mode 1 (interactive basic) is not used here for batch package export."
+        )
+        self.combo_mode.setToolTip(tip_mode)
+        p_form.addRow(self._lab("Behavior mode:", tip_mode), self.combo_mode)
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 32)
         self.spin_batch.setValue(1)
-        p_form.addRow("Detector batch size:", self.spin_batch)
+        tip_batch = (
+            "How many frames the detector processes together (GPU batch size). "
+            "Higher values can be faster on a strong GPU but use more VRAM. "
+            "Use 1 if you run out of memory or see CUDA OOM errors."
+        )
+        self.spin_batch.setToolTip(tip_batch)
+        p_form.addRow(self._lab("Detector batch size:", tip_batch), self.spin_batch)
 
         self.spin_length = QSpinBox()
         self.spin_length.setRange(1, 200)
         self.spin_length.setValue(15)
-        p_form.addRow("History length (frames):", self.spin_length)
+        tip_length = (
+            "History length (frames) — LabGym’s internal “length” / time window "
+            "used while building track data (pattern/animation history buffers).\n\n"
+            "• Not the length of the whole video.\n"
+            "• Think of it as “how many recent frames the tracker keeps in memory "
+            "for each animal when crafting tracks.”\n"
+            "• Default 15 matches common LabGym settings. Larger can help "
+            "smooth short gaps but uses more memory and is slower.\n"
+            "• When you later generate training examples from ethograms, that "
+            "window length is chosen separately in Generate examples."
+        )
+        self.spin_length.setToolTip(tip_length)
+        p_form.addRow(
+            self._lab("History length (frames):", tip_length), self.spin_length
+        )
 
         self.spin_duration = QDoubleSpinBox()
         self.spin_duration.setRange(0.0, 1e7)
         self.spin_duration.setValue(0.0)
         self.spin_duration.setSpecialValueText("full video")
-        self.spin_duration.setToolTip("0 = analyze entire video")
-        p_form.addRow("Duration (seconds):", self.spin_duration)
+        tip_duration = (
+            "How many seconds of video to analyze after the start time. "
+            "0 (or “full video”) processes from the start time through the end "
+            "of the file. Use a shorter duration for quick tests."
+        )
+        self.spin_duration.setToolTip(tip_duration)
+        p_form.addRow(
+            self._lab("Duration (seconds):", tip_duration), self.spin_duration
+        )
 
         self.spin_t = QDoubleSpinBox()
         self.spin_t.setRange(0.0, 1e7)
         self.spin_t.setValue(0.0)
-        p_form.addRow("Start time (s):", self.spin_t)
+        tip_t = (
+            "Start time in seconds from the beginning of the video. "
+            "0 starts at the first frame. Use this to skip an intro or to "
+            "analyze only a later segment (together with Duration)."
+        )
+        self.spin_t.setToolTip(tip_t)
+        p_form.addRow(self._lab("Start time (s):", tip_t), self.spin_t)
 
         self.spin_fw = QSpinBox()
         self.spin_fw.setRange(0, 4000)
         self.spin_fw.setValue(0)
         self.spin_fw.setSpecialValueText("original")
-        p_form.addRow("Frame width (resize):", self.spin_fw)
+        tip_fw = (
+            "Frame width (resize) — if set (e.g. 480), every frame is scaled so "
+            "its width is this many pixels, keeping aspect ratio (height is "
+            "scaled to match).\n\n"
+            "• “original” / 0 = do not resize; use native resolution.\n"
+            "• Smaller widths make detection much faster and use less memory, "
+            "which LabGym strongly recommends for large videos.\n"
+            "• Too small can hurt detection of tiny animals; too large is slow.\n"
+            "• 480 is a common LabGym default when resizing."
+        )
+        self.spin_fw.setToolTip(tip_fw)
+        p_form.addRow(self._lab("Frame width (resize):", tip_fw), self.spin_fw)
 
         self.chk_export = QCheckBox("Export id_review package (tracklets + contact risk)")
         self.chk_export.setChecked(True)
+        tip_export = (
+            "When checked (recommended), writes an identity package under "
+            "detection/<video_stem>/id_review/ with tracklets, contact-risk "
+            "events, and default subjects.json for Review IDs and annotation. "
+            "Uncheck only if you only want intermediate analysis folders."
+        )
+        self.chk_export.setToolTip(tip_export)
         p_form.addRow(self.chk_export)
 
         self.spin_contact = QDoubleSpinBox()
         self.spin_contact.setRange(0.1, 20.0)
         self.spin_contact.setValue(1.0)
-        p_form.addRow("Contact distance × size:", self.spin_contact)
+        tip_contact = (
+            "Contact-risk distance threshold as a multiple of typical animal "
+            "size. When two animals come within about (factor × body size), a "
+            "risk band is marked on the Review IDs timeline for possible ID "
+            "swaps.\n\n"
+            "• Higher → fewer, only closer contacts flagged.\n"
+            "• Lower → more risk bands (more candidate swap regions).\n"
+            "Default 1.0 is a reasonable starting point."
+        )
+        self.spin_contact.setToolTip(tip_contact)
+        p_form.addRow(
+            self._lab("Contact distance × size:", tip_contact), self.spin_contact
+        )
 
         layout.addWidget(p_box)
 
@@ -199,6 +306,12 @@ class DetectTrackTab(QWidget):
         self.project.project_replaced.connect(self.refresh_videos)
         self._init_detector_defaults()
         self.refresh_videos()
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     def _init_detector_defaults(self) -> None:
         # Prefer project models root, then bundled detectors

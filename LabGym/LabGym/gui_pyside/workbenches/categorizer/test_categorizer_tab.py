@@ -59,19 +59,39 @@ class TestCategorizerTab(QWidget):
 
         form = QFormLayout()
         self.ed_gt = QLineEdit()
+        self.ed_gt.setToolTip(
+            "Folder of held-out examples with behavior subfolders (same layout as "
+            "training examples). Used as ground truth for accuracy metrics."
+        )
         b1 = QPushButton("Browse…")
         b1.clicked.connect(lambda: self._browse_dir(self.ed_gt))
-        form.addRow("Ground-truth examples:", self._row(self.ed_gt, b1))
+        form.addRow(
+            self._lab(
+                "Ground-truth examples:",
+                "Labeled examples not used for this test run’s training.",
+            ),
+            self._row(self.ed_gt, b1),
+        )
 
         self.ed_model = QLineEdit()
+        self.ed_model.setToolTip("Trained categorizer folder to evaluate.")
         b2 = QPushButton("Browse…")
         b2.clicked.connect(lambda: self._browse_dir(self.ed_model))
-        form.addRow("Categorizer folder:", self._row(self.ed_model, b2))
+        form.addRow(
+            self._lab("Categorizer folder:", "Must include model_parameters.txt."),
+            self._row(self.ed_model, b2),
+        )
 
         self.ed_out = QLineEdit()
+        self.ed_out.setToolTip(
+            "Optional folder for written test reports. Leave empty to use LabGym defaults."
+        )
         b3 = QPushButton("Browse…")
         b3.clicked.connect(lambda: self._browse_dir(self.ed_out))
-        form.addRow("Results folder (optional):", self._row(self.ed_out, b3))
+        form.addRow(
+            self._lab("Results folder (optional):", "Where to save test output."),
+            self._row(self.ed_out, b3),
+        )
         layout.addLayout(form)
 
         if project.project.defaults.categorizer_name:
@@ -83,6 +103,12 @@ class TestCategorizerTab(QWidget):
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     @staticmethod
     def _row(edit, btn):

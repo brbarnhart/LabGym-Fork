@@ -188,20 +188,40 @@ class ReviewIdsTab(QWidget):
         left_l.addWidget(self.timeline)
 
         filt = QHBoxLayout()
-        filt.addWidget(QLabel("Min risk:"))
+        lab_risk = QLabel("Min risk:")
+        tip_risk = (
+            "Hide contact-risk bands weaker than this score on the timeline "
+            "(0–1). 0 shows all bands; raise to focus on stronger collision/swap risk."
+        )
+        lab_risk.setToolTip(tip_risk)
+        filt.addWidget(lab_risk)
         self.spin_risk = QDoubleSpinBox()
         self.spin_risk.setRange(0.0, 1.0)
         self.spin_risk.setSingleStep(0.05)
         self.spin_risk.setDecimals(2)
+        self.spin_risk.setToolTip(tip_risk)
         self.spin_risk.valueChanged.connect(self._on_risk_filter)
         filt.addWidget(self.spin_risk)
-        filt.addWidget(QLabel("Kind:"))
+        lab_kind = QLabel("Kind:")
+        tip_kind = "Animal category within the tracklet package (e.g. mouse) to review."
+        lab_kind.setToolTip(tip_kind)
+        filt.addWidget(lab_kind)
         self.kind_combo = QComboBox()
+        self.kind_combo.setToolTip(tip_kind)
         self.kind_combo.currentTextChanged.connect(self._on_kind)
         filt.addWidget(self.kind_combo)
-        filt.addWidget(QLabel("Swap IDs:"))
+        lab_swap = QLabel("Swap IDs:")
+        tip_swap = (
+            "Which two track IDs to exchange when you press Mark swap. "
+            "A swap at the current frame means from this frame onward those "
+            "two identities are remapped."
+        )
+        lab_swap.setToolTip(tip_swap)
+        filt.addWidget(lab_swap)
         self.id_a = QComboBox()
         self.id_b = QComboBox()
+        self.id_a.setToolTip(tip_swap)
+        self.id_b.setToolTip(tip_swap)
         filt.addWidget(self.id_a)
         filt.addWidget(self.id_b)
         filt.addStretch(1)

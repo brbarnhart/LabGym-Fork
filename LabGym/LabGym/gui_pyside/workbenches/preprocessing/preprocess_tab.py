@@ -75,9 +75,15 @@ class PreprocessTab(QWidget):
         out_row = QHBoxLayout()
         self.ed_out = QLineEdit()
         self.ed_out.setPlaceholderText("Output folder for *_processed.avi")
+        self.ed_out.setToolTip(
+            "Folder where preprocessed videos are written as "
+            "<name>_processed.avi (and with trim windows in the filename if trimming)."
+        )
         btn_out = QPushButton("Browse…")
         btn_out.clicked.connect(self._browse_out)
-        out_row.addWidget(QLabel("Output:"))
+        lab_out = QLabel("Output:")
+        lab_out.setToolTip(self.ed_out.toolTip())
+        out_row.addWidget(lab_out)
         out_row.addWidget(self.ed_out, 1)
         out_row.addWidget(btn_out)
         layout.addLayout(out_row)
@@ -88,15 +94,38 @@ class PreprocessTab(QWidget):
         self.spin_width.setRange(0, 4000)
         self.spin_width.setSpecialValueText("original")
         self.spin_width.setValue(0)
-        form.addRow("Frame width (resize):", self.spin_width)
+        tip_w = (
+            "Resize output frames so width is this many pixels (height scales to "
+            "keep aspect ratio). “original”/0 = keep native size. Smaller widths "
+            "speed later detection; 480 is a common LabGym choice."
+        )
+        self.spin_width.setToolTip(tip_w)
+        form.addRow(self._lab("Frame width (resize):", tip_w), self.spin_width)
 
         self.chk_trim = QCheckBox("Trim to time windows")
+        self.chk_trim.setToolTip(
+            "If checked, keep only the listed time segments and concatenate them "
+            "into one shorter output video."
+        )
         form.addRow(self.chk_trim)
         self.ed_windows = QLineEdit("0-10")
-        self.ed_windows.setToolTip("start-end,start-end,… in seconds")
-        form.addRow("Time windows (s):", self.ed_windows)
+        self.ed_windows.setToolTip(
+            "Time windows in seconds: start-end,start-end,… "
+            "Example: 0-30,120-180 keeps the first 30 s and a later minute."
+        )
+        form.addRow(
+            self._lab(
+                "Time windows (s):",
+                "Only used when “Trim to time windows” is checked.",
+            ),
+            self.ed_windows,
+        )
 
         self.chk_crop = QCheckBox("Crop frames")
+        self.chk_crop.setToolTip(
+            "If checked, keep only the rectangle defined by Left/Right/Top/Bottom "
+            "(pixel coordinates after optional resize)."
+        )
         form.addRow(self.chk_crop)
         crop = QHBoxLayout()
         self.spin_left = QSpinBox(); self.spin_left.setRange(0, 10000)
@@ -109,27 +138,52 @@ class PreprocessTab(QWidget):
             (self.spin_top, "T"),
             (self.spin_bottom, "B"),
         ):
+            w.setToolTip(
+                "Crop edge in pixels (after resize if resizing). L/R = horizontal, "
+                "T/B = vertical. Only used when Crop frames is checked."
+            )
             crop.addWidget(QLabel(lab))
             crop.addWidget(w)
-        form.addRow("Crop L/R/T/B:", crop)
+        form.addRow(
+            self._lab("Crop L/R/T/B:", "Pixel bounds of the crop window."),
+            crop,
+        )
 
         self.chk_bright = QCheckBox("Enhance brightness")
         self.spin_bright = QDoubleSpinBox()
         self.spin_bright.setRange(0.0, 10.0)
         self.spin_bright.setValue(1.0)
+        tip_b = (
+            "Brightness factor (PIL ImageEnhance). 1.0 = no change; >1 brighter; "
+            "<1 darker. Only applied when the checkbox is on."
+        )
+        self.chk_bright.setToolTip(tip_b)
+        self.spin_bright.setToolTip(tip_b)
         form.addRow(self.chk_bright, self.spin_bright)
 
         self.chk_contrast = QCheckBox("Enhance contrast")
         self.spin_contrast = QDoubleSpinBox()
         self.spin_contrast.setRange(0.0, 10.0)
         self.spin_contrast.setValue(1.0)
+        tip_c = (
+            "Contrast factor (PIL ImageEnhance). 1.0 = no change; >1 more contrast. "
+            "Helps detection when illumination is flat. Only if checkbox is on."
+        )
+        self.chk_contrast.setToolTip(tip_c)
+        self.spin_contrast.setToolTip(tip_c)
         form.addRow(self.chk_contrast, self.spin_contrast)
 
         self.spin_fps = QSpinBox()
         self.spin_fps.setRange(0, 240)
         self.spin_fps.setSpecialValueText("original")
         self.spin_fps.setValue(0)
-        form.addRow("Target FPS:", self.spin_fps)
+        tip_fps = (
+            "Downsample to this frames-per-second by dropping frames. "
+            "“original”/0 keeps the source FPS. Lower FPS speeds later analysis "
+            "if behavior dynamics allow it. Cannot raise FPS above the source."
+        )
+        self.spin_fps.setToolTip(tip_fps)
+        form.addRow(self._lab("Target FPS:", tip_fps), self.spin_fps)
         layout.addWidget(opts)
 
         # Videos
@@ -168,6 +222,12 @@ class PreprocessTab(QWidget):
         self._extra: List[str] = []
         self._set_default_out()
         self.refresh_videos()
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     def _set_default_out(self) -> None:
         p = self.project.project

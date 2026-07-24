@@ -98,38 +98,80 @@ class GenerateExamplesTab(QWidget):
 
         # Generation params (synced from / to project defaults)
         params = QGroupBox("Generation parameters (saved with project)")
+        params.setToolTip(
+            "How short video clips (examples) are cut from annotated bouts for "
+            "categorizer training. Stored on the project so Annotate/Generate stay in sync."
+        )
         form = QFormLayout(params)
 
         self.spin_length = QSpinBox()
         self.spin_length.setRange(1, 500)
         self.spin_length.setValue(15)
-        form.addRow("Window length (frames):", self.spin_length)
+        tip_len = (
+            "Window length (frames) — duration of each training clip (LabGym "
+            "time_step). Example: 15 at 30 fps ≈ 0.5 s of video + matching pattern "
+            "image. Must match the length you will train the categorizer with. "
+            "You can re-run generation with a new length without re-annotating."
+        )
+        self.spin_length.setToolTip(tip_len)
+        form.addRow(self._lab("Window length (frames):", tip_len), self.spin_length)
 
         self.combo_sampling = QComboBox()
         for s in ("dense_in_bout", "bout_end", "bout_center", "coverage"):
             self.combo_sampling.addItem(s, s)
-        form.addRow("Sampling:", self.combo_sampling)
+        tip_samp = (
+            "Where windows are placed inside each bout:\n"
+            "• dense_in_bout — many overlapping windows along the bout (most examples).\n"
+            "• bout_end — one window ending at the bout’s last frame.\n"
+            "• bout_center — one window centered on the bout.\n"
+            "• coverage — spaced windows that cover the bout."
+        )
+        self.combo_sampling.setToolTip(tip_samp)
+        form.addRow(self._lab("Sampling:", tip_samp), self.combo_sampling)
 
         self.spin_stride = QSpinBox()
         self.spin_stride.setRange(0, 500)
         self.spin_stride.setSpecialValueText("auto (length/3)")
-        form.addRow("Stride (dense):", self.spin_stride)
+        tip_stride = (
+            "Step between successive windows when sampling is dense. "
+            "0 = auto (about length/3). Smaller stride → more examples and more overlap."
+        )
+        self.spin_stride.setToolTip(tip_stride)
+        form.addRow(self._lab("Stride (dense):", tip_stride), self.spin_stride)
 
         self.spin_min_bout = QSpinBox()
         self.spin_min_bout.setRange(1, 500)
-        form.addRow("Min bout frames:", self.spin_min_bout)
+        tip_min = (
+            "Skip annotated bouts shorter than this many frames. Filters out "
+            "tiny accidental toggles that are too short for a full training window."
+        )
+        self.spin_min_bout.setToolTip(tip_min)
+        form.addRow(self._lab("Min bout frames:", tip_min), self.spin_min_bout)
 
         self.spin_social = QDoubleSpinBox()
         self.spin_social.setRange(0.0, 100.0)
-        self.spin_social.setToolTip("Mode 2 only; 0 = include all other IDs")
-        form.addRow("Social distance (mode 2):", self.spin_social)
+        tip_soc = (
+            "Interactive advanced (mode 2) only: how near another animal must be "
+            "(in folds of body size) to be included as a costar in the crop. "
+            "0 = include all other IDs (no distance filter)."
+        )
+        self.spin_social.setToolTip(tip_soc)
+        form.addRow(self._lab("Social distance (mode 2):", tip_soc), self.spin_social)
 
         self.chk_soft = QCheckBox("Write soft_labels.csv")
         self.chk_soft.setChecked(True)
+        self.chk_soft.setToolTip(
+            "Also write soft_labels.csv next to examples for hard_soft_aux / "
+            "soft_primary categorizer training (probability targets from overlapping labels)."
+        )
         form.addRow(self.chk_soft)
 
         self.chk_bg = QCheckBox("Background-free blobs")
         self.chk_bg.setChecked(True)
+        self.chk_bg.setToolTip(
+            "If checked, animal blobs are extracted without the video background "
+            "(LabGym background-free style). Matches typical LabGym training examples."
+        )
         form.addRow(self.chk_bg)
 
         layout.addWidget(params)
@@ -163,6 +205,12 @@ class GenerateExamplesTab(QWidget):
         self.project.changed.connect(self._on_project_changed)
         self.project.project_replaced.connect(self._on_project_changed)
         self._on_project_changed()
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     def _on_project_changed(self) -> None:
         self._load_params_from_project()

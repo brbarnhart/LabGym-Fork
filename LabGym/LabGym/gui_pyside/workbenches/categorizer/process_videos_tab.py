@@ -91,74 +91,164 @@ class ProcessVideosTab(QWidget):
         mbox = QGroupBox("Models")
         mform = QFormLayout(mbox)
         self.ed_detector = QLineEdit()
+        self.ed_detector.setToolTip(
+            "Trained LabGym detector folder (model_final.pth + model_parameters.txt). "
+            "Used to find and track animals before categorization."
+        )
         b_d = QPushButton("Browse…")
         b_d.clicked.connect(lambda: self._browse_dir(self.ed_detector))
-        mform.addRow("Detector:", self._row(self.ed_detector, b_d))
+        mform.addRow(
+            self._lab(
+                "Detector:",
+                "Path to the detector used for locating animals. Same type as "
+                "Detect + track.",
+            ),
+            self._row(self.ed_detector, b_d),
+        )
         self.lbl_kinds = QLabel("—")
-        mform.addRow("Animal kinds:", self.lbl_kinds)
+        self.lbl_kinds.setToolTip("Categories the detector was trained to detect.")
+        mform.addRow(
+            self._lab("Animal kinds:", "Read from the detector’s model_parameters.txt."),
+            self.lbl_kinds,
+        )
         self.ed_detector.textChanged.connect(self._on_detector_changed)
 
         self.ed_categorizer = QLineEdit()
+        self.ed_categorizer.setToolTip(
+            "Trained LabGym categorizer folder (Keras model + model_parameters.txt "
+            "with classnames, time_step, network type, etc.). Behavior names and "
+            "input sizes are loaded automatically from that file."
+        )
         b_c = QPushButton("Browse…")
         b_c.clicked.connect(lambda: self._browse_dir(self.ed_categorizer))
-        mform.addRow("Categorizer:", self._row(self.ed_categorizer, b_c))
+        mform.addRow(
+            self._lab(
+                "Categorizer:",
+                "Model that assigns behavior labels over time for each tracked animal.",
+            ),
+            self._row(self.ed_categorizer, b_c),
+        )
         self.lbl_behaviors = QLabel("—")
-        mform.addRow("Behaviors:", self.lbl_behaviors)
+        self.lbl_behaviors.setToolTip(
+            "Behavior class names stored in the categorizer’s model_parameters.txt."
+        )
+        mform.addRow(
+            self._lab("Behaviors:", "Classes this categorizer can predict."),
+            self.lbl_behaviors,
+        )
         self.ed_categorizer.textChanged.connect(self._on_categorizer_changed)
 
         btn_scan = QPushButton("Scan project / bundled models")
+        btn_scan.setToolTip(
+            "Search the project models folder and LabGym’s bundled detectors/models "
+            "directories for available detectors and categorizers."
+        )
         btn_scan.clicked.connect(self._scan_models)
         mform.addRow(btn_scan)
         layout.addWidget(mbox)
 
         # Params
         pbox = QGroupBox("Analysis parameters")
+        pbox.setToolTip(
+            "How long to analyze, at what resolution, and whether to reuse ID fixes "
+            "from Review IDs before labeling behaviors."
+        )
         pform = QFormLayout(pbox)
         self.spin_animals = QSpinBox()
         self.spin_animals.setRange(1, 50)
         self.spin_animals.setValue(2)
-        pform.addRow("Animals per kind:", self.spin_animals)
+        tip_animals = (
+            "Expected number of individuals of each animal kind (same count for "
+            "every kind). Allocates track slots for the detector (e.g. 2 → IDs 0,1)."
+        )
+        self.spin_animals.setToolTip(tip_animals)
+        pform.addRow(self._lab("Animals per kind:", tip_animals), self.spin_animals)
 
         self.spin_batch = QSpinBox()
         self.spin_batch.setRange(1, 32)
         self.spin_batch.setValue(1)
-        pform.addRow("Detector batch size:", self.spin_batch)
+        tip_batch = (
+            "GPU batch size for detector inference. Higher can be faster; lower "
+            "if you hit out-of-memory errors."
+        )
+        self.spin_batch.setToolTip(tip_batch)
+        pform.addRow(self._lab("Detector batch size:", tip_batch), self.spin_batch)
 
         self.spin_duration = QDoubleSpinBox()
         self.spin_duration.setRange(0.0, 1e7)
         self.spin_duration.setValue(0.0)
         self.spin_duration.setSpecialValueText("full video")
-        pform.addRow("Duration (s):", self.spin_duration)
+        tip_dur = (
+            "Seconds of video to analyze after the start time. 0 / “full video” = "
+            "from start time to end of file."
+        )
+        self.spin_duration.setToolTip(tip_dur)
+        pform.addRow(self._lab("Duration (s):", tip_dur), self.spin_duration)
 
         self.spin_t = QDoubleSpinBox()
         self.spin_t.setRange(0.0, 1e7)
-        pform.addRow("Start time (s):", self.spin_t)
+        tip_t = "Start time in seconds from the beginning of the video (0 = first frame)."
+        self.spin_t.setToolTip(tip_t)
+        pform.addRow(self._lab("Start time (s):", tip_t), self.spin_t)
 
         self.spin_fw = QSpinBox()
         self.spin_fw.setRange(0, 4000)
         self.spin_fw.setSpecialValueText("original")
-        pform.addRow("Frame width:", self.spin_fw)
+        tip_fw = (
+            "Resize each frame to this width in pixels (height scales to keep aspect "
+            "ratio). “original”/0 = no resize. Smaller (e.g. 480) is much faster; "
+            "must match what you used for training/detection when possible."
+        )
+        self.spin_fw.setToolTip(tip_fw)
+        pform.addRow(self._lab("Frame width:", tip_fw), self.spin_fw)
 
         self.spin_uncertain = QDoubleSpinBox()
         self.spin_uncertain.setRange(0.0, 1.0)
         self.spin_uncertain.setSingleStep(0.05)
         self.spin_uncertain.setValue(0.0)
-        pform.addRow("Uncertainty threshold:", self.spin_uncertain)
+        tip_unc = (
+            "Minimum gap between the top and second-best behavior probabilities "
+            "required to accept a label. 0 = always take the top class. Higher "
+            "values produce more “NA” (uncertain) labels when the model is unsure."
+        )
+        self.spin_uncertain.setToolTip(tip_unc)
+        pform.addRow(
+            self._lab("Uncertainty threshold:", tip_unc), self.spin_uncertain
+        )
 
         self.chk_apply_id = QCheckBox(
             "Apply ID remaps from Review IDs package when available"
         )
         self.chk_apply_id.setChecked(True)
+        self.chk_apply_id.setToolTip(
+            "If an id_review package (from Detect + track / Review IDs) is found "
+            "for the video, apply saved identity-swap corrections after tracking "
+            "and before categorizing. Recommended when you already fixed ID swaps."
+        )
         pform.addRow(self.chk_apply_id)
 
         self.chk_legend = QCheckBox("Show legend on annotated video")
         self.chk_legend.setChecked(True)
+        self.chk_legend.setToolTip(
+            "Draw a behavior-name color legend on the exported annotated video."
+        )
         pform.addRow(self.chk_legend)
 
         self.ed_out = QLineEdit()
+        self.ed_out.setToolTip(
+            "Parent folder for analysis outputs. LabGym creates a subfolder per "
+            "video stem (annotated video, spreadsheets, etc.)."
+        )
         b_o = QPushButton("Browse…")
         b_o.clicked.connect(lambda: self._browse_dir(self.ed_out))
-        pform.addRow("Results root:", self._row(self.ed_out, b_o))
+        pform.addRow(
+            self._lab(
+                "Results root:",
+                "Where per-video analysis folders are written (default: project "
+                "analysis/).",
+            ),
+            self._row(self.ed_out, b_o),
+        )
         layout.addWidget(pbox)
 
         # Videos
@@ -212,6 +302,12 @@ class ProcessVideosTab(QWidget):
         self.project.project_replaced.connect(self.refresh_videos)
         self._init_defaults()
         self.refresh_videos()
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     @staticmethod
     def _row(edit, btn):

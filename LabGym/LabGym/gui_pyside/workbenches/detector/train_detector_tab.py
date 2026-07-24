@@ -60,33 +60,75 @@ class TrainDetectorTab(QWidget):
 
         form = QFormLayout()
         self.ed_images = QLineEdit()
+        self.ed_images.setToolTip(
+            "Folder of all training images referenced by the COCO annotation file."
+        )
         b1 = QPushButton("Browse…")
         b1.clicked.connect(lambda: self._browse_dir(self.ed_images))
-        form.addRow("Training images folder:", self._row(self.ed_images, b1))
+        form.addRow(
+            self._lab(
+                "Training images folder:",
+                "Directory containing the still frames used for detector training.",
+            ),
+            self._row(self.ed_images, b1),
+        )
 
         self.ed_ann = QLineEdit()
+        self.ed_ann.setToolTip(
+            "COCO instance-segmentation JSON describing animal/object masks and "
+            "categories for those images (LabGym / CVAT export format)."
+        )
         b2 = QPushButton("Browse…")
         b2.clicked.connect(lambda: self._browse_file(self.ed_ann, "JSON (*.json)"))
-        form.addRow("COCO annotation JSON:", self._row(self.ed_ann, b2))
+        form.addRow(
+            self._lab("COCO annotation JSON:", "Must list the same images as above."),
+            self._row(self.ed_ann, b2),
+        )
 
         self.ed_out = QLineEdit()
+        self.ed_out.setToolTip(
+            "Parent directory where a new subfolder named below will store the "
+            "trained detector (weights + config + model_parameters.txt)."
+        )
         b3 = QPushButton("Browse…")
         b3.clicked.connect(lambda: self._browse_dir(self.ed_out))
-        form.addRow("Parent folder for detector:", self._row(self.ed_out, b3))
+        form.addRow(
+            self._lab("Parent folder for detector:", "Usually the project models/ folder."),
+            self._row(self.ed_out, b3),
+        )
 
         self.ed_name = QLineEdit("New_detector")
-        form.addRow("Detector name:", self.ed_name)
+        self.ed_name.setToolTip(
+            "Name of the new detector subfolder. Letters, numbers, _ and - only; "
+            "must not already exist under the parent folder."
+        )
+        form.addRow(
+            self._lab("Detector name:", "Becomes <parent>/<name>/."),
+            self.ed_name,
+        )
 
         self.spin_size = QSpinBox()
         self.spin_size.setRange(32, 2048)
         self.spin_size.setSingleStep(32)
         self.spin_size.setValue(480)
-        form.addRow("Inference frame size:", self.spin_size)
+        tip_size = (
+            "Inferencing frame size (pixels on the short side, divisible by 32). "
+            "Larger → more accurate, slower. Smaller → faster, less detail. "
+            "480 is LabGym’s usual default; must be divisible by 32."
+        )
+        self.spin_size.setToolTip(tip_size)
+        form.addRow(self._lab("Inference frame size:", tip_size), self.spin_size)
 
         self.spin_iter = QSpinBox()
         self.spin_iter.setRange(1, 1_000_000)
         self.spin_iter.setValue(1000)
-        form.addRow("Training iterations:", self.spin_iter)
+        tip_iter = (
+            "Number of Detectron2 training iterations. More → usually better accuracy "
+            "but longer training. 200–2000 is typical; social/interactive detectors "
+            "sometimes need more."
+        )
+        self.spin_iter.setToolTip(tip_iter)
+        form.addRow(self._lab("Training iterations:", tip_iter), self.spin_iter)
         layout.addLayout(form)
 
         self.btn = QPushButton("Train detector")
@@ -110,6 +152,12 @@ class TrainDetectorTab(QWidget):
             self.ed_out.setText(str(resource_filename("LabGym", "detectors")))
         except Exception:
             pass
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     @staticmethod
     def _row(edit, btn):

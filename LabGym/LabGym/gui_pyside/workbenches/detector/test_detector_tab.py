@@ -57,24 +57,42 @@ class TestDetectorTab(QWidget):
 
         form = QFormLayout()
         self.ed_det = QLineEdit()
+        self.ed_det.setToolTip("Trained detector folder to evaluate.")
         b0 = QPushButton("Browse…")
         b0.clicked.connect(lambda: self._browse_dir(self.ed_det))
-        form.addRow("Detector folder:", self._row(self.ed_det, b0))
+        form.addRow(
+            self._lab("Detector folder:", "Contains model_final.pth and config."),
+            self._row(self.ed_det, b0),
+        )
 
         self.ed_images = QLineEdit()
+        self.ed_images.setToolTip("Ground-truth test images (held-out from training).")
         b1 = QPushButton("Browse…")
         b1.clicked.connect(lambda: self._browse_dir(self.ed_images))
-        form.addRow("Test images folder:", self._row(self.ed_images, b1))
+        form.addRow(
+            self._lab("Test images folder:", "Images for COCO evaluation."),
+            self._row(self.ed_images, b1),
+        )
 
         self.ed_ann = QLineEdit()
+        self.ed_ann.setToolTip("COCO instance-segmentation JSON for the test images.")
         b2 = QPushButton("Browse…")
         b2.clicked.connect(lambda: self._browse_file(self.ed_ann))
-        form.addRow("Annotation JSON:", self._row(self.ed_ann, b2))
+        form.addRow(
+            self._lab("Annotation JSON:", "Must match the test images."),
+            self._row(self.ed_ann, b2),
+        )
 
         self.ed_out = QLineEdit()
+        self.ed_out.setToolTip(
+            "Where to write annotated previews and COCO evaluation metrics."
+        )
         b3 = QPushButton("Browse…")
         b3.clicked.connect(lambda: self._browse_dir(self.ed_out))
-        form.addRow("Output folder:", self._row(self.ed_out, b3))
+        form.addRow(
+            self._lab("Output folder:", "Evaluation outputs and mAP reports."),
+            self._row(self.ed_out, b3),
+        )
         layout.addLayout(form)
 
         self.btn = QPushButton("Test detector")
@@ -86,6 +104,12 @@ class TestDetectorTab(QWidget):
 
         if self.project.project.defaults.detector_name:
             self.ed_det.setText(self.project.project.defaults.detector_name)
+
+    @staticmethod
+    def _lab(text: str, tip: str) -> QLabel:
+        lab = QLabel(text)
+        lab.setToolTip(tip)
+        return lab
 
     @staticmethod
     def _row(edit, btn):
