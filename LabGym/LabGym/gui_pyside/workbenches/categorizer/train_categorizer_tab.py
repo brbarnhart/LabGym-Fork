@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import os
+from io import BytesIO
 from pathlib import Path
-from typing import Optional
+from typing import Dict, List, Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -66,6 +68,7 @@ class _TrainWorker(QObject):
     error = Signal(str)
     progress = Signal(str)
     progress_aug = Signal(int, int, str)  # done, total, message
+    progress_train = Signal(int, dict)  # epoch (1-based), logs
 
     def __init__(self, params: dict):
         super().__init__()
@@ -88,6 +91,9 @@ class _TrainWorker(QObject):
 
             def _aug_cb(done: int, total: int, msg: str) -> None:
                 self.progress_aug.emit(int(done), int(total), str(msg))
+
+            def _train_cb(epoch: int, logs: dict) -> None:
+                self.progress_train.emit(int(epoch), dict(logs or {}))
 
             self.progress.emit(
                 f"Export-augment then train onfly → {out_folder} "
@@ -116,6 +122,7 @@ class _TrainWorker(QObject):
                     soft_labels_path=p.get("soft_labels_path"),
                     num_workers=n_workers,
                     progress_cb=_aug_cb,
+                    train_progress_cb=_train_cb,
                 )
             else:
                 CA.train_combnet(
@@ -143,6 +150,7 @@ class _TrainWorker(QObject):
                     soft_labels_path=p.get("soft_labels_path"),
                     num_workers=n_workers,
                     progress_cb=_aug_cb,
+                    train_progress_cb=_train_cb,
                 )
             self.finished.emit(p["model_path"])
         except Exception as exc:
@@ -403,6 +411,44 @@ class TrainCategorizerTab(QWidget):
         )
         layout.addWidget(self.progress_aug)
 
+        self.progress_train = QProgressBar()
+        self.progress_train.setRange(0, 0)  # indeterminate during fit (early stopping)
+        self.progress_train.setFormat("Training: waiting…")
+        self.progress_train.setToolTip(
+            "Training runs until early stopping. Bar is indeterminate; epoch "
+            "metrics update below after each epoch."
+        )
+        layout.addWidget(self.progress_train)
+
+        metrics = QGroupBox("Training metrics (live)")
+        metrics.setToolTip("Updated after each training epoch (export/onfly path).")
+        mform = QFormLayout(metrics)
+        self.lbl_epoch = QLabel("—")
+        self.lbl_loss = QLabel("—")
+        self.lbl_val_loss = QLabel("—")
+        self.lbl_acc = QLabel("—")
+        self.lbl_val_acc = QLabel("—")
+        mform.addRow("Epoch:", self.lbl_epoch)
+        mform.addRow("loss:", self.lbl_loss)
+        mform.addRow("val_loss:", self.lbl_val_loss)
+        mform.addRow("accuracy:", self.lbl_acc)
+        mform.addRow("val_accuracy:", self.lbl_val_acc)
+        self.lbl_curve = QLabel()
+        self.lbl_curve.setMinimumHeight(120)
+        self.lbl_curve.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.lbl_curve.setStyleSheet(
+            "QLabel { background: #1e1e1e; border: 1px solid #444; border-radius: 4px; }"
+        )
+        self.lbl_curve.setText("Loss curves appear after the first epoch.")
+        mform.addRow(self.lbl_curve)
+        layout.addWidget(metrics)
+        self._hist: Dict[str, List[float]] = {
+            "loss": [],
+            "val_loss": [],
+            "accuracy": [],
+            "val_accuracy": [],
+        }
+
         self.btn = QPushButton("Train categorizer")
         self.btn.clicked.connect(self._train)
         layout.addWidget(self.btn)
@@ -547,6 +593,9 @@ class TrainCategorizerTab(QWidget):
         )
         self.btn.setEnabled(False)
         self.progress_aug.setValue(0)
+        self.progress_train.setRange(0, 0)
+        self.progress_train.setFormat("Training: waiting for fit…")
+        self._reset_metrics()
         self.lbl_phase.setText("Starting…")
         self.log.append(f"Training → {model_path}")
         self.log.append(f"Augmented export → {export}")
@@ -557,6 +606,7 @@ class TrainCategorizerTab(QWidget):
         self._thread.started.connect(worker.run)
         worker.progress.connect(self._on_status)
         worker.progress_aug.connect(self._on_aug_progress)
+        worker.progress_train.connect(self._on_train_progress)
         worker.finished.connect(self._train_done)
         worker.error.connect(self._err)
         worker.finished.connect(self._thread.quit)
@@ -565,9 +615,22 @@ class TrainCategorizerTab(QWidget):
         self._worker = worker
         self._thread.start()
 
+    def _reset_metrics(self) -> None:
+        self._hist = {"loss": [], "val_loss": [], "accuracy": [], "val_accuracy": []}
+        self.lbl_epoch.setText("—")
+        self.lbl_loss.setText("—")
+        self.lbl_val_loss.setText("—")
+        self.lbl_acc.setText("—")
+        self.lbl_val_acc.setText("—")
+        self.lbl_curve.clear()
+        self.lbl_curve.setText("Loss curves appear after the first epoch.")
+
     def _on_status(self, msg: str) -> None:
         self.log.append(msg)
         self.lbl_phase.setText(msg)
+        if "train" in msg.lower() and "augment" not in msg.lower():
+            self.progress_train.setRange(0, 0)
+            self.progress_train.setFormat("Training…")
 
     def _on_aug_progress(self, done: int, total: int, msg: str) -> None:
         if total > 0:
@@ -576,6 +639,73 @@ class TrainCategorizerTab(QWidget):
         # Log sparsely to avoid flooding
         if total > 0 and (done == total or done % max(1, total // 20) == 0):
             self.log.append(msg)
+        if total > 0 and done >= total:
+            self.progress_train.setRange(0, 0)
+            self.progress_train.setFormat("Training: fitting…")
+            self.lbl_phase.setText("Training (epochs until early stop)…")
+
+    def _on_train_progress(self, epoch: int, logs: dict) -> None:
+        self.progress_train.setRange(0, 0)
+        self.progress_train.setFormat(f"Training: epoch {epoch}")
+        self.lbl_epoch.setText(str(epoch))
+
+        def _fmt(key: str) -> str:
+            if key not in logs:
+                return "—"
+            try:
+                return f"{float(logs[key]):.4f}"
+            except (TypeError, ValueError):
+                return str(logs[key])
+
+        self.lbl_loss.setText(_fmt("loss"))
+        self.lbl_val_loss.setText(_fmt("val_loss"))
+        self.lbl_acc.setText(_fmt("accuracy"))
+        self.lbl_val_acc.setText(_fmt("val_accuracy"))
+        for k in self._hist:
+            if k in logs:
+                try:
+                    self._hist[k].append(float(logs[k]))
+                except (TypeError, ValueError):
+                    pass
+        self.lbl_phase.setText(
+            f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')}"
+        )
+        self.log.append(
+            f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')} "
+            f"acc={_fmt('accuracy')} val_acc={_fmt('val_accuracy')}"
+        )
+        self._refresh_curve()
+
+    def _refresh_curve(self) -> None:
+        loss = self._hist.get("loss") or []
+        if not loss:
+            return
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(4.5, 1.8), dpi=90)
+            ax.plot(range(1, len(loss) + 1), loss, label="loss", color="#6ea8fe")
+            vl = self._hist.get("val_loss") or []
+            if vl:
+                ax.plot(range(1, len(vl) + 1), vl, label="val_loss", color="#ffb86c")
+            ax.set_xlabel("Epoch")
+            ax.set_ylabel("Loss")
+            ax.legend(loc="upper right", fontsize=8)
+            ax.grid(True, alpha=0.3)
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", facecolor="#1e1e1e", edgecolor="none")
+            plt.close(fig)
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue())
+            self.lbl_curve.setPixmap(
+                pix.scaledToWidth(420, Qt.TransformationMode.SmoothTransformation)
+            )
+        except Exception:
+            pass
 
     def _cleanup(self) -> None:
         self._thread = None
@@ -583,6 +713,9 @@ class TrainCategorizerTab(QWidget):
 
     def _train_done(self, path: str) -> None:
         self.progress_aug.setValue(100)
+        self.progress_train.setRange(0, 1)
+        self.progress_train.setValue(1)
+        self.progress_train.setFormat("Training: done")
         self.lbl_phase.setText("Done")
         self.log.append(f"Done: {path}")
         self.project.project.defaults.categorizer_name = path
@@ -590,6 +723,9 @@ class TrainCategorizerTab(QWidget):
         QMessageBox.information(self, "Train categorizer", f"Saved:\n{path}")
 
     def _err(self, msg: str) -> None:
+        self.progress_train.setRange(0, 1)
+        self.progress_train.setValue(0)
+        self.progress_train.setFormat("Training: failed")
         self.lbl_phase.setText("Failed")
         self.log.append(f"ERROR: {msg}")
         QMessageBox.critical(self, "Failed", msg)

@@ -363,6 +363,20 @@ class Categorizers():
 		return apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode)
 
 
+	def _standard_fit_callbacks(self,model_path,train_progress_cb=None):
+		'''Checkpoint + early stop + LR plateau + optional epoch progress callback.'''
+		from LabGym.training.progress import make_epoch_progress_callback
+
+		cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
+		es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
+		rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
+		cbs=[cp,es,rl]
+		ep=make_epoch_progress_callback(train_progress_cb)
+		if ep is not None:
+			cbs.append(ep)
+		return cbs
+
+
 	def rename_label(self,file_path,new_path,resize=None):
 
 		# file_path: the folder that stores the sorted, unprepared examples
@@ -963,7 +977,7 @@ class Categorizers():
 		return model
 
 
-	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None):
+	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -983,6 +997,7 @@ class Categorizers():
 		# out_folder: if not None, will output all the augmented data to this folder
 		# num_workers: process workers for export augmentation (1 = sequential)
 		# progress_cb: optional callable(done, total, message) for export augmentation
+		# train_progress_cb: optional callable(epoch_1based, logs_dict) each training epoch
 
 		filters=8
 
@@ -1108,13 +1123,9 @@ class Categorizers():
 					model=self.simple_resnet(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
 				self._compile_model(model,label_mode=label_mode,lambda_soft=lambda_soft)
 
-				cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-				es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-				rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
 				# validation tensors may be hard-only in older paths; ensure soft stack
 				testY_tensor=testY
-				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=[cp,es,rl])
+				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1212,10 +1223,10 @@ class Categorizers():
 					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
 					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
 					label_mode=label_mode,lambda_soft=lambda_soft,soft_labels_path=soft_labels_path,
-					soft_source_path=data_path)
+					soft_source_path=data_path,train_progress_cb=train_progress_cb)
 
 
-	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None):
+	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None,train_progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1349,11 +1360,7 @@ class Categorizers():
 
 				self._compile_model(model,label_mode=getattr(self,'label_mode','hard_only'),lambda_soft=getattr(self,'lambda_soft',0.4))
 
-				cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-				es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-				rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=[cp,es,rl])
+				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1425,10 +1432,10 @@ class Categorizers():
 				else:
 					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
 
-				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
+				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,train_progress_cb=train_progress_cb)
 
 
-	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None):
+	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Categorizer
@@ -1572,11 +1579,7 @@ class Categorizers():
 				model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
 				self._compile_model(model,label_mode=label_mode,lambda_soft=lambda_soft)
 
-				cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-				es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-				rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=[cp,es,rl])
+				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1674,10 +1677,11 @@ class Categorizers():
 					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
 					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
 					color_costar=color_costar,label_mode=label_mode,lambda_soft=lambda_soft,
-					soft_labels_path=soft_labels_path,soft_source_path=data_path)
+					soft_labels_path=soft_labels_path,soft_source_path=data_path,
+					train_progress_cb=train_progress_cb)
 
 
-	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None):
+	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1773,11 +1777,7 @@ class Categorizers():
 				model=self.simple_resnet(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
 			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
-			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-			rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=[cp,es,rl])
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
@@ -1809,7 +1809,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_animation_analyzer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=1,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False):
+	def train_animation_analyzer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=1,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,train_progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1889,11 +1889,7 @@ class Categorizers():
 			else:
 				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
 
-			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-			rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=[cp,es,rl])
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
@@ -1925,7 +1921,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None):
+	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -2010,11 +2006,7 @@ class Categorizers():
 			model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
 			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
-			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
-			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
-			rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
-
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=[cp,es,rl])
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
