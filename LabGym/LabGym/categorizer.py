@@ -78,7 +78,7 @@ class DatasetFromPath_AA(Sequence):
 	Load batches of training examples (including animations) from path
 	'''
 
-	def __init__(self,path_to_examples,length=15,batch_size=32,dim_tconv=16,dim_conv=32,channel=1):
+	def __init__(self,path_to_examples,length=15,batch_size=32,dim_tconv=16,dim_conv=32,channel=1,label_mode='hard_only',class_means=None):
 
 		self.path_to_examples=path_to_examples
 		self.length=length
@@ -86,7 +86,10 @@ class DatasetFromPath_AA(Sequence):
 		self.dim_tconv=dim_tconv
 		self.dim_conv=dim_conv
 		self.channel=channel
+		self.label_mode=label_mode
+		self.class_means=class_means
 		self.pattern_image_paths,self.classmapping=self.load_info()
+		self.classnames=list(self.classmapping.keys())
 
 
 	def load_info(self):
@@ -150,6 +153,8 @@ class DatasetFromPath_AA(Sequence):
 		pattern_images=np.array(pattern_images)
 		pattern_images=pattern_images.astype('float32')/255.0
 		labels=np.array(labels)
+		labels=apply_class_mean_soft_to_labels(
+			labels,self.classnames,self.class_means,self.label_mode)
 
 		return [animations,pattern_images],labels
 
@@ -161,13 +166,16 @@ class DatasetFromPath(Sequence):
 	Load batches of training examples (not including animations) from path
 	'''
 
-	def __init__(self,path_to_examples,batch_size=32,dim_conv=32,channel=3):
+	def __init__(self,path_to_examples,batch_size=32,dim_conv=32,channel=3,label_mode='hard_only',class_means=None):
 
 		self.path_to_examples=path_to_examples
 		self.batch_size=batch_size
 		self.dim_conv=dim_conv
 		self.channel=channel
+		self.label_mode=label_mode
+		self.class_means=class_means
 		self.pattern_image_paths,self.classmapping=self.load_info()
+		self.classnames=list(self.classmapping.keys())
 
 
 	def load_info(self):
@@ -218,8 +226,363 @@ class DatasetFromPath(Sequence):
 		pattern_images=np.array(pattern_images)
 		pattern_images=pattern_images.astype('float32')/255.0
 		labels=np.array(labels)
+		labels=apply_class_mean_soft_to_labels(
+			labels,self.classnames,self.class_means,self.label_mode)
 
 		return pattern_images,labels
+
+
+def resolve_aug_methods(aug_methods):
+	'''Expand user-facing aug method names into internal method code strings.'''
+	if not aug_methods:
+		return ['orig']
+
+	remove=[]
+	all_methods=['orig','rot1','rot2','rot3','rot4','rot5','rot6','shrp','shrn','sclh','sclw','del1','del2']
+	options=['rot7','flph','flpv','brih','bril','shrr','sclr','delr']
+	for r in range(1,len(options)+1):
+		all_methods.extend([''.join(c) for c in itertools.combinations(options,r)])
+
+	for i in all_methods:
+		if 'random rotation' not in aug_methods:
+			if 'rot' in i:
+				remove.append(i)
+		if 'horizontal flipping' not in aug_methods:
+			if 'flph' in i:
+				remove.append(i)
+		if 'vertical flipping' not in aug_methods:
+			if 'flpv' in i:
+				remove.append(i)
+		if 'random brightening' not in aug_methods:
+			if 'brih' in i:
+				remove.append(i)
+		if 'random dimming' not in aug_methods:
+			if 'bril' in i:
+				remove.append(i)
+		if 'random shearing' not in aug_methods:
+			if 'shr' in i:
+				remove.append(i)
+		if 'random rescaling' not in aug_methods:
+			if 'scl' in i:
+				remove.append(i)
+		if 'random deletion' not in aug_methods:
+			if 'del' in i:
+				remove.append(i)
+
+	return list(set(all_methods)-set(remove))
+
+
+def apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode):
+	'''Build stacked [hard|soft] targets; soft from class means or hard copy.'''
+	from LabGym.training.losses import maybe_stack_soft_targets
+
+	hard=np.asarray(hard_Y,dtype=np.float32)
+	if hard.ndim==1:
+		if hard.shape[0]>0 and hard.max()<=1.0 and len(classnames)==2:
+			hard=hard.reshape(-1,1)
+		else:
+			C=len(classnames)
+			oh=np.zeros((hard.shape[0],C),dtype=np.float32)
+			for i,v in enumerate(hard.astype(int)):
+				if 0<=v<C:
+					oh[i,v]=1.0
+			hard=oh
+	soft=hard.copy()
+	if class_means and str(label_mode)!='hard_only':
+		C=hard.shape[1]
+		for i in range(hard.shape[0]):
+			if C==1 and len(classnames)==2:
+				idx=1 if hard[i,0]>=0.5 else 0
+				cname=classnames[idx] if idx<len(classnames) else classnames[0]
+			else:
+				idx=int(np.argmax(hard[i]))
+				cname=classnames[idx]
+			if cname in class_means:
+				m=class_means[cname]
+				if C==1 and len(m)==2:
+					soft[i,0]=m[1]
+				elif len(m)==C:
+					soft[i]=m
+	return maybe_stack_soft_targets(hard,soft,label_mode)
+
+
+def augment_one_example(
+		animation_path,
+		methods,
+		dim_tconv=0,
+		dim_conv=64,
+		channel=1,
+		time_step=15,
+		background_free=True,
+		black_background=True,
+		behavior_mode=0,
+		out_path=None,
+		seed=None,
+	):
+	'''
+	Augment a single source example with all method codes in ``methods``.
+
+	Picklable top-level function for future process-pool use (PR2).
+
+	Parameters
+	----------
+	animation_path : str
+		Path to the source animation (.avi) or pattern image (.jpg) used by
+		LabGym's train entry points (videos for combnet / animation analyzer;
+		images for pattern-only).
+	methods : list[str]
+		Internal method codes (from :func:`resolve_aug_methods`).
+	out_path : str or None
+		If set, write augmented files to this folder and return
+		``(None, None, None, amount, warnings)``.
+		If None, return in-memory arrays as
+		``(animations_list, pattern_list, labels_list, amount, warnings)``.
+
+	Returns
+	-------
+	tuple
+		``(animations, pattern_images, labels, amount, warnings)`` where the
+		first three are lists (or None when exporting) and ``warnings`` is a
+		list of log strings.
+	'''
+	if seed is not None:
+		random.seed(seed)
+		np.random.seed(seed % (2**32-1))
+
+	methods=list(methods)
+	random.shuffle(methods)
+
+	name=os.path.splitext(os.path.basename(animation_path))[0].split('_')[0]
+	label=os.path.splitext(animation_path)[0].split('_')[-1]
+	path_to_pattern_image=os.path.splitext(animation_path)[0]+'.jpg'
+
+	animations_out=[]
+	patterns_out=[]
+	labels_out=[]
+	warnings=[]
+	amount=0
+
+	for m in methods:
+
+		if 'rot1' in m:
+			angle=np.random.uniform(5,45)
+		elif 'rot2' in m:
+			angle=np.random.uniform(45,85)
+		elif 'rot3' in m:
+			angle=90.0
+		elif 'rot4' in m:
+			angle=np.random.uniform(95,135)
+		elif 'rot5' in m:
+			angle=np.random.uniform(135,175)
+		elif 'rot6' in m:
+			angle=180.0
+		elif 'rot7' in m:
+			angle=np.random.uniform(5,175)
+		else:
+			angle=None
+
+		if 'flphflpv' in m:
+			code=-1
+		elif 'flph' in m:
+			code=1
+		elif 'flpv' in m:
+			code=0
+		else:
+			code=None
+
+		if 'brihbril' in m:
+			beta=np.random.uniform(-50,50)
+		elif 'brih' in m:
+			beta=np.random.uniform(10,50)
+		elif 'bril' in m:
+			beta=np.random.uniform(-50,-10)
+		else:
+			beta=None
+
+		if 'shrp' in m:
+			shear=np.random.uniform(0.15,0.21)
+		elif 'shrn' in m:
+			shear=np.random.uniform(-0.21,-0.15)
+		elif 'shrr' in m:
+			shear=np.random.uniform(-0.21,0.21)
+		else:
+			shear=None
+
+		if 'sclh' in m:
+			width=0
+			scale=np.random.uniform(0.6,0.9)
+		elif 'sclw' in m:
+			width=1
+			scale=np.random.uniform(0.6,0.9)
+		elif 'sclr' in m:
+			width=random.randint(0,1)
+			scale=np.random.uniform(0.6,0.9)
+		else:
+			scale=None
+
+		if 'del1' in m:
+			if time_step>=30:
+				idx1=random.randint(0,round(time_step/3))
+				idx2=random.randint(round(time_step/3)+1,round(time_step*2/3))
+				to_delete=[idx1,idx2]
+			else:
+				to_delete=[random.randint(0,round(time_step/3))]
+		elif 'del2' in m:
+			to_delete=[random.randint(0,round(time_step/2)+1)]
+		elif 'delr' in m:
+			to_delete=[random.randint(0,time_step-1)]
+		else:
+			to_delete=None
+
+		if dim_tconv!=0:
+
+			capture=cv2.VideoCapture(animation_path)
+			if out_path is not None:
+				fps=round(capture.get(cv2.CAP_PROP_FPS))
+				w=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+				h=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+				writer=cv2.VideoWriter(
+					os.path.join(out_path,name+'_'+m+'_'+label+'.avi'),
+					cv2.VideoWriter_fourcc(*'MJPG'),int(fps),(w,h),True)
+			animation=deque()
+			frames=deque(maxlen=time_step)
+			original_frame=None
+			n=0
+
+			while True:
+				retval,frame=capture.read()
+				if original_frame is None:
+					original_frame=frame
+				if frame is None:
+					break
+				frames.append(frame)
+
+			capture.release()
+
+			frames_length=len(frames)
+			if frames_length<time_step:
+				for diff in range(time_step-frames_length):
+					frames.append(np.zeros_like(original_frame))
+				warnings.append('Inconsistent duration of animation detected at: '+str(animation_path)+'.')
+				warnings.append('Zero padding has been used, which may decrease the training accuracy.')
+
+			for frame in frames:
+
+				if to_delete is not None and n in to_delete:
+
+					if black_background is False:
+						frame=np.uint8(np.zeros_like(original_frame)+255)
+					else:
+						frame=np.zeros_like(original_frame)
+
+				else:
+
+					if code is not None:
+						frame=cv2.flip(frame,code)
+
+					if beta is not None:
+						frame=frame.astype('float')
+						if background_free:
+							if black_background:
+								frame[frame>30]+=beta
+							else:
+								frame[frame<225]+=beta
+						else:
+							frame+=beta
+						frame=np.uint8(np.clip(frame,0,255))
+
+					if angle is not None:
+						frame=ndimage.rotate(frame,angle,reshape=False,prefilter=False)
+
+					if shear is not None:
+						tf=AffineTransform(shear=shear)
+						frame=transform.warp(frame,tf,order=1,preserve_range=True,mode='constant')
+
+					if scale is not None:
+						frame_black=np.zeros_like(frame)
+						if black_background is False:
+							frame_black=np.uint8(frame_black+255)
+						if width==0:
+							frame_scl=cv2.resize(frame,(frame.shape[1],int(frame.shape[0]*scale)),interpolation=cv2.INTER_AREA)
+						else:
+							frame_scl=cv2.resize(frame,(int(frame.shape[1]*scale),frame.shape[0]),interpolation=cv2.INTER_AREA)
+						frame_scl=img_to_array(frame_scl)
+						x=(frame_black.shape[1]-frame_scl.shape[1])//2
+						y=(frame_black.shape[0]-frame_scl.shape[0])//2
+						frame_black[y:y+frame_scl.shape[0],x:x+frame_scl.shape[1]]=frame_scl
+						frame=frame_black
+
+				if out_path is None:
+					if channel==1:
+						frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
+					frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
+					frame=img_to_array(frame)
+					animation.append(frame)
+				else:
+					writer.write(np.uint8(frame))
+
+				n+=1
+
+			if out_path is None:
+				animations_out.append(np.array(animation))
+			else:
+				writer.release()
+
+		pattern_image=cv2.imread(path_to_pattern_image)
+
+		if code is not None:
+			pattern_image=cv2.flip(pattern_image,code)
+
+		if behavior_mode==3:
+			if beta is not None:
+				pattern_image=pattern_image.astype('float')
+				if background_free:
+					if black_background:
+						pattern_image[pattern_image>30]+=beta
+					else:
+						pattern_image[pattern_image<225]+=beta
+				else:
+					pattern_image+=beta
+				pattern_image=np.uint8(np.clip(pattern_image,0,255))
+
+		if angle is not None:
+			pattern_image=ndimage.rotate(pattern_image,angle,reshape=False,prefilter=False)
+
+		if shear is not None:
+			tf=AffineTransform(shear=shear)
+			pattern_image=transform.warp(pattern_image,tf,order=1,preserve_range=True,mode='constant')
+
+		if scale is not None:
+			pattern_image_black=np.zeros_like(pattern_image)
+			if width==0:
+				pattern_image_scl=cv2.resize(pattern_image,(pattern_image.shape[1],int(pattern_image.shape[0]*scale)),interpolation=cv2.INTER_AREA)
+			else:
+				pattern_image_scl=cv2.resize(pattern_image,(int(pattern_image.shape[1]*scale),pattern_image.shape[0]),interpolation=cv2.INTER_AREA)
+			x=(pattern_image_black.shape[1]-pattern_image_scl.shape[1])//2
+			y=(pattern_image_black.shape[0]-pattern_image_scl.shape[0])//2
+			pattern_image_black[y:y+pattern_image_scl.shape[0],
+			x:x+pattern_image_scl.shape[1],:]=pattern_image_scl
+			pattern_image=pattern_image_black
+
+		if out_path is None:
+
+			if behavior_mode==3:
+				if channel==1:
+					pattern_image=cv2.cvtColor(np.uint8(pattern_image),cv2.COLOR_BGR2GRAY)
+
+			pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
+			patterns_out.append(img_to_array(pattern_image))
+			labels_out.append(label)
+			amount+=1
+
+		else:
+
+			cv2.imwrite(os.path.join(out_path,name+'_'+m+'_'+label+'.jpg'),np.uint8(pattern_image))
+			amount+=1
+
+	if out_path is not None:
+		return None,None,None,amount,warnings
+	return animations_out,patterns_out,labels_out,amount,warnings
 
 
 
@@ -288,12 +651,9 @@ class Categorizers():
 			for hard,soft in table.rows.values():
 				if hard in buckets:
 					buckets[hard].append(soft)
-			# also align by soft classname order
-			name_to_i={n:i for i,n in enumerate(table.classnames)}
 			for c in classnames:
 				vecs=buckets.get(c) or []
 				if not vecs:
-					# try reindex
 					continue
 				m=np.mean(np.stack(vecs,axis=0),axis=0)
 				# map table class order -> training class order
@@ -313,37 +673,7 @@ class Categorizers():
 
 	def _apply_soft_to_batch_labels(self,hard_Y,classnames,class_means,label_mode):
 		'''Build stacked [hard|soft] targets; soft from class means or hard copy.'''
-		hard=np.asarray(hard_Y,dtype=np.float32)
-		if hard.ndim==1:
-			# binary single column or integer labels
-			if hard.shape[0]>0 and hard.max()<=1.0 and len(classnames)==2:
-				hard=hard.reshape(-1,1)
-			else:
-				# one-hot from integers
-				C=len(classnames)
-				oh=np.zeros((hard.shape[0],C),dtype=np.float32)
-				for i,v in enumerate(hard.astype(int)):
-					if 0<=v<C:
-						oh[i,v]=1.0
-				hard=oh
-		soft=hard.copy()
-		if class_means and str(label_mode)!='hard_only':
-			C=hard.shape[1]
-			for i in range(hard.shape[0]):
-				if C==1 and len(classnames)==2:
-					# binary: positive class index 1 convention varies; use soft means if both exist
-					idx=1 if hard[i,0]>=0.5 else 0
-					cname=classnames[idx] if idx<len(classnames) else classnames[0]
-				else:
-					idx=int(np.argmax(hard[i]))
-					cname=classnames[idx]
-				if cname in class_means:
-					m=class_means[cname]
-					if C==1 and len(m)==2:
-						soft[i,0]=m[1]  # positive class prob
-					elif len(m)==C:
-						soft[i]=m
-		return self._stack_soft_targets(hard,soft,label_mode)
+		return apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode)
 
 
 	def rename_label(self,file_path,new_path,resize=None):
@@ -424,7 +754,7 @@ class Categorizers():
 
 	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None):
 
-		# path_to_animations: the folder that stores all the prepared training examples
+		# path_to_animations: list of paths to prepared training examples (videos or images)
 		# dim_tconv: the input dimension of Animation Analyzer
 		# dim_conv: the input dimension of Pattern Recognizer
 		# channel: the input color channel of Animation Analyzer, 1 is gray scale, 3 is RGB
@@ -434,284 +764,48 @@ class Categorizers():
 		# black_background: whether to set background black
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# out_path: if not None, will output all the augmented data to this path
+		#
+		# PR1: sequential only (num_workers=1). Per-example work lives in
+		# :func:`augment_one_example` so PR2 can parallelize the export path.
 
 		animations=deque()
 		pattern_images=deque()
 		labels=deque()
 		amount=0
 
-		if len(aug_methods)==0:
-
-			methods=['orig']
-
-		else:
-
-			remove=[]
-
-			all_methods=['orig','rot1','rot2','rot3','rot4','rot5','rot6','shrp','shrn','sclh','sclw','del1','del2']
-			options=['rot7','flph','flpv','brih','bril','shrr','sclr','delr']
-			for r in range(1,len(options)+1):
-				all_methods.extend([''.join(c) for c in itertools.combinations(options,r)])
-
-			for i in all_methods:
-				if 'random rotation' not in aug_methods:
-					if 'rot' in i:
-						remove.append(i)
-				if 'horizontal flipping' not in aug_methods:
-					if 'flph' in i:
-						remove.append(i)
-				if 'vertical flipping' not in aug_methods:
-					if 'flpv' in i:
-						remove.append(i)
-				if 'random brightening' not in aug_methods:
-					if 'brih' in i:
-						remove.append(i)
-				if 'random dimming' not in aug_methods:
-					if 'bril' in i:
-						remove.append(i)
-				if 'random shearing' not in aug_methods:
-					if 'shr' in i:
-						remove.append(i)
-				if 'random rescaling' not in aug_methods:
-					if 'scl' in i:
-						remove.append(i)
-				if 'random deletion' not in aug_methods:
-					if 'del' in i:
-						remove.append(i)
-
-			methods=list(set(all_methods)-set(remove))
+		methods=resolve_aug_methods(aug_methods)
 
 		for i in path_to_animations:
+			anims,patterns,labs,n_done,warnings=augment_one_example(
+				i,
+				methods,
+				dim_tconv=dim_tconv,
+				dim_conv=dim_conv,
+				channel=channel,
+				time_step=time_step,
+				background_free=background_free,
+				black_background=black_background,
+				behavior_mode=behavior_mode,
+				out_path=out_path,
+				seed=None,
+			)
+			for w in warnings:
+				print(w)
+				self.log.append(w)
 
-			name=os.path.splitext(os.path.basename(i))[0].split('_')[0]
-			label=os.path.splitext(i)[0].split('_')[-1]
-			path_to_pattern_image=os.path.splitext(i)[0]+'.jpg'
-
-			random.shuffle(methods)
-
-			for m in methods:
-
-				if 'rot1' in m:
-					angle=np.random.uniform(5,45)
-				elif 'rot2' in m:
-					angle=np.random.uniform(45,85)
-				elif 'rot3' in m:
-					angle=90.0
-				elif 'rot4' in m:
-					angle=np.random.uniform(95,135)
-				elif 'rot5' in m:
-					angle=np.random.uniform(135,175)
-				elif 'rot6' in m:
-					angle=180.0
-				elif 'rot7' in m:
-					angle=np.random.uniform(5,175)
-				else:
-					angle=None
-
-				if 'flphflpv' in m:
-					code=-1
-				elif 'flph' in m:
-					code=1
-				elif 'flpv' in m:
-					code=0
-				else:
-					code=None
-
-				if 'brihbril' in m:
-					beta=np.random.uniform(-50,50)
-				elif 'brih' in m:
-					beta=np.random.uniform(10,50)
-				elif 'bril' in m:
-					beta=np.random.uniform(-50,-10)
-				else:
-					beta=None
-
-				if 'shrp' in m:
-					shear=np.random.uniform(0.15,0.21)
-				elif 'shrn' in m:
-					shear=np.random.uniform(-0.21,-0.15)
-				elif 'shrr' in m:
-					shear=np.random.uniform(-0.21,0.21)
-				else:
-					shear=None
-
-				if 'sclh' in m:
-					width=0
-					scale=np.random.uniform(0.6,0.9)
-				elif 'sclw' in m:
-					width=1
-					scale=np.random.uniform(0.6,0.9)
-				elif 'sclr' in m:
-					width=random.randint(0,1)
-					scale=np.random.uniform(0.6,0.9)
-				else:
-					scale=None
-
-				if 'del1' in m:
-					if time_step>=30:
-						idx1=random.randint(0,round(time_step/3))
-						idx2=random.randint(round(time_step/3)+1,round(time_step*2/3))
-						to_delete=[idx1,idx2]
-					else:
-						to_delete=[random.randint(0,round(time_step/3))]
-				elif 'del2' in m:
-					to_delete=[random.randint(0,round(time_step/2)+1)]
-				elif 'delr' in m:
-					to_delete=[random.randint(0,time_step-1)]
-				else:
-					to_delete=None
-
-				if dim_tconv!=0:
-
-					capture=cv2.VideoCapture(i)
-					if out_path is not None:
-						fps=round(capture.get(cv2.CAP_PROP_FPS))
-						w=int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-						h=int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-						writer=cv2.VideoWriter(os.path.join(out_path,name+'_'+m+'_'+label+'.avi'),cv2.VideoWriter_fourcc(*'MJPG'),int(fps),(w,h),True)
-					animation=deque()
-					frames=deque(maxlen=time_step)
-					original_frame=None
-					n=0
-
-					while True:
-						retval,frame=capture.read()
-						if original_frame is None:
-							original_frame=frame
-						if frame is None:
-							break
-						frames.append(frame)
-
-					capture.release()
-
-					frames_length=len(frames)
-					if frames_length<time_step:
-						for diff in range(time_step-frames_length):
-							frames.append(np.zeros_like(original_frame))
-						print('Inconsistent duration of animation detected at: '+str(i)+'.')
-						self.log.append('Inconsistent duration of animation detected at: '+str(i)+'.')
-						print('Zero padding has been used, which may decrease the training accuracy.')
-						self.log.append('Zero padding has been used, which may decrease the training accuracy.')
-
-					for frame in frames:
-
-						if to_delete is not None and n in to_delete:
-
-							if black_background is False:
-								frame=np.uint8(np.zeros_like(original_frame)+255)
-							else:
-								frame=np.zeros_like(original_frame)
-
-						else:
-
-							if code is not None:
-								frame=cv2.flip(frame,code)
-
-							if beta is not None:
-								frame=frame.astype('float')
-								if background_free:
-									if black_background:
-										frame[frame>30]+=beta
-									else:
-										frame[frame<225]+=beta
-								else:
-									frame+=beta
-								frame=np.uint8(np.clip(frame,0,255))
-
-							if angle is not None:
-								frame=ndimage.rotate(frame,angle,reshape=False,prefilter=False)
-
-							if shear is not None:
-								tf=AffineTransform(shear=shear)
-								frame=transform.warp(frame,tf,order=1,preserve_range=True,mode='constant')
-
-							if scale is not None:
-								frame_black=np.zeros_like(frame)
-								if black_background is False:
-									frame_black=np.uint8(frame_black+255)
-								if width==0:
-									frame_scl=cv2.resize(frame,(frame.shape[1],int(frame.shape[0]*scale)),interpolation=cv2.INTER_AREA)
-								else:
-									frame_scl=cv2.resize(frame,(int(frame.shape[1]*scale),frame.shape[0]),interpolation=cv2.INTER_AREA)
-								frame_scl=img_to_array(frame_scl)
-								x=(frame_black.shape[1]-frame_scl.shape[1])//2
-								y=(frame_black.shape[0]-frame_scl.shape[0])//2
-								frame_black[y:y+frame_scl.shape[0],x:x+frame_scl.shape[1]]=frame_scl
-								frame=frame_black
-
-						if out_path is None:
-							if channel==1:
-								frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
-							frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
-							frame=img_to_array(frame)
-							animation.append(frame)
-						else:
-							writer.write(np.uint8(frame))
-
-						n+=1
-
-					if out_path is None:
-						animations.append(np.array(animation))
-					else:
-						writer.release()
-
-				pattern_image=cv2.imread(path_to_pattern_image)
-
-				if code is not None:
-					pattern_image=cv2.flip(pattern_image,code)
-
-				if behavior_mode==3:
-					if beta is not None:
-						pattern_image=pattern_image.astype('float')
-						if background_free:
-							if black_background:
-								pattern_image[pattern_image>30]+=beta
-							else:
-								pattern_image[pattern_image<225]+=beta
-						else:
-							pattern_image+=beta
-						pattern_image=np.uint8(np.clip(pattern_image,0,255))
-
-				if angle is not None:
-					pattern_image=ndimage.rotate(pattern_image,angle,reshape=False,prefilter=False)
-
-				if shear is not None:
-					tf=AffineTransform(shear=shear)
-					pattern_image=transform.warp(pattern_image,tf,order=1,preserve_range=True,mode='constant')
-
-				if scale is not None:
-					pattern_image_black=np.zeros_like(pattern_image)
-					if width==0:
-						pattern_image_scl=cv2.resize(pattern_image,(pattern_image.shape[1],int(pattern_image.shape[0]*scale)),interpolation=cv2.INTER_AREA)
-					else:
-						pattern_image_scl=cv2.resize(pattern_image,(int(pattern_image.shape[1]*scale),pattern_image.shape[0]),interpolation=cv2.INTER_AREA)
-					x=(pattern_image_black.shape[1]-pattern_image_scl.shape[1])//2
-					y=(pattern_image_black.shape[0]-pattern_image_scl.shape[0])//2
-					pattern_image_black[y:y+pattern_image_scl.shape[0],
-					x:x+pattern_image_scl.shape[1],:]=pattern_image_scl
-					pattern_image=pattern_image_black
-
-				if out_path is None:
-
-					if behavior_mode==3:
-						if channel==1:
-							pattern_image=cv2.cvtColor(np.uint8(pattern_image),cv2.COLOR_BGR2GRAY)
-
-					pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
-					pattern_images.append(img_to_array(pattern_image))
-
-					labels.append(label)
-
-					amount+=1
-					if amount%10000==0:
-						print('The augmented example amount: '+str(amount))
-						self.log.append('The augmented example amount: '+str(amount))
-						print(datetime.datetime.now())
-						self.log.append(str(datetime.datetime.now()))
-
-				else:
-
-					cv2.imwrite(os.path.join(out_path,name+'_'+m+'_'+label+'.jpg'),np.uint8(pattern_image))
+			if out_path is None:
+				if dim_tconv!=0 and anims:
+					animations.extend(anims)
+				if patterns:
+					pattern_images.extend(patterns)
+				if labs:
+					labels.extend(labs)
+			amount+=n_done
+			if amount>0 and amount%10000==0:
+				print('The augmented example amount: '+str(amount))
+				self.log.append('The augmented example amount: '+str(amount))
+				print(datetime.datetime.now())
+				self.log.append(str(datetime.datetime.now()))
 
 		if out_path is None:
 
@@ -1304,6 +1398,19 @@ class Categorizers():
 
 				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
 
+				self.label_mode=label_mode
+				self.lambda_soft=lambda_soft
+				if str(label_mode)!='hard_only':
+					class_means=self._class_mean_soft(data_path,list(self.classnames),soft_labels_path)
+					if class_means is None:
+						print('Soft labels not found; falling back to hard_only.')
+						self.log.append('Soft labels not found; falling back to hard_only.')
+						label_mode='hard_only'
+						self.label_mode=label_mode
+					else:
+						print('Using soft-label mode: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+						self.log.append('Using soft-label mode: '+str(label_mode))
+
 				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
 				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
 				print('This might take hours or days, depending on the capacity of your computer.')
@@ -1324,7 +1431,12 @@ class Categorizers():
 				else:
 					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
 
-				self.train_pattern_recognizer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
+				self.train_pattern_recognizer_onfly(
+					out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,
+					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
+					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
+					label_mode=label_mode,lambda_soft=lambda_soft,soft_labels_path=soft_labels_path,
+					soft_source_path=data_path)
 
 
 	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None):
@@ -1727,6 +1839,19 @@ class Categorizers():
 
 				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
 
+				self.label_mode=label_mode
+				self.lambda_soft=lambda_soft
+				if str(label_mode)!='hard_only':
+					class_means=self._class_mean_soft(data_path,list(self.classnames),soft_labels_path)
+					if class_means is None:
+						print('Soft labels not found; falling back to hard_only.')
+						self.log.append('Soft labels not found; falling back to hard_only.')
+						label_mode='hard_only'
+						self.label_mode=label_mode
+					else:
+						print('Using soft-label mode: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+						self.log.append('Using soft-label mode: '+str(label_mode))
+
 				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
 				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
 				print('This might take hours or days, depending on the capacity of your computer.')
@@ -1747,10 +1872,16 @@ class Categorizers():
 				else:
 					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder)
 
-				self.train_combnet_onfly(out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,level_tconv=level_tconv,level_conv=level_conv,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance)
+				self.train_combnet_onfly(
+					out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,
+					time_step=time_step,level_tconv=level_tconv,level_conv=level_conv,
+					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
+					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
+					color_costar=color_costar,label_mode=label_mode,lambda_soft=lambda_soft,
+					soft_labels_path=soft_labels_path,soft_source_path=data_path)
 
 
-	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0):
+	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1765,6 +1896,7 @@ class Categorizers():
 		# black_background: whether to set background black
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
+		# soft_source_path: original prepared-examples folder (for soft_labels.csv); defaults to data_path
 
 		filters=8
 
@@ -1773,8 +1905,8 @@ class Categorizers():
 
 		inputs=Input(shape=(dim,dim,channel))
 
-		print('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
-		self.log.append('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
+		print('Training Pattern Recognizer on-the-fly using the behavior examples in: '+str(data_path))
+		self.log.append('Training Pattern Recognizer on-the-fly using the behavior examples in: '+str(data_path))
 		print(datetime.datetime.now())
 		self.log.append(str(datetime.datetime.now()))
 
@@ -1795,8 +1927,24 @@ class Categorizers():
 			else:
 				channel=3
 
-			train_data=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel)
-			validation_data=DatasetFromPath(validation_folder,batch_size=batch_size,dim_conv=dim,channel=channel)
+			# Probe class names first so soft class-means align
+			_probe=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel)
+			classnames=list(_probe.classmapping.keys())
+			class_means=None
+			effective_label_mode=label_mode
+			if str(label_mode)!='hard_only':
+				src=soft_source_path or data_path
+				class_means=self._class_mean_soft(src,classnames,soft_labels_path)
+				if class_means is None:
+					print('Soft labels not found for onfly train; falling back to hard_only.')
+					self.log.append('Soft labels not found for onfly train; falling back to hard_only.')
+					effective_label_mode='hard_only'
+				else:
+					print('Using soft-label mode onfly: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+					self.log.append('Using soft-label mode onfly: '+str(label_mode))
+
+			train_data=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
+			validation_data=DatasetFromPath(validation_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 
 
 			if include_bodyparts:
@@ -1818,18 +1966,16 @@ class Categorizers():
 				time_step=std=0
 				inner_code=1
 
-			parameters={'classnames':list(train_data.classmapping.keys()),'dim_conv':int(dim),'channel':int(channel),'time_step':int(time_step),'network':0,'level_conv':int(level),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance)}
+			parameters={'classnames':list(train_data.classmapping.keys()),'dim_conv':int(dim),'channel':int(channel),'time_step':int(time_step),'network':0,'level_conv':int(level),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance),'label_mode':str(effective_label_mode),'lambda_soft':float(lambda_soft)}
 			pd_parameters=pd.DataFrame.from_dict(parameters)
 			pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
+			self.classnames=list(train_data.classmapping.keys())
 			if level<5:
-				model=self.simple_vgg(inputs,filters,classes=len(list(train_data.classmapping.keys())),level=level,with_classifier=True)
+				model=self.simple_vgg(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
 			else:
-				model=self.simple_resnet(inputs,filters,classes=len(list(train_data.classmapping.keys())),level=level,with_classifier=True)
-			if len(list(train_data.classmapping.keys()))==2:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='binary_crossentropy',metrics=['accuracy'])
-			else:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
+				model=self.simple_resnet(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
+			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
 			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
 			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
@@ -1983,7 +2129,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False):
+	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -2001,6 +2147,7 @@ class Categorizers():
 		# behavior_mode:  0--non-interactive, 1--interactive basic, 2--interactive advanced, 3--static images
 		# social_distance: a threshold (folds of size of a single animal) on whether to include individuals that are not main character in behavior examples
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
+		# soft_source_path: original prepared-examples folder (for soft_labels.csv); defaults to data_path
 
 		print('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
 		self.log.append('Training Categorizer with both Animation Analyzer and Pattern Recognizer using the behavior examples in: '+str(data_path))
@@ -2021,8 +2168,23 @@ class Categorizers():
 			else:
 				batch_size=4
 
-			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
-			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
+			_probe=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
+			classnames=list(_probe.classmapping.keys())
+			class_means=None
+			effective_label_mode=label_mode
+			if str(label_mode)!='hard_only':
+				src=soft_source_path or data_path
+				class_means=self._class_mean_soft(src,classnames,soft_labels_path)
+				if class_means is None:
+					print('Soft labels not found for onfly train; falling back to hard_only.')
+					self.log.append('Soft labels not found for onfly train; falling back to hard_only.')
+					effective_label_mode='hard_only'
+				else:
+					print('Using soft-label mode onfly: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
+					self.log.append('Using soft-label mode onfly: '+str(label_mode))
+
+			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
+			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2044,15 +2206,13 @@ class Categorizers():
 			else:
 				color_code=1
 
-			parameters={'classnames':list(train_data.classmapping.keys()),'dim_tconv':int(dim_tconv),'dim_conv':int(dim_conv),'channel':int(channel),'time_step':int(time_step),'network':2,'level_tconv':int(level_tconv),'level_conv':int(level_conv),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance),'color_code':int(color_code)}
+			self.classnames=list(train_data.classmapping.keys())
+			parameters={'classnames':list(self.classnames),'dim_tconv':int(dim_tconv),'dim_conv':int(dim_conv),'channel':int(channel),'time_step':int(time_step),'network':2,'level_tconv':int(level_tconv),'level_conv':int(level_conv),'inner_code':int(inner_code),'std':int(std),'background_free':int(background_code),'black_background':int(black_code),'behavior_kind':int(behavior_mode),'social_distance':int(social_distance),'color_code':int(color_code),'label_mode':str(effective_label_mode),'lambda_soft':float(lambda_soft)}
 			pd_parameters=pd.DataFrame.from_dict(parameters)
 			pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-			model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(list(train_data.classmapping.keys())),level_tconv=level_tconv,level_conv=level_conv)
-			if len(list(train_data.classmapping.keys()))==2:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='binary_crossentropy',metrics=['accuracy'])
-			else:
-				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
+			model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
+			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
 			cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
 			es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)

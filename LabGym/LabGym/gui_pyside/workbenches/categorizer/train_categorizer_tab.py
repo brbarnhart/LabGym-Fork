@@ -67,7 +67,13 @@ class _TrainWorker(QObject):
             CA = Categorizers()
             CA.label_mode = p["label_mode"]
             CA.lambda_soft = p["lambda_soft"]
-            self.progress.emit("Training categorizer (long-running)…")
+            out_folder = p.get("out_folder")
+            if not out_folder:
+                out_folder = str(Path(p["model_path"]) / "augmented_data")
+            Path(out_folder).mkdir(parents=True, exist_ok=True)
+            self.progress.emit(
+                f"Export-augment then train onfly → {out_folder} (sequential, 1 worker)…"
+            )
             if not p["animation_analyzer"]:
                 CA.train_pattern_recognizer(
                     p["data_path"],
@@ -85,7 +91,7 @@ class _TrainWorker(QObject):
                     black_background=p["black_background"],
                     behavior_mode=p["behavior_mode"],
                     social_distance=p["social_distance"],
-                    out_folder=None,
+                    out_folder=out_folder,
                     label_mode=p["label_mode"],
                     lambda_soft=p["lambda_soft"],
                     soft_labels_path=p.get("soft_labels_path"),
@@ -110,7 +116,7 @@ class _TrainWorker(QObject):
                     behavior_mode=p["behavior_mode"],
                     social_distance=p["social_distance"],
                     color_costar=p["color_costar"],
-                    out_folder=None,
+                    out_folder=out_folder,
                     label_mode=p["label_mode"],
                     lambda_soft=p["lambda_soft"],
                     soft_labels_path=p.get("soft_labels_path"),
@@ -307,6 +313,22 @@ class TrainCategorizerTab(QWidget):
         )
         form.addRow(self.chk_body)
 
+        self.ed_export = QLineEdit()
+        self.ed_export.setPlaceholderText("Default: <model_path>/augmented_data")
+        tip_export = (
+            "Folder for augmented train/validation examples written before on-the-fly "
+            "training. Default is <models parent>/<categorizer name>/augmented_data. "
+            "Export is always used (lower RAM than loading all augments into memory). "
+            "PR2 will add multi-worker parallelization for this path."
+        )
+        self.ed_export.setToolTip(tip_export)
+        b_ex = QPushButton("Browse…")
+        b_ex.clicked.connect(lambda: self._browse_dir(self.ed_export))
+        form.addRow(
+            self._lab("Augmented export folder:", tip_export),
+            self._row(self.ed_export, b_ex),
+        )
+
         self.ed_report = QLineEdit()
         self.ed_report.setToolTip(
             "Optional folder for training history / metric reports. Leave empty to skip."
@@ -415,12 +437,14 @@ class TrainCategorizerTab(QWidget):
                 return
         soft = self.ed_soft.text().strip() or None
         report = self.ed_report.text().strip() or None
+        export = self.ed_export.text().strip() or str(Path(model_path) / "augmented_data")
         mode = int(self.combo_mode.currentData())
         channel = 3 if mode == 2 else 1
         params = dict(
             data_path=data,
             model_path=model_path,
             out_path=report,
+            out_folder=export,
             animation_analyzer=self.chk_anim.isChecked(),
             behavior_mode=mode,
             length=int(self.spin_len.value()),
@@ -449,6 +473,7 @@ class TrainCategorizerTab(QWidget):
         )
         self.btn.setEnabled(False)
         self.log.append(f"Training → {model_path}")
+        self.log.append(f"Augmented export → {export}")
         self._thread = QThread(self)
         worker = _TrainWorker(params)
         worker.moveToThread(self._thread)
