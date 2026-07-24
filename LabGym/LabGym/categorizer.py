@@ -394,6 +394,23 @@ class Categorizers():
 			raise TrainingCancelled(msg)
 
 
+	@staticmethod
+	def has_exported_aug_data(out_folder):
+		'''True if out_folder has train/ and validation/ with at least one .jpg each.'''
+		if not out_folder:
+			return False
+		train_folder=os.path.join(out_folder,'train')
+		validation_folder=os.path.join(out_folder,'validation')
+		if not (os.path.isdir(train_folder) and os.path.isdir(validation_folder)):
+			return False
+		def _has_jpg(folder):
+			try:
+				return any(name.endswith('.jpg') for name in os.listdir(folder))
+			except OSError:
+				return False
+		return _has_jpg(train_folder) and _has_jpg(validation_folder)
+
+
 	def rename_label(self,file_path,new_path,resize=None):
 
 		# file_path: the folder that stores the sorted, unprepared examples
@@ -493,9 +510,13 @@ class Categorizers():
 		labels=deque()
 		amount=0
 
-		path_to_animations=list(path_to_animations)
+		path_to_animations=list(path_to_animations or [])
 		total_sources=len(path_to_animations)
 		methods=resolve_aug_methods(aug_methods)
+		try:
+			num_workers=max(1,int(num_workers or 1))
+		except (TypeError,ValueError):
+			num_workers=1
 
 		def _report(done_sources,msg=None):
 			if progress_cb is None:
@@ -509,15 +530,27 @@ class Categorizers():
 			except Exception:
 				pass
 
-		# Parallel export only; in-memory stays sequential (PR2, not PR's deferred P2 in-memory parallel).
+		if total_sources==0:
+			msg='No source examples to augment.'
+			print(msg)
+			self.log.append(msg)
+			_report(0,msg)
+			if out_path is None:
+				if dim_tconv!=0:
+					animations=np.array([],dtype='float32')
+				pattern_images=np.array([],dtype='float32')
+				labels=np.array([])
+			return animations,pattern_images,labels
+
+		# Parallel export only; in-memory stays sequential.
 		use_pool=(
 			out_path is not None
-			and int(num_workers or 1)>1
+			and num_workers>1
 			and total_sources>=16
 		)
 		workers=1
 		if use_pool:
-			workers=max(1,min(int(num_workers),total_sources))
+			workers=max(1,min(num_workers,total_sources))
 			msg='Augmenting with %d workers (%d sources)…'%(workers,total_sources)
 			print(msg)
 			self.log.append(msg)
@@ -1014,7 +1047,7 @@ class Categorizers():
 		return model
 
 
-	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None):
+	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None,skip_augment=False):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1227,34 +1260,49 @@ class Categorizers():
 						print('Using soft-label mode: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
 						self.log.append('Using soft-label mode: '+str(label_mode))
 
-				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				print('This might take hours or days, depending on the capacity of your computer.')
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
-
-				print('Start to augment training examples...')
-				self.log.append('Start to augment training examples...')
-				train_folder=os.path.join(out_folder,'train')
-				os.makedirs(train_folder,exist_ok=True)
-				n_train=len(train_files)
-				n_val=len(test_files)
-				aug_total=n_train+n_val
-				def _phase_cb(offset):
-					if progress_cb is None:
-						return None
-					def _cb(done,tot,msg):
-						progress_cb(offset+done,aug_total,msg)
-					return _cb
-				_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
-				print('Start to augment validation examples...')
-				self.log.append('Start to augment validation examples...')
-				validation_folder=os.path.join(out_folder,'validation')
-				os.makedirs(validation_folder,exist_ok=True)
-				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
+				if reuse:
+					msg='Reusing existing augmented export (skip re-augment): '+str(out_folder)
+					print(msg)
+					self.log.append(msg)
+					if progress_cb is not None:
+						try:
+							progress_cb(1,1,'Reusing existing augmented data…')
+						except Exception:
+							pass
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					if skip_augment:
+						msg='skip_augment requested but export incomplete; re-augmenting to: '+str(out_folder)
+						print(msg)
+						self.log.append(msg)
+					print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					print('This might take hours or days, depending on the capacity of your computer.')
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
+
+					print('Start to augment training examples...')
+					self.log.append('Start to augment training examples...')
+					train_folder=os.path.join(out_folder,'train')
+					os.makedirs(train_folder,exist_ok=True)
+					n_train=len(train_files)
+					n_val=len(test_files)
+					aug_total=n_train+n_val
+					def _phase_cb(offset):
+						if progress_cb is None:
+							return None
+						def _cb(done,tot,msg):
+							progress_cb(offset+done,aug_total,msg)
+						return _cb
+					_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
+					print('Start to augment validation examples...')
+					self.log.append('Start to augment validation examples...')
+					validation_folder=os.path.join(out_folder,'validation')
+					os.makedirs(validation_folder,exist_ok=True)
+					if augvalid:
+						_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					else:
+						_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 
 				self.train_pattern_recognizer_onfly(
 					out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,
@@ -1264,7 +1312,7 @@ class Categorizers():
 					soft_source_path=data_path,train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None):
+	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None,skip_augment=False):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1442,39 +1490,54 @@ class Categorizers():
 
 				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
 
-				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				print('This might take hours or days, depending on the capacity of your computer.')
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
-
-				print('Start to augment training examples...')
-				self.log.append('Start to augment training examples...')
-				train_folder=os.path.join(out_folder,'train')
-				os.makedirs(train_folder,exist_ok=True)
-				n_train=len(train_files)
-				n_val=len(test_files)
-				aug_total=n_train+n_val
-				def _phase_cb(offset):
-					if progress_cb is None:
-						return None
-					def _cb(done,tot,msg):
-						progress_cb(offset+done,aug_total,msg)
-					return _cb
-				_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
-				print('Start to augment validation examples...')
-				self.log.append('Start to augment validation examples...')
-				validation_folder=os.path.join(out_folder,'validation')
-				os.makedirs(validation_folder,exist_ok=True)
-				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
+				if reuse:
+					msg='Reusing existing augmented export (skip re-augment): '+str(out_folder)
+					print(msg)
+					self.log.append(msg)
+					if progress_cb is not None:
+						try:
+							progress_cb(1,1,'Reusing existing augmented data…')
+						except Exception:
+							pass
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					if skip_augment:
+						msg='skip_augment requested but export incomplete; re-augmenting to: '+str(out_folder)
+						print(msg)
+						self.log.append(msg)
+					print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					print('This might take hours or days, depending on the capacity of your computer.')
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
+
+					print('Start to augment training examples...')
+					self.log.append('Start to augment training examples...')
+					train_folder=os.path.join(out_folder,'train')
+					os.makedirs(train_folder,exist_ok=True)
+					n_train=len(train_files)
+					n_val=len(test_files)
+					aug_total=n_train+n_val
+					def _phase_cb(offset):
+						if progress_cb is None:
+							return None
+						def _cb(done,tot,msg):
+							progress_cb(offset+done,aug_total,msg)
+						return _cb
+					_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
+					print('Start to augment validation examples...')
+					self.log.append('Start to augment validation examples...')
+					validation_folder=os.path.join(out_folder,'validation')
+					os.makedirs(validation_folder,exist_ok=True)
+					if augvalid:
+						_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					else:
+						_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 
 				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None):
+	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None,skip_augment=False):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Categorizer
@@ -1682,34 +1745,49 @@ class Categorizers():
 						print('Using soft-label mode: '+str(label_mode)+' (lambda_soft='+str(lambda_soft)+')')
 						self.log.append('Using soft-label mode: '+str(label_mode))
 
-				print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
-				print('This might take hours or days, depending on the capacity of your computer.')
-				print(datetime.datetime.now())
-				self.log.append(str(datetime.datetime.now()))
-
-				print('Start to augment training examples...')
-				self.log.append('Start to augment training examples...')
-				train_folder=os.path.join(out_folder,'train')
-				os.makedirs(train_folder,exist_ok=True)
-				n_train=len(train_files)
-				n_val=len(test_files)
-				aug_total=n_train+n_val
-				def _phase_cb(offset):
-					if progress_cb is None:
-						return None
-					def _cb(done,tot,msg):
-						progress_cb(offset+done,aug_total,msg)
-					return _cb
-				_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
-				print('Start to augment validation examples...')
-				self.log.append('Start to augment validation examples...')
-				validation_folder=os.path.join(out_folder,'validation')
-				os.makedirs(validation_folder,exist_ok=True)
-				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
+				if reuse:
+					msg='Reusing existing augmented export (skip re-augment): '+str(out_folder)
+					print(msg)
+					self.log.append(msg)
+					if progress_cb is not None:
+						try:
+							progress_cb(1,1,'Reusing existing augmented data…')
+						except Exception:
+							pass
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					if skip_augment:
+						msg='skip_augment requested but export incomplete; re-augmenting to: '+str(out_folder)
+						print(msg)
+						self.log.append(msg)
+					print('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					self.log.append('Perform augmentation for the behavior examples and export them to: '+str(out_folder))
+					print('This might take hours or days, depending on the capacity of your computer.')
+					print(datetime.datetime.now())
+					self.log.append(str(datetime.datetime.now()))
+
+					print('Start to augment training examples...')
+					self.log.append('Start to augment training examples...')
+					train_folder=os.path.join(out_folder,'train')
+					os.makedirs(train_folder,exist_ok=True)
+					n_train=len(train_files)
+					n_val=len(test_files)
+					aug_total=n_train+n_val
+					def _phase_cb(offset):
+						if progress_cb is None:
+							return None
+						def _cb(done,tot,msg):
+							progress_cb(offset+done,aug_total,msg)
+						return _cb
+					_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
+					print('Start to augment validation examples...')
+					self.log.append('Start to augment validation examples...')
+					validation_folder=os.path.join(out_folder,'validation')
+					os.makedirs(validation_folder,exist_ok=True)
+					if augvalid:
+						_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
+					else:
+						_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 
 				self.train_combnet_onfly(
 					out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,

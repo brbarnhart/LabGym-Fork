@@ -131,6 +131,7 @@ class _TrainWorker(QObject):
                     progress_cb=_aug_cb,
                     train_progress_cb=_train_cb,
                     cancel_event=self.cancel_event,
+                    skip_augment=bool(p.get("skip_augment")),
                 )
             else:
                 CA.train_combnet(
@@ -160,6 +161,7 @@ class _TrainWorker(QObject):
                     progress_cb=_aug_cb,
                     train_progress_cb=_train_cb,
                     cancel_event=self.cancel_event,
+                    skip_augment=bool(p.get("skip_augment")),
                 )
             if self.cancel_event.is_set():
                 self.cancelled.emit("Cancelled by user.")
@@ -367,7 +369,9 @@ class TrainCategorizerTab(QWidget):
             "Folder for augmented train/validation examples written before on-the-fly "
             "training. Default is <models parent>/<categorizer name>/augmented_data. "
             "Export is always used (lower RAM). Multi-worker parallelization applies "
-            "to this export path when workers > 1 and there are enough source examples."
+            "when workers > 1 and there are ≥16 source examples. Use “Reuse existing "
+            "export” below to skip re-augmenting when train/ and validation/ already "
+            "contain .jpg examples."
         )
         self.ed_export.setToolTip(tip_export)
         b_ex = QPushButton("Browse…")
@@ -377,12 +381,23 @@ class TrainCategorizerTab(QWidget):
             self._row(self.ed_export, b_ex),
         )
 
+        self.chk_skip_aug = QCheckBox("Reuse existing augmented export (skip re-augment)")
+        self.chk_skip_aug.setChecked(False)
+        tip_skip = (
+            "If the export folder already has train/ and validation/ subfolders with "
+            "at least one .jpg each, skip augmentation and train onfly from that data. "
+            "If the export is incomplete, augmentation runs anyway. Uncheck to force "
+            "a full re-augment (overwrites files with the same names)."
+        )
+        self.chk_skip_aug.setToolTip(tip_skip)
+        form.addRow(self.chk_skip_aug)
+
         # Augmentation workers
         self.chk_auto_workers = QCheckBox("Auto workers")
         self.chk_auto_workers.setChecked(True)
         tip_auto = (
             "When checked, use a conservative default: min(8, CPU−1). "
-            "Uncheck to set the count manually."
+            "Uncheck to set the count manually. Ignored when reusing an existing export."
         )
         self.chk_auto_workers.setToolTip(tip_auto)
         self.spin_workers = QSpinBox()
@@ -391,7 +406,9 @@ class TrainCategorizerTab(QWidget):
         tip_workers = (
             "Number of CPU processes for export augmentation. More workers = faster "
             "aug but more RAM/CPU. Set to 1 if unstable or low memory. Does not "
-            "speed up GPU training epochs themselves. Small jobs (<16 sources) stay sequential."
+            "speed up GPU training epochs. Jobs with fewer than 16 source examples "
+            "stay sequential. Cancel stops between examples (or at epoch boundaries "
+            "during fit)."
         )
         self.spin_workers.setToolTip(tip_workers)
         self.spin_workers.setEnabled(False)
@@ -618,6 +635,7 @@ class TrainCategorizerTab(QWidget):
             lambda_soft=float(self.spin_lambda.value()),
             soft_labels_path=soft,
             num_workers=n_workers,
+            skip_augment=self.chk_skip_aug.isChecked(),
         )
         self.btn.setEnabled(False)
         self.btn_cancel.setEnabled(True)
@@ -629,6 +647,8 @@ class TrainCategorizerTab(QWidget):
         self.log.append(f"Training → {model_path}")
         self.log.append(f"Augmented export → {export}")
         self.log.append(f"Augmentation workers → {n_workers}")
+        if self.chk_skip_aug.isChecked():
+            self.log.append("Reuse existing export: ON (skip re-augment if complete)")
         self._cancel_event = threading.Event()
         self._thread = QThread(self)
         worker = _TrainWorker(params, self._cancel_event)
