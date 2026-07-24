@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -65,18 +66,24 @@ class _PrepWorker(QObject):
 
 class _TrainWorker(QObject):
     finished = Signal(str)
+    cancelled = Signal(str)
     error = Signal(str)
     progress = Signal(str)
     progress_aug = Signal(int, int, str)  # done, total, message
     progress_train = Signal(int, dict)  # epoch (1-based), logs
 
-    def __init__(self, params: dict):
+    def __init__(self, params: dict, cancel_event: threading.Event):
         super().__init__()
         self.params = params
+        self.cancel_event = cancel_event
+
+    def request_cancel(self) -> None:
+        self.cancel_event.set()
 
     def run(self) -> None:
         try:
             from LabGym.categorizer import Categorizers
+            from LabGym.training.progress import TrainingCancelled
 
             p = self.params
             Path(p["model_path"]).mkdir(parents=True, exist_ok=True)
@@ -123,6 +130,7 @@ class _TrainWorker(QObject):
                     num_workers=n_workers,
                     progress_cb=_aug_cb,
                     train_progress_cb=_train_cb,
+                    cancel_event=self.cancel_event,
                 )
             else:
                 CA.train_combnet(
@@ -151,10 +159,19 @@ class _TrainWorker(QObject):
                     num_workers=n_workers,
                     progress_cb=_aug_cb,
                     train_progress_cb=_train_cb,
+                    cancel_event=self.cancel_event,
                 )
-            self.finished.emit(p["model_path"])
+            if self.cancel_event.is_set():
+                self.cancelled.emit("Cancelled by user.")
+            else:
+                self.finished.emit(p["model_path"])
         except Exception as exc:
-            self.error.emit(str(exc))
+            from LabGym.training.progress import TrainingCancelled
+
+            if isinstance(exc, TrainingCancelled) or self.cancel_event.is_set():
+                self.cancelled.emit(str(exc) or "Cancelled by user.")
+            else:
+                self.error.emit(str(exc))
 
 
 class TrainCategorizerTab(QWidget):
@@ -449,13 +466,24 @@ class TrainCategorizerTab(QWidget):
             "val_accuracy": [],
         }
 
+        run_row = QHBoxLayout()
         self.btn = QPushButton("Train categorizer")
         self.btn.clicked.connect(self._train)
-        layout.addWidget(self.btn)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.setToolTip(
+            "Cooperatively stop augmentation (between source examples) or training "
+            "(at the next epoch/batch boundary). May take a short time to finish."
+        )
+        self.btn_cancel.clicked.connect(self._cancel)
+        run_row.addWidget(self.btn, 1)
+        run_row.addWidget(self.btn_cancel)
+        layout.addLayout(run_row)
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
 
+        self._cancel_event: Optional[threading.Event] = None
         self._defaults()
 
     def _on_auto_workers(self, checked: bool) -> None:
@@ -592,6 +620,7 @@ class TrainCategorizerTab(QWidget):
             num_workers=n_workers,
         )
         self.btn.setEnabled(False)
+        self.btn_cancel.setEnabled(True)
         self.progress_aug.setValue(0)
         self.progress_train.setRange(0, 0)
         self.progress_train.setFormat("Training: waiting for fit…")
@@ -600,20 +629,34 @@ class TrainCategorizerTab(QWidget):
         self.log.append(f"Training → {model_path}")
         self.log.append(f"Augmented export → {export}")
         self.log.append(f"Augmentation workers → {n_workers}")
+        self._cancel_event = threading.Event()
         self._thread = QThread(self)
-        worker = _TrainWorker(params)
+        worker = _TrainWorker(params, self._cancel_event)
         worker.moveToThread(self._thread)
         self._thread.started.connect(worker.run)
         worker.progress.connect(self._on_status)
         worker.progress_aug.connect(self._on_aug_progress)
         worker.progress_train.connect(self._on_train_progress)
         worker.finished.connect(self._train_done)
+        worker.cancelled.connect(self._train_cancelled)
         worker.error.connect(self._err)
         worker.finished.connect(self._thread.quit)
+        worker.cancelled.connect(self._thread.quit)
         worker.error.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup)
         self._worker = worker
         self._thread.start()
+
+    def _cancel(self) -> None:
+        if self._cancel_event is None:
+            return
+        self._cancel_event.set()
+        self.btn_cancel.setEnabled(False)
+        self.lbl_phase.setText("Cancel requested… finishing current step")
+        self.log.append(
+            "Cancel requested — will stop after the current augmentation source "
+            "or training epoch/batch boundary."
+        )
 
     def _reset_metrics(self) -> None:
         self._hist = {"loss": [], "val_loss": [], "accuracy": [], "val_accuracy": []}
@@ -709,7 +752,9 @@ class TrainCategorizerTab(QWidget):
 
     def _cleanup(self) -> None:
         self._thread = None
+        self._cancel_event = None
         self.btn.setEnabled(True)
+        self.btn_cancel.setEnabled(False)
 
     def _train_done(self, path: str) -> None:
         self.progress_aug.setValue(100)
@@ -721,6 +766,18 @@ class TrainCategorizerTab(QWidget):
         self.project.project.defaults.categorizer_name = path
         self.project.mark_dirty()
         QMessageBox.information(self, "Train categorizer", f"Saved:\n{path}")
+
+    def _train_cancelled(self, msg: str) -> None:
+        self.progress_train.setRange(0, 1)
+        self.progress_train.setValue(0)
+        self.progress_train.setFormat("Training: cancelled")
+        self.lbl_phase.setText("Cancelled")
+        self.log.append(f"Cancelled: {msg}")
+        QMessageBox.information(
+            self,
+            "Cancelled",
+            f"{msg}\n\nPartial augmented data may remain in the export folder.",
+        )
 
     def _err(self, msg: str) -> None:
         self.progress_train.setRange(0, 1)

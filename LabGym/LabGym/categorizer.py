@@ -363,9 +363,14 @@ class Categorizers():
 		return apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode)
 
 
-	def _standard_fit_callbacks(self,model_path,train_progress_cb=None):
-		'''Checkpoint + early stop + LR plateau + optional epoch progress callback.'''
-		from LabGym.training.progress import make_epoch_progress_callback
+	def _standard_fit_callbacks(self,model_path,train_progress_cb=None,cancel_event=None):
+		'''Checkpoint + early stop + LR plateau + optional epoch progress / cancel callbacks.'''
+		from LabGym.training.progress import (
+			is_cancelled,
+			make_cancel_callback,
+			make_epoch_progress_callback,
+			TrainingCancelled,
+		)
 
 		cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
 		es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
@@ -374,7 +379,19 @@ class Categorizers():
 		ep=make_epoch_progress_callback(train_progress_cb)
 		if ep is not None:
 			cbs.append(ep)
+		cc=make_cancel_callback(cancel_event)
+		if cc is not None:
+			cbs.append(cc)
 		return cbs
+
+
+	def _raise_if_fit_cancelled(self,cancel_event,phase='Training'):
+		from LabGym.training.progress import is_cancelled,TrainingCancelled
+		if is_cancelled(cancel_event):
+			msg=phase+' cancelled by user.'
+			print(msg)
+			self.log.append(msg)
+			raise TrainingCancelled(msg)
 
 
 	def rename_label(self,file_path,new_path,resize=None):
@@ -453,7 +470,7 @@ class Categorizers():
 			print('All prepared training examples stored in: '+str(new_path))
 
 
-	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None,num_workers=1,progress_cb=None):
+	def build_data(self,path_to_animations,dim_tconv=0,dim_conv=64,channel=1,time_step=15,aug_methods=[],background_free=True,black_background=True,behavior_mode=0,out_path=None,num_workers=1,progress_cb=None,cancel_event=None):
 
 		# path_to_animations: list of paths to prepared training examples (videos or images)
 		# dim_tconv: the input dimension of Animation Analyzer
@@ -467,6 +484,9 @@ class Categorizers():
 		# out_path: if not None, will output all the augmented data to this path
 		# num_workers: process-pool size for export path only (>1). In-memory stays sequential.
 		# progress_cb: optional callable(done_sources, total_sources, message)
+		# cancel_event: optional threading.Event / callable; cooperative cancel between sources
+
+		from LabGym.training.progress import is_cancelled,raise_if_cancelled,TrainingCancelled
 
 		animations=deque()
 		pattern_images=deque()
@@ -502,6 +522,8 @@ class Categorizers():
 			print(msg)
 			self.log.append(msg)
 
+		raise_if_cancelled(cancel_event,'Augmentation cancelled by user')
+
 		if use_pool and workers>1:
 			payloads=[]
 			for idx,path in enumerate(path_to_animations):
@@ -527,6 +549,18 @@ class Categorizers():
 				) as pool:
 					futures={pool.submit(augment_export_task,p):p for p in payloads}
 					for fut in as_completed(futures):
+						if is_cancelled(cancel_event):
+							# Stop waiting; cancel pending (Python 3.9+)
+							try:
+								pool.shutdown(wait=False,cancel_futures=True)
+							except TypeError:
+								for f in futures:
+									f.cancel()
+							msg='Augmentation cancelled by user after %d/%d sources.'%(done_sources,total_sources)
+							print(msg)
+							self.log.append(msg)
+							_report(done_sources,msg)
+							raise TrainingCancelled(msg)
 						anims,patterns,labs,n_done,warnings=fut.result()
 						for w in warnings:
 							print(w)
@@ -539,6 +573,8 @@ class Categorizers():
 							print(datetime.datetime.now())
 							self.log.append(str(datetime.datetime.now()))
 						_report(done_sources)
+			except TrainingCancelled:
+				raise
 			except Exception as exc:
 				print('Parallel augmentation failed (%s); falling back to sequential.'%exc)
 				self.log.append('Parallel augmentation failed: '+str(exc)+'; using sequential.')
@@ -549,10 +585,11 @@ class Categorizers():
 						path_to_animations,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,
 						time_step=time_step,aug_methods=aug_methods,background_free=background_free,
 						black_background=black_background,behavior_mode=behavior_mode,
-						out_path=out_path,num_workers=1,progress_cb=progress_cb)
+						out_path=out_path,num_workers=1,progress_cb=progress_cb,cancel_event=cancel_event)
 				raise
 		else:
 			for idx,i in enumerate(path_to_animations):
+				raise_if_cancelled(cancel_event,'Augmentation cancelled by user')
 				anims,patterns,labs,n_done,warnings=augment_one_example(
 					i,
 					methods,
@@ -977,7 +1014,7 @@ class Categorizers():
 		return model
 
 
-	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None):
+	def train_pattern_recognizer(self,data_path,model_path,out_path=None,dim=64,channel=3,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1081,14 +1118,14 @@ class Categorizers():
 
 				print('Start to augment training examples...')
 				self.log.append('Start to augment training examples...')
-				_,trainX,trainY=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+				_,trainX,trainY=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				trainY=lb.fit_transform(trainY)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				if augvalid:
-					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				else:
-					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					_,testX,testY=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				testY=lb.fit_transform(testY)
 				trainY=self._apply_soft_to_batch_labels(trainY,list(self.classnames),class_means,label_mode)
 				testY=self._apply_soft_to_batch_labels(testY,list(self.classnames),class_means,label_mode)
@@ -1125,7 +1162,8 @@ class Categorizers():
 
 				# validation tensors may be hard-only in older paths; ensure soft stack
 				testY_tensor=testY
-				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
+				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+				self._raise_if_fit_cancelled(cancel_event)
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1208,25 +1246,25 @@ class Categorizers():
 					def _cb(done,tot,msg):
 						progress_cb(offset+done,aug_total,msg)
 					return _cb
-				_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0))
+				_,_,_=self.build_data(train_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				validation_folder=os.path.join(out_folder,'validation')
 				os.makedirs(validation_folder,exist_ok=True)
 				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
+					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
+					_,_,_=self.build_data(test_files,dim_tconv=0,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 
 				self.train_pattern_recognizer_onfly(
 					out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,
 					include_bodyparts=include_bodyparts,std=std,background_free=background_free,
 					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
 					label_mode=label_mode,lambda_soft=lambda_soft,soft_labels_path=soft_labels_path,
-					soft_source_path=data_path,train_progress_cb=train_progress_cb)
+					soft_source_path=data_path,train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None,train_progress_cb=None):
+	def train_animation_analyzer(self,data_path,model_path,out_path=None,dim=64,channel=1,time_step=15,level=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1317,14 +1355,14 @@ class Categorizers():
 
 				print('Start to augment training examples...')
 				self.log.append('Start to augment training examples...')
-				trainX,_,trainY=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+				trainX,_,trainY=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				trainY=lb.fit_transform(trainY)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				if augvalid:
-					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				else:
-					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					testX,_,testY=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				testY=lb.fit_transform(testY)
 
 				with tf.device('CPU'):
@@ -1360,7 +1398,8 @@ class Categorizers():
 
 				self._compile_model(model,label_mode=getattr(self,'label_mode','hard_only'),lambda_soft=getattr(self,'lambda_soft',0.4))
 
-				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
+				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+				self._raise_if_fit_cancelled(cancel_event)
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1422,20 +1461,20 @@ class Categorizers():
 					def _cb(done,tot,msg):
 						progress_cb(offset+done,aug_total,msg)
 					return _cb
-				_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0))
+				_,_,_=self.build_data(train_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				validation_folder=os.path.join(out_folder,'validation')
 				os.makedirs(validation_folder,exist_ok=True)
 				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
+					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
+					_,_,_=self.build_data(test_files,dim_tconv=dim,dim_conv=dim,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 
-				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,train_progress_cb=train_progress_cb)
+				self.train_animation_analyzer_onfly(out_folder,model_path,out_path=out_path,dim=dim,channel=channel,time_step=time_step,level=level,include_bodyparts=include_bodyparts,std=std,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None):
+	def train_combnet(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,aug_methods=[],augvalid=True,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,out_folder=None,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,num_workers=1,progress_cb=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Categorizer
@@ -1536,14 +1575,14 @@ class Categorizers():
 
 				print('Start to augment training examples...')
 				self.log.append('Start to augment training examples...')
-				train_animations,train_pattern_images,trainY=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+				train_animations,train_pattern_images,trainY=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				trainY=lb.fit_transform(trainY)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				if augvalid:
-					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				else:
-					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode)
+					test_animations,test_pattern_images,testY=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,cancel_event=cancel_event)
 				testY=lb.fit_transform(testY)
 				trainY=self._apply_soft_to_batch_labels(trainY,list(self.classnames),class_means,label_mode)
 				testY=self._apply_soft_to_batch_labels(testY,list(self.classnames),class_means,label_mode)
@@ -1579,7 +1618,8 @@ class Categorizers():
 				model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
 				self._compile_model(model,label_mode=label_mode,lambda_soft=lambda_soft)
 
-				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
+				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+				self._raise_if_fit_cancelled(cancel_event)
 
 				model.save(model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
@@ -1661,15 +1701,15 @@ class Categorizers():
 					def _cb(done,tot,msg):
 						progress_cb(offset+done,aug_total,msg)
 					return _cb
-				_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0))
+				_,_,_=self.build_data(train_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=train_folder,num_workers=num_workers,progress_cb=_phase_cb(0),cancel_event=cancel_event)
 				print('Start to augment validation examples...')
 				self.log.append('Start to augment validation examples...')
 				validation_folder=os.path.join(out_folder,'validation')
 				os.makedirs(validation_folder,exist_ok=True)
 				if augvalid:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
+					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=aug_methods,background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 				else:
-					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train))
+					_,_,_=self.build_data(test_files,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,time_step=time_step,aug_methods=[],background_free=background_free,black_background=black_background,behavior_mode=behavior_mode,out_path=validation_folder,num_workers=num_workers,progress_cb=_phase_cb(n_train),cancel_event=cancel_event)
 
 				self.train_combnet_onfly(
 					out_folder,model_path,out_path=out_path,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,
@@ -1678,10 +1718,10 @@ class Categorizers():
 					black_background=black_background,behavior_mode=behavior_mode,social_distance=social_distance,
 					color_costar=color_costar,label_mode=label_mode,lambda_soft=lambda_soft,
 					soft_labels_path=soft_labels_path,soft_source_path=data_path,
-					train_progress_cb=train_progress_cb)
+					train_progress_cb=train_progress_cb,cancel_event=cancel_event)
 
 
-	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None):
+	def train_pattern_recognizer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=3,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Pattern Recognizer
@@ -1777,7 +1817,8 @@ class Categorizers():
 				model=self.simple_resnet(inputs,filters,classes=len(self.classnames),level=level,with_classifier=True)
 			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+			self._raise_if_fit_cancelled(cancel_event)
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
@@ -1809,7 +1850,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_animation_analyzer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=1,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,train_progress_cb=None):
+	def train_animation_analyzer_onfly(self,data_path,model_path,out_path=None,dim=32,channel=1,time_step=15,level=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -1889,7 +1930,8 @@ class Categorizers():
 			else:
 				model.compile(optimizer=SGD(learning_rate=1e-4,momentum=0.9),loss='categorical_crossentropy',metrics=['accuracy'])
 
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+			self._raise_if_fit_cancelled(cancel_event)
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
@@ -1921,7 +1963,7 @@ class Categorizers():
 			print('No train / validation folder!')
 
 
-	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None):
+	def train_combnet_onfly(self,data_path,model_path,out_path=None,dim_tconv=32,dim_conv=64,channel=1,time_step=15,level_tconv=1,level_conv=2,include_bodyparts=True,std=0,background_free=True,black_background=True,behavior_mode=0,social_distance=0,color_costar=False,label_mode='hard_only',lambda_soft=0.4,soft_labels_path=None,soft_source_path=None,train_progress_cb=None,cancel_event=None):
 
 		# data_path: the folder that stores all the prepared training examples
 		# model_path: the path to the trained Animation Analyzer
@@ -2006,7 +2048,8 @@ class Categorizers():
 			model=self.combined_network(time_step=time_step,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,classes=len(self.classnames),level_tconv=level_tconv,level_conv=level_conv)
 			self._compile_model(model,label_mode=effective_label_mode,lambda_soft=lambda_soft)
 
-			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb))
+			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
+			self._raise_if_fit_cancelled(cancel_event)
 
 			model.save(model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
