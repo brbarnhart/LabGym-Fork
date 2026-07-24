@@ -216,3 +216,33 @@ class Detector():
 			outputs=self.current_detector(inputs)
 
 		return outputs
+
+
+	def release(self):
+		'''Drop GPU-resident detector weights and free CUDA cache when possible.
+
+		PyTorch's caching allocator may still report process-reserved VRAM until
+		the process exits, but releasing the model allows that cache to be reused
+		and often reduces Task Manager / nvidia-smi "used" memory.
+		'''
+		try:
+			if self.current_detector is not None:
+				try:
+					self.current_detector.to('cpu')
+				except Exception:
+					pass
+				del self.current_detector
+		except Exception:
+			pass
+		self.current_detector=None
+		try:
+			import gc
+			gc.collect()
+		except Exception:
+			pass
+		if torch.cuda.is_available():
+			try:
+				torch.cuda.empty_cache()
+				torch.cuda.ipc_collect()
+			except Exception:
+				pass

@@ -181,6 +181,7 @@ def detect_and_track_video(
         )
 
     _prog(f"Preparing analysis for {video.name}…")
+    aad = None
     try:
         aad = AnalyzeAnimalDetector()
         aad.prepare_analysis(
@@ -289,3 +290,16 @@ def detect_and_track_video(
             log=log,
             animal_kinds=kinds if "kinds" in dir() else [],
         )
+    finally:
+        # Detector weights stay on CUDA otherwise (see Detector.load).
+        try:
+            from LabGym.gpu_utils import release_analyzer_gpu
+
+            release_analyzer_gpu(aad)
+            _prog("Released detector GPU memory.")
+        except Exception as exc:
+            try:
+                _prog(f"Warning: GPU release incomplete: {exc}")
+            except Exception:
+                pass
+            aad = None

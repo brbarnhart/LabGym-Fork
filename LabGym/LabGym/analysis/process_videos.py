@@ -259,108 +259,121 @@ def process_video(
         results_root.mkdir(parents=True, exist_ok=True)
 
         _prog(f"Preparing analysis for {video.name}…")
-        aad = AnalyzeAnimalDetector()
-        aad.prepare_analysis(
-            str(Path(config.detector_path).resolve()),
-            str(video.resolve()),
-            str(results_root.resolve()),
-            numbers,
-            kinds,
-            behavior_mode,
-            names_and_colors=names_and_colors,
-            framewidth=config.framewidth,
-            dim_tconv=dim_tconv,
-            dim_conv=dim_conv,
-            channel=channel,
-            include_bodyparts=include_bodyparts,
-            std=std,
-            categorize_behavior=True,
-            animation_analyzer=animation_analyzer,
-            t=float(config.t),
-            duration=float(config.duration),
-            length=length,
-            social_distance=social_distance,
-        )
-        results_path = aad.results_path
-
-        _prog("Detect + track…")
-        if behavior_mode == 1:
-            aad.acquire_information_interact_basic(
-                batch_size=int(config.detector_batch),
-                background_free=background_free,
-                black_background=black_background,
+        aad = None
+        try:
+            aad = AnalyzeAnimalDetector()
+            aad.prepare_analysis(
+                str(Path(config.detector_path).resolve()),
+                str(video.resolve()),
+                str(results_root.resolve()),
+                numbers,
+                kinds,
+                behavior_mode,
+                names_and_colors=names_and_colors,
+                framewidth=config.framewidth,
+                dim_tconv=dim_tconv,
+                dim_conv=dim_conv,
+                channel=channel,
+                include_bodyparts=include_bodyparts,
+                std=std,
+                categorize_behavior=True,
+                animation_analyzer=animation_analyzer,
+                t=float(config.t),
+                duration=float(config.duration),
+                length=length,
+                social_distance=social_distance,
             )
-        else:
-            aad.acquire_information(
-                batch_size=int(config.detector_batch),
-                background_free=background_free,
-                black_background=black_background,
-                color_costar=color_costar,
+            results_path = aad.results_path
+
+            _prog("Detect + track…")
+            if behavior_mode == 1:
+                aad.acquire_information_interact_basic(
+                    batch_size=int(config.detector_batch),
+                    background_free=background_free,
+                    black_background=black_background,
+                )
+            else:
+                aad.acquire_information(
+                    batch_size=int(config.detector_batch),
+                    background_free=background_free,
+                    black_background=black_background,
+                    color_costar=color_costar,
+                )
+            if behavior_mode != 1:
+                _prog("Crafting track data…")
+                aad.craft_data()
+                if config.id_review_dir:
+                    _apply_existing_id_review(aad, config.id_review_dir, _prog)
+
+            _prog("Categorizing behaviors…")
+            aad.categorize_behaviors(
+                str(Path(config.categorizer_path).resolve()),
+                uncertain=float(config.uncertain),
+                min_length=config.min_length,
             )
-        if behavior_mode != 1:
-            _prog("Crafting track data…")
-            aad.craft_data()
-            if config.id_review_dir:
-                _apply_existing_id_review(aad, config.id_review_dir, _prog)
 
-        _prog("Categorizing behaviors…")
-        aad.categorize_behaviors(
-            str(Path(config.categorizer_path).resolve()),
-            uncertain=float(config.uncertain),
-            min_length=config.min_length,
-        )
+            animal_to_include = list(kinds)
+            id_colors = list(_DEFAULT_ID_COLORS)
+            while len(id_colors) < max(1, len(animal_to_include)):
+                id_colors.extend(_DEFAULT_ID_COLORS)
+            behavior_to_include = list(classnames)
 
-        animal_to_include = list(kinds)
-        id_colors = list(_DEFAULT_ID_COLORS)
-        while len(id_colors) < max(1, len(animal_to_include)):
-            id_colors.extend(_DEFAULT_ID_COLORS)
-        behavior_to_include = list(classnames)
+            _prog("Annotating video…")
+            aad.annotate_video(
+                animal_to_include,
+                id_colors,
+                behavior_to_include,
+                show_legend=bool(config.show_legend),
+            )
 
-        _prog("Annotating video…")
-        aad.annotate_video(
-            animal_to_include,
-            id_colors,
-            behavior_to_include,
-            show_legend=bool(config.show_legend),
-        )
+            params = config.parameter_to_analyze
+            if params is None:
+                params = [
+                    "count",
+                    "duration",
+                    "latency",
+                    "distance",
+                    "speed",
+                    "intensity_area",
+                ]
+            _prog("Exporting results…")
+            aad.export_results(
+                normalize_distance=bool(config.normalize_distance),
+                parameter_to_analyze=params,
+            )
 
-        params = config.parameter_to_analyze
-        if params is None:
-            params = [
-                "count",
-                "duration",
-                "latency",
-                "distance",
-                "speed",
-                "intensity_area",
-            ]
-        _prog("Exporting results…")
-        aad.export_results(
-            normalize_distance=bool(config.normalize_distance),
-            parameter_to_analyze=params,
-        )
+            manifest = {
+                "video_path": str(video.resolve()),
+                "detector_path": str(Path(config.detector_path).resolve()),
+                "categorizer_path": str(Path(config.categorizer_path).resolve()),
+                "results_path": results_path,
+                "id_review_dir": config.id_review_dir or "",
+                "behaviors": list(classnames),
+                "animal_kinds": kinds,
+                "behavior_mode": behavior_mode,
+            }
+            Path(results_path).joinpath("process_video_job.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+            _prog(f"Done: {results_path}")
+            return ProcessVideoResult(
+                video_path=str(video.resolve()),
+                results_path=str(results_path),
+                ok=True,
+                log=log,
+                behaviors=list(classnames),
+            )
+        finally:
+            try:
+                from LabGym.gpu_utils import release_analyzer_gpu
 
-        manifest = {
-            "video_path": str(video.resolve()),
-            "detector_path": str(Path(config.detector_path).resolve()),
-            "categorizer_path": str(Path(config.categorizer_path).resolve()),
-            "results_path": results_path,
-            "id_review_dir": config.id_review_dir or "",
-            "behaviors": list(classnames),
-            "animal_kinds": kinds,
-            "behavior_mode": behavior_mode,
-        }
-        Path(results_path).joinpath("process_video_job.json").write_text(
-            json.dumps(manifest, indent=2), encoding="utf-8"
-        )
-        _prog(f"Done: {results_path}")
-        return ProcessVideoResult(
-            video_path=str(video.resolve()),
-            results_path=str(results_path),
-            ok=True,
-            log=log,
-            behaviors=list(classnames),
-        )
+                release_analyzer_gpu(aad)
+                _prog("Released detector GPU memory.")
+            except Exception as exc:
+                try:
+                    _prog(f"Warning: GPU release incomplete: {exc}")
+                except Exception:
+                    pass
     except Exception as exc:
         _prog(f"ERROR: {exc}")
         return ProcessVideoResult(
