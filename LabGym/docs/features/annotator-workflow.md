@@ -24,9 +24,25 @@ Sorting dense `generate_data*` output is still available as a **legacy** option.
 
 ```bash
 LabGym                 # full legacy GUI (detect, ID review, train, analyze)
-LabGym-annotate        # multi-subject ethogram annotator
-LabGym-workflow        # step checklist launcher
+LabGym-annotate        # standalone multi-subject ethogram annotator
+LabGym-workflow        # PySide6 ethogram-first shell (recommended)
+python -m LabGym.gui_pyside
 ```
+
+### LabGym-workflow (PySide6 shell)
+
+Tabbed UI for the ethogram-first path:
+
+| Tab | Role |
+|-----|------|
+| **Overview** | Pipeline checklist; jump to each step |
+| **Project** | Video, tracklets (`id_review`), annotations JSON, mode, generate defaults |
+| **Annotate** | Embedded Behavior Annotator (or detach to a separate window) |
+| **Generate** | Ethogram → sorted LabGym training pairs (Stage C) |
+| **Detect / ID / Train / Analyze** | Opens legacy wx LabGym until those steps are ported |
+
+Set paths on **Project**, then **Apply to Annotate** / **Load project into annotator**.
+Settings persist via Qt `QSettings` (`LabGym` / `workflow`).
 
 ```bash
 # CLI ethogram → training pairs

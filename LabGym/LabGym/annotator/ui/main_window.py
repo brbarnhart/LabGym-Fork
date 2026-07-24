@@ -500,6 +500,26 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
+        self.load_video_from_path(path)
+
+    def load_video_from_path(
+        self,
+        path: str,
+        *,
+        annotations_path: Optional[str] = None,
+        tracklets_dir: Optional[str] = None,
+        behavior_mode: Optional[int] = None,
+        exclusive_mode: Optional[bool] = None,
+        prefer_sidecar: bool = True,
+    ) -> bool:
+        """Load a video (and optional annotations/tracklets) without a file dialog.
+
+        Used by the PySide workflow shell and tests. Returns True on success.
+        """
+        path = str(path)
+        if not path or not Path(path).is_file():
+            QMessageBox.warning(self, "Load Video", f"Video not found:\n{path}")
+            return False
 
         try:
             meta = self.video.load(path)
@@ -508,10 +528,17 @@ class MainWindow(QMainWindow):
             self._target_fps = meta.fps
             self.video_widget.clear()
 
-            ann_path = self.sidecar_annotations_path(path)
+            ann_path: Optional[Path] = None
+            if annotations_path:
+                ann_path = Path(annotations_path)
+            elif prefer_sidecar:
+                cand = self.sidecar_annotations_path(path)
+                if cand.is_file():
+                    ann_path = cand
+
             auto_loaded = False
             self._loaded_tracklets = None
-            if ann_path.is_file():
+            if ann_path is not None and ann_path.is_file():
                 try:
                     self._apply_loaded_annotations(ann_path, warn_mismatch=True)
                     # Keep session video_path aligned with the video just opened
@@ -521,52 +548,99 @@ class MainWindow(QMainWindow):
                     QMessageBox.warning(
                         self,
                         "Annotations",
-                        f"Found sidecar annotations but failed to load:\n{ann_path}\n\n{e}\n\n"
+                        f"Found annotations but failed to load:\n{ann_path}\n\n{e}\n\n"
                         "Starting with a fresh annotation session instead.",
                     )
                     self._init_or_reset_manager(path, meta.fps, meta.total_frames)
             else:
-                # No sidecar file — fresh session
+                # No annotation file — fresh session
                 self._init_or_reset_manager(path, meta.fps, meta.total_frames)
 
-            # Auto-discover id_review tracklets next to the video
+            if behavior_mode is not None and self.manager:
+                self.manager.session.behavior_mode = int(behavior_mode)
+            if exclusive_mode is not None and self.manager:
+                self.manager.set_exclusive_mode(bool(exclusive_mode))
+
+            # Tracklets: explicit dir, else auto-discover next to the video
             tracks_msg = ""
             try:
-                auto_tracks = try_autoload_id_review(
-                    path, video_total_frames=meta.total_frames
+                if tracklets_dir and Path(tracklets_dir).is_dir():
+                    self._apply_tracklets(
+                        load_tracklets_for_annotator(
+                            tracklets_dir,
+                            video_total_frames=meta.total_frames,
+                        )
+                    )
+                    tracks_msg = (
+                        f" | tracklets: {len(self._loaded_tracklets.subjects)} IDs"
+                        if self._loaded_tracklets
+                        else ""
+                    )
+                else:
+                    auto_tracks = try_autoload_id_review(
+                        path, video_total_frames=meta.total_frames
+                    )
+                    if auto_tracks is not None:
+                        self._apply_tracklets(auto_tracks)
+                        tracks_msg = f" | tracklets: {len(auto_tracks.subjects)} IDs"
+            except Exception as e:
+                QMessageBox.warning(
+                    self, "Tracklets", f"Could not load tracklets:\n{e}"
                 )
-                if auto_tracks is not None:
-                    self._apply_tracklets(auto_tracks)
-                    tracks_msg = f" | tracklets: {len(auto_tracks.subjects)} IDs"
-            except Exception:
-                pass
+
+            if self.subject_panel and self.manager:
+                self.subject_panel.set_manager(self.manager)
 
             # Show first frame (with overlays if tracklets loaded)
             self.controls.update_position(0)
-            if hasattr(self, 'timeline'):
+            if hasattr(self, "timeline"):
                 self.timeline.set_current_frame(0)
                 self.timeline.clear_selections()
                 self.timeline.set_selection_mode(False)
                 self._sync_selection_mode_ui(False)
             self._refresh_display_overlay()
 
-            if auto_loaded:
-                self.statusBar().showMessage(
-                    f"Loaded: {Path(path).name}  |  {meta.total_frames} frames @ {meta.fps:.2f} fps  |  "
-                    f"Auto-loaded annotations: {ann_path.name}{tracks_msg}"
-                )
-            else:
-                self.statusBar().showMessage(
-                    f"Loaded: {Path(path).name}  |  {meta.total_frames} frames @ {meta.fps:.2f} fps   |  "
-                    f"Use hotkeys (1,2..) or double-click behaviors; [ ] cycle subjects{tracks_msg}"
-                )
+            ann_note = ""
+            if auto_loaded and ann_path is not None:
+                ann_note = f"  |  annotations: {ann_path.name}"
+            self.statusBar().showMessage(
+                f"Loaded: {Path(path).name}  |  {meta.total_frames} frames @ "
+                f"{meta.fps:.2f} fps{ann_note}{tracks_msg}"
+            )
             self.setWindowTitle(f"LabGym Behavior Annotator — {Path(path).name}")
             self._update_undo_action()
             if self.bout_list_dialog is not None:
                 self.bout_list_dialog.set_manager(self.manager)
                 self.bout_list_dialog.set_current_frame(self._current_frame, scroll=True)
+            return True
         except Exception as e:
             QMessageBox.critical(self, "Load Error", f"Failed to load video:\n{e}")
+            return False
+
+    def load_tracklets_from_path(self, directory: str) -> bool:
+        """Load tracklets from an id_review / tracklets directory."""
+        if not self.manager:
+            QMessageBox.information(
+                self, "Tracklets", "Load a video first, then load tracklets."
+            )
+            return False
+        if not directory or not Path(directory).is_dir():
+            QMessageBox.warning(self, "Tracklets", f"Folder not found:\n{directory}")
+            return False
+        try:
+            self._apply_tracklets(
+                load_tracklets_for_annotator(
+                    directory,
+                    video_total_frames=(
+                        self.video.total_frames if self.video.is_loaded else None
+                    ),
+                )
+            )
+            self.statusBar().showMessage(f"Loaded tracklets from {directory}")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Tracklets", f"Failed to load tracklets:\n{e}")
+            return False
 
     # --- Annotation save/load ---
 

@@ -57,8 +57,8 @@
 This workspace includes an integrated **PySide6 Behavior Annotator** and **ethogram-first** training:
 
 ```bash
-LabGym-annotate          # multi-subject ethogram annotation
-LabGym-workflow          # lightweight step-by-step launcher
+LabGym-annotate          # standalone multi-subject ethogram annotation
+LabGym-workflow          # PySide6 ethogram-first shell (Project / Annotate / Generate)
 ```
 
 **Recommended training path:** detect → fix IDs → annotate ethogram →  
