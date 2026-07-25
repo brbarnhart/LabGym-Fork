@@ -21,10 +21,6 @@ logger.debug('%s', f'loading {__name__}')
 
 # Related third party imports.
 import pytest
-import wx
-
-# Local application/library specific imports.
-from LabGym import mywx
 
 
 def fmt(s):
@@ -33,9 +29,8 @@ def fmt(s):
 
 
 def run_selftests_help():
-	"""Display Help to a wx.Dialog."""
-	title = 'How to run LabGym selftests'
-	msg = fmt(f"""
+	"""Log help for running selftests (no GUI dialog)."""
+	msg = fmt("""
 		In this version of LabGym, running selftests from a normal
 		running LabGym process is not supported.
 
@@ -54,15 +49,7 @@ def run_selftests_help():
 		""")
 
 	logger.info(msg)
-	with mywx.OK_Cancel_Dialog(None, title=title, msg=msg) as dlg:
-		result = dlg.ShowModal()
-
-	if result == wx.ID_OK:
-		pass
-	elif result == wx.ID_CANCEL:
-		pass
-	else:
-		raise Exception('Impossible')
+	print(msg)
 
 
 def run_selftests():

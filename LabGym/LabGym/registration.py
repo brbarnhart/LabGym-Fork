@@ -79,222 +79,157 @@ import uuid
 from zoneinfo import ZoneInfo
 
 # Related third party imports.
-# import wx  # wxPython, Cross platform GUI toolkit for Python, "Phoenix" version
 import yaml  # PyYAML, YAML parser and emitter for Python
 
 # Local application/library specific imports.
 from LabGym import __version__
 from LabGym import central_logging
 from LabGym import config
-from LabGym import mywx
-import wx  # wxPython, Cross platform GUI toolkit for Python, "Phoenix" version
-
-# import patch_wx, wx  # wxPython, with wx.App patched to be a strict singleton
 
 
 logger = logging.getLogger(__name__)
 
 
-# class NotEmptyValidator(wx.PyValidator):
-class NotEmptyValidator(wx.Validator):
-	"""Validate that a text control contains content.
+def _ensure_qt_app():
+	"""Return a QApplication instance, creating one if needed."""
+	from PySide6.QtWidgets import QApplication
 
-	(class purpose and functionality, and optionally its attributes and methods)
-	"""
-	def __init__(self):
-		wx.Validator.__init__(self)
-
-	def Clone(self):  # pylint: disable=invalid-name
-		return NotEmptyValidator()
-
-	def Validate(self, parent):  # pylint: disable=invalid-name
-		text_control = self.GetWindow()
-
-		# .strip() removes leading/trailing whitespace
-		text = text_control.GetValue().strip()
-
-		if not text:
-			# the string is empty after stripping whitespace
-			wx.MessageBox("This field cannot be empty.",
-				"Error", wx.OK | wx.ICON_ERROR)
-			text_control.SetFocus()
-			return False
-
-		# Milepost -- text is not empty
-		return True
-
-	def TransferToWindow(self):  # pylint: disable=invalid-name
-		return True # We don't modify the window's value
-
-	def TransferFromWindow(self):  # pylint: disable=invalid-name
-		return True # We don't modify the validator's associated value
+	app = QApplication.instance()
+	if app is None:
+		app = QApplication(sys.argv if hasattr(sys, "argv") else [])
+	return app
 
 
-class RegFormDialog(wx.Dialog):
-	"""Make a registration form dialog.
+class RegFormDialog:
+	"""Qt registration dialog (replaces the former wx form)."""
 
-	(class purpose and functionality, and optionally its attributes and methods)
-	"""
-	def __init__(self, parent):
-		# Why label with "User Group Registration" instead of, say,
-		# "Software Registration"?  Because this label suggests that
-		# registration is in the user's interest and the user
-		# community's interest.
+	def __init__(self, parent=None):
+		from PySide6.QtCore import Qt
+		from PySide6.QtGui import QFont
+		from PySide6.QtWidgets import (
+			QCheckBox,
+			QDialog,
+			QDialogButtonBox,
+			QFormLayout,
+			QLabel,
+			QLineEdit,
+			QMessageBox,
+			QVBoxLayout,
+		)
+
 		title = "LabGym User Group Registration"
-
-		header = textwrap.dedent("""
+		header = textwrap.dedent(
+			"""
 			Please register to be enrolled in the LabGym User Group.
 
 			The LabGym User Group promotes engagement between new users,
 			experienced users, and developers, leading to improvements
 			in user experience, including better features, better
 			implementation, and better installation.
-			""").strip()
+			"""
+		).strip()
 
-		super().__init__(parent, title=title)
+		self._dialog = QDialog(parent)
+		self._dialog.setWindowTitle(title)
+		self._dialog.setModal(True)
+		self._dialog.setMinimumWidth(420)
 
-		# Create string input fields
-		my_validator = NotEmptyValidator()  # do we need three separate?
-		self.input_name = wx.TextCtrl(self, validator=my_validator)
-		self.input_affiliation = wx.TextCtrl(self, validator=my_validator)
-		self.input_email = wx.TextCtrl(self, validator=my_validator)
+		layout = QVBoxLayout(self._dialog)
+		header_lbl = QLabel(header)
+		header_lbl.setWordWrap(True)
+		layout.addWidget(header_lbl)
 
-		# Create buttons
-		self.register_button = wx.Button(self, wx.ID_OK, "Register")
-		fontsize = self.register_button.GetFont().GetPointSize()
-		logger.debug('%s: %r', 'fontsize + 2', fontsize + 2)
-		font = wx.Font(fontsize + 2,
-			wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
-		self.register_button.SetFont(font)
-		self.skip_button = wx.Button(self, wx.ID_CANCEL, "Skip for now")
+		form = QFormLayout()
+		self.input_name = QLineEdit()
+		self.input_affiliation = QLineEdit()
+		self.input_email = QLineEdit()
+		form.addRow("Name:", self.input_name)
+		form.addRow("Affiliation:", self.input_affiliation)
+		form.addRow("Email Address:", self.input_email)
+		layout.addLayout(form)
 
-		# Create the checkbox
-		self.my_checkbox = wx.CheckBox(self,
-			label='Remember my choice, don\'t ask me again')
+		self.my_checkbox = QCheckBox("Remember my choice, don't ask me again")
+		layout.addWidget(self.my_checkbox)
 
-		# Create sizers for layout.
-		# Buttons and checkbox will go in the same FlexGridSizer as the
-		# text input fields.
-		main_sizer = wx.BoxSizer(wx.VERTICAL)
-		input_sizer = wx.FlexGridSizer(6, 2, 1, 1)  # rows, cols, vgap, hgap
+		buttons = QDialogButtonBox()
+		self.register_button = buttons.addButton(
+			"Register", QDialogButtonBox.ButtonRole.AcceptRole
+		)
+		self.skip_button = buttons.addButton(
+			"Skip for now", QDialogButtonBox.ButtonRole.RejectRole
+		)
+		font = self.register_button.font()
+		font.setBold(True)
+		font.setPointSize(font.pointSize() + 2)
+		self.register_button.setFont(font)
+		layout.addWidget(buttons)
 
-		# Allow col 0 to be shrinkable (even though proportion is 0 for items)
-		# This allows it to shrink to the size of its content
-		input_sizer.AddGrowableCol(0)
+		self._accepted = False
 
-		text = wx.StaticText(self, label=header)
-		main_sizer.Add(text,
-			0,  # proportion (int).  0 means the item won't expand
-				# beyond its minimal size.
+		def on_register() -> None:
+			name = self.input_name.text().strip()
+			affiliation = self.input_affiliation.text().strip()
+			email = self.input_email.text().strip()
+			if not name or not affiliation or not email:
+				QMessageBox.warning(
+					self._dialog,
+					"Error",
+					"Name, affiliation, and email cannot be empty.",
+				)
+				return
+			self._accepted = True
+			self._dialog.accept()
 
-			# border on all sides, and align left
-			wx.ALL | wx.LEFT,
+		def on_skip() -> None:
+			self._accepted = False
+			self._dialog.reject()
 
-			10,  # width (in pixels) of the borders specified
-			)
+		self.register_button.clicked.connect(on_register)
+		self.skip_button.clicked.connect(on_skip)
 
-		# Add input fields with labels to the input sizer
-		input_sizer.Add(wx.StaticText(self, label="Name:"),
-			0, wx.ALL | wx.EXPAND, 5)
-		input_sizer.Add(self.input_name,
-			1, wx.EXPAND)
-		input_sizer.Add(wx.StaticText(self, label="Affiliation:"),
-			0, wx.ALL | wx.EXPAND, 5)
-		input_sizer.Add(self.input_affiliation,
-			1, wx.EXPAND)
-		input_sizer.Add(wx.StaticText(self, label="Email Address:"),
-			0, wx.ALL | wx.EXPAND, 5)
-		input_sizer.Add(self.input_email,
-			1, wx.EXPAND)
-
-		# Add a row of dummy empty spacer items
-		input_sizer.Add((0,10), 0)  # add a fixed-height spacer of 10 pixels
-		input_sizer.AddSpacer(0)  # leave this cell blank
-
-		# Add buttons to the sizer
-		input_sizer.Add(self.register_button, 0, wx.ALL|wx.ALIGN_RIGHT, 5)
-		input_sizer.Add(self.skip_button, 0, wx.ALL, 5)
-		# Add a dummy empty spacer item
-		input_sizer.AddSpacer(0)  # leave this cell blank
-		input_sizer.Add(self.my_checkbox,
-			0, wx.LEFT | wx.ALIGN_CENTER_HORIZONTAL, 5)
-
-		# Add sizers to main sizer
-		main_sizer.Add(input_sizer, 1, wx.EXPAND | wx.ALL, 10)
-
-		self.SetSizerAndFit(main_sizer)
+	def exec(self) -> bool:
+		"""Show modal dialog; return True if Register was accepted."""
+		self._dialog.exec()
+		return self._accepted
 
 	def GetInputValues(self, alt=None) -> dict | None:
-		"""Return a dict containing the dialog object's input values.
-
-		If alt-behavior specified as 'skip', then return a dict of dummy val.
-		"""
+		"""Return a dict containing the dialog object's input values."""
 		if alt is None:
-			result = {
-				'name': self.input_name.GetValue(),
-				'affiliation': self.input_affiliation.GetValue(),
-				'email': self.input_email.GetValue(),
-				}
-		elif alt == 'skip':
-			result = {
-				'name': 'skip',
-				'affiliation': 'skip',
-				'email': 'skip',
-				}
-		else:
-			# bad usage...
-			logger.warning('%s: %r', 'Unexpected!  alt', alt)
-			result = {}
-		return result
+			return {
+				"name": self.input_name.text().strip(),
+				"affiliation": self.input_affiliation.text().strip(),
+				"email": self.input_email.text().strip(),
+			}
+		if alt == "skip":
+			return {
+				"name": "skip",
+				"affiliation": "skip",
+				"email": "skip",
+			}
+		logger.warning("%s: %r", "Unexpected!  alt", alt)
+		return {}
 
 
 def _get_reginfo_from_form() -> dict | None:
-	"""Display a reg form, get user input, and return reginfo.
-
-	Notes
-	*   In wxPython, the ShowModal() method displays a dialog window in
-		a modal fashion. This means it:
-
-		o   Blocks Interaction: The dialog takes over the application's
-			focus, preventing the user from interacting with any other
-			windows in the application until the dialog is closed.
-
-		o   Requires User Response: The user must explicitly close the
-			modal dialog before returning to the main application workflow.
-
-		o   Returns a Value: The ShowModal() method returns a value
-			(e.g., wx.ID_OK, wx.ID_CANCEL) indicating how the user
-			closed the dialog (e.g., by clicking "OK" or "Cancel").
-
-		In simpler terms, using ShowModal() is like presenting a
-		mandatory popup that demands the user's attention and a decision
-		before they can continue using the application.
-
-		This differs from the Show() method, which displays a dialog in
-		a modeless fashion. A modeless dialog allows the user to
-		interact with other application windows while it's open.
-	"""
-
-	with RegFormDialog(None) as dlg:
-		logger.debug('%s -- %s', 'Milestone ShowModal', 'calling...')
-		# mywx.bring_wxapp_to_foreground()
-		if dlg.ShowModal() == wx.ID_OK:
-			logger.debug('%s -- %s', 'Milestone ShowModal', 'returned')
-			logger.debug('User pressed [Register]')
-			# pylint: disable-next=redefined-outer-name
-			reginfo = dlg.GetInputValues()
+	"""Display a Qt reg form, get user input, and return reginfo."""
+	_ensure_qt_app()
+	dlg = RegFormDialog(None)
+	logger.debug("%s -- %s", "Milestone ShowModal", "calling...")
+	if dlg.exec():
+		logger.debug("%s -- %s", "Milestone ShowModal", "returned")
+		logger.debug("User pressed [Register]")
+		reginfo = dlg.GetInputValues()
+	else:
+		logger.debug("%s -- %s", "Milestone ShowModal", "returned")
+		logger.debug("User pressed [Skip]")
+		if dlg.my_checkbox.isChecked():
+			logger.debug("Checked")
+			reginfo = dlg.GetInputValues("skip")
 		else:
-			logger.debug('%s -- %s', 'Milestone ShowModal', 'returned')
-			logger.debug('User pressed [Skip]')
+			logger.debug("Unchecked")
+			reginfo = None
 
-			if dlg.my_checkbox.GetValue():
-				logger.debug('Checked')
-				reginfo = dlg.GetInputValues('skip')
-			else:
-				logger.debug('Unchecked')
-				reginfo = None
-
-	logger.debug('%s: %r', 'reginfo', reginfo)
+	logger.debug("%s: %r", "reginfo", reginfo)
 	return reginfo
 
 

@@ -75,15 +75,21 @@ import tempfile
 import textwrap
 import webbrowser
 
-# Related third party imports.
-import wx  # wxPython, Cross platform GUI toolkit for Python, "Phoenix" version
-
 # Local application/library specific imports.
 from LabGym import config
-from LabGym import mywx
 
 
 logger = logging.getLogger(__name__)
+
+
+def _ok_dialog(title: str, msg: str) -> None:
+	"""Show a blocking information dialog (Qt), creating QApplication if needed."""
+	from PySide6.QtWidgets import QApplication, QMessageBox
+
+	app = QApplication.instance()
+	if app is None:
+		app = QApplication(sys.argv if hasattr(sys, "argv") else [])
+	QMessageBox.information(None, title, msg)
 
 
 def is_path_under(path1: str|Path, path2: str|Path) -> bool:
@@ -190,9 +196,8 @@ def assert_userdata_dirs_are_separate(
 
 		logger.error('%s', msg)
 
-		# Show the error msg with an OK_Dialog.
-		with mywx.OK_Dialog(None, title=title, msg=msg) as dlg:
-			result = dlg.ShowModal()  # will return wx.ID_OK upon OK or dismiss
+		_ok_dialog(title, msg)
+		result = True
 
 		sys.exit('Bad configuration')
 
@@ -282,9 +287,8 @@ def survey(
 
 		logger.warning('%s', msg)
 
-		# Show the warning msg with an OK_Dialog.
-		with mywx.OK_Dialog(None, title=title, msg=textwrap.fill(msg)) as dlg:
-			result = dlg.ShowModal()  # will return wx.ID_OK upon OK or dismiss
+		_ok_dialog(title, textwrap.fill(msg))
+		result = True
 
 	# 3.  If any userdata dirs are configured as located within the
 	#     LabGym tree, then warn.
@@ -301,9 +305,8 @@ def survey(
 
 		logger.warning('%s', msg)
 
-		# Show the warning msg with an OK_Dialog.
-		with mywx.OK_Dialog(None, title=title, msg=textwrap.fill(msg)) as dlg:
-			result = dlg.ShowModal()  # will return wx.ID_OK upon OK or dismiss
+		_ok_dialog(title, textwrap.fill(msg))
+		result = True
 
 	# 4.  For any userdata dirs configured as external to LabGym tree,
 	#     if there is "orphaned" data, remaining in the "traditional"
@@ -331,6 +334,5 @@ def survey(
 
 		logger.warning('%s', msg)
 
-		# Show the warning msg with an OK_Dialog.
-		with mywx.OK_Dialog(None, title=title, msg=textwrap.fill(msg)) as dlg:
-			result = dlg.ShowModal()  # will return wx.ID_OK upon OK or dismiss
+		_ok_dialog(title, textwrap.fill(msg))
+		result = True
