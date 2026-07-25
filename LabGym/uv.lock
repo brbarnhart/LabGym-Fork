@@ -1404,8 +1404,6 @@ dependencies = [
     { name = "torchvision", version = "0.22.1", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torchvision", version = "0.22.1+cu118", source = { registry = "https://download.pytorch.org/whl/cu118" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "tqdm" },
-    { name = "wxpython", version = "4.2.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.10'" },
-    { name = "wxpython", version = "4.2.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.10'" },
     { name = "xlsxwriter" },
     { name = "yacs" },
 ]
@@ -1452,7 +1450,6 @@ requires-dist = [
     { name = "torchvision", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = "==0.22.1" },
     { name = "torchvision", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = "==0.22.1", index = "https://download.pytorch.org/whl/cu118" },
     { name = "tqdm", specifier = ">4.29.0" },
-    { name = "wxpython" },
     { name = "xlsxwriter" },
     { name = "yacs", specifier = ">=0.1.8" },
 ]
@@ -3872,64 +3869,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/97/b1/c5077224c774f84a77f5376aed4f96071d4258df0062c214a91d7b3dbce9/wrapt-1.14.2-cp39-cp39-win32.whl", hash = "sha256:582340dde98116875a4cfdd9380c44d86f1dee2482fc0d0ce6ff3d36370447ed", size = 33677, upload-time = "2025-08-12T06:58:59.056Z" },
     { url = "https://files.pythonhosted.org/packages/15/55/77605309608a1f4b7bc5be1eed2ecb43db4033e2ba2754a7fa1596571807/wrapt-1.14.2-cp39-cp39-win_amd64.whl", hash = "sha256:b11008cdae9c937ef3b35b7608c0031ca292efd1fc65db8848570a745506806c", size = 35805, upload-time = "2025-08-12T06:58:57.765Z" },
     { url = "https://files.pythonhosted.org/packages/b7/c7/7376998449689cf2adbdbeacad47084410d00f3ae04cf73e6127cf52b950/wrapt-1.14.2-py3-none-any.whl", hash = "sha256:82eea3b559f51f22aefc530b747b87406811ef00cb0c4734f48cb139c748db63", size = 21577, upload-time = "2025-08-12T06:59:01.408Z" },
-]
-
-[[package]]
-name = "wxpython"
-version = "4.2.4"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version > '3.9' and python_full_version < '3.10' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version <= '3.9' and platform_machine == 'arm64' and sys_platform == 'darwin'",
-    "python_full_version > '3.9' and python_full_version < '3.10' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version <= '3.9' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version > '3.9' and python_full_version < '3.10' and platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version > '3.9' and python_full_version < '3.10' and platform_machine != 'arm64' and sys_platform == 'darwin') or (python_full_version > '3.9' and python_full_version < '3.10' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version <= '3.9' and platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "(python_full_version <= '3.9' and platform_machine != 'arm64' and sys_platform == 'darwin') or (python_full_version <= '3.9' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32')",
-    "python_full_version > '3.9' and python_full_version < '3.10' and platform_machine != 'AMD64' and sys_platform == 'win32'",
-    "python_full_version <= '3.9' and platform_machine != 'AMD64' and sys_platform == 'win32'",
-    "python_full_version > '3.9' and python_full_version < '3.10' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-    "python_full_version <= '3.9' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "numpy", marker = "python_full_version < '3.10'" },
-    { name = "typing-extensions", marker = "python_full_version < '3.10'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/80/6e/b70e6dbdd7cb4f154b7ca424b4c7799f7b067f7a9f4204b8d16d6464648f/wxpython-4.2.4.tar.gz", hash = "sha256:2eb123979c87bcb329e8a2452269d60ff8f9f651e9bf25c67579e53c4ebbae3c", size = 58583054, upload-time = "2025-10-29T13:22:37.726Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/b9/78/e0ecfd48a310cd350ae8bfa9b8c92f82ff6931e6cbfbd03f4b1b04feef23/wxpython-4.2.4-cp310-cp310-macosx_10_10_x86_64.whl", hash = "sha256:ac29d594f5ed512d1c70b2bed799dd9158f904aa6a92365e48b561c1cbd7b009", size = 18730384, upload-time = "2025-10-29T04:01:55.052Z" },
-    { url = "https://files.pythonhosted.org/packages/92/f5/f80f9f8586472611b2aab2f7a4e829ae45ec36925a5a91fab448c4b6aad3/wxpython-4.2.4-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:bc96d4fb43d2e049f65831e1ab703eb617d26c9c112fdd6acd59ed1823a69870", size = 17828465, upload-time = "2025-10-29T04:01:57.847Z" },
-    { url = "https://files.pythonhosted.org/packages/c5/db/eb0c6734ebf244e31cbb041d5b9f8de98ba2c3aac2c106b583d67756d2c9/wxpython-4.2.4-cp310-cp310-win32.whl", hash = "sha256:2d020c0b0db1869d58ee646afd9cc1276520a77a9d800d407927bfee35678970", size = 14791506, upload-time = "2025-10-29T04:02:00.388Z" },
-    { url = "https://files.pythonhosted.org/packages/11/56/a29cf6bfb3f049983697945dc2c1b576b0d10612e1f53bcec69204f72df3/wxpython-4.2.4-cp310-cp310-win_amd64.whl", hash = "sha256:95d390e0bf4bd8c4c1d77e2205887a5bc84e950e4f44719d66f8d14f59c777eb", size = 16795426, upload-time = "2025-10-29T04:02:02.957Z" },
-    { url = "https://files.pythonhosted.org/packages/7e/f0/35fdc3b6349f76ed6285f97684f5be86839a19c976587ec43d7c89382e75/wxpython-4.2.4-cp39-cp39-macosx_10_10_x86_64.whl", hash = "sha256:a2ec6de12ad17ecc54ffd19d8158c6b3970fd817aca1f3231f57e9418c964df8", size = 18730533, upload-time = "2025-10-29T04:02:53.823Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/2b/a444a1bb0d937a09ab86873a4b30037254cd0cbced6368b58020b4804669/wxpython-4.2.4-cp39-cp39-macosx_11_0_arm64.whl", hash = "sha256:48a3efea46fe52891035c042c8481ed0a1a3b613f4eff38781f3a2e1951002a8", size = 17828875, upload-time = "2025-10-29T04:02:56.503Z" },
-    { url = "https://files.pythonhosted.org/packages/a9/aa/37897138e3703c5560c0fbc225787faa1b08128f46f7d5e60f8f0102025c/wxpython-4.2.4-cp39-cp39-win32.whl", hash = "sha256:e31e645ed4f0b048954f230f9a3d8dce84054fe9161f2f3ceeb2bbf176126424", size = 14789341, upload-time = "2025-10-29T04:02:58.8Z" },
-    { url = "https://files.pythonhosted.org/packages/a4/a4/b0bd12d10041b063fa39c8adb2e35137e0c50c97e3c742f0061fead65725/wxpython-4.2.4-cp39-cp39-win_amd64.whl", hash = "sha256:1771079f39cfe1fd52a2302bf7d59fad716b71cb5369c9423480b1a518a72afd", size = 16795520, upload-time = "2025-10-29T04:03:01.056Z" },
-]
-
-[[package]]
-name = "wxpython"
-version = "4.2.5"
-source = { registry = "https://pypi.org/simple" }
-resolution-markers = [
-    "python_full_version >= '3.10' and sys_platform == 'darwin'",
-    "python_full_version >= '3.10' and platform_machine == 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.10' and platform_machine != 'aarch64' and sys_platform == 'linux'",
-    "python_full_version >= '3.10' and sys_platform != 'darwin' and sys_platform != 'linux' and sys_platform != 'win32'",
-    "python_full_version >= '3.10' and platform_machine != 'AMD64' and sys_platform == 'win32'",
-    "python_full_version >= '3.10' and platform_machine == 'AMD64' and sys_platform == 'win32'",
-]
-dependencies = [
-    { name = "numpy", marker = "python_full_version >= '3.10'" },
-    { name = "typing-extensions", marker = "python_full_version >= '3.10'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/22/43/81657a6b126ffc19163500a8184d683cec08eb4e1d06905cd0c371c702d0/wxpython-4.2.5.tar.gz", hash = "sha256:44e836d1bccd99c38790bb034b6ecf70d9060f6734320560f7c4b0d006144793", size = 58732217, upload-time = "2026-02-08T20:40:42.086Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/47/79/5760d6c1175b34a19151ef4ade3eae2287f8d0a1632c883d52b3b9754ce6/wxpython-4.2.5-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:c97ccd3f2da567eff43f71948d9ace86c91dc80aa834e7b2dbeacd95eabbe9c6", size = 17763615, upload-time = "2026-02-08T20:39:28.406Z" },
-    { url = "https://files.pythonhosted.org/packages/e7/d0/c1f54823d6f491c519934842c856d30dd365e6dd3d2e7d2fc97e5988d151/wxpython-4.2.5-cp310-cp310-macosx_14_0_x86_64.whl", hash = "sha256:402c61ea6c9f2904b0e0c2ffbd04ed38ad6ae4f25e0d9de529dbf44da0685346", size = 18812631, upload-time = "2026-02-08T20:39:31.794Z" },
-    { url = "https://files.pythonhosted.org/packages/16/4e/e6fb441868988c8f1eff9903fc3943387699e6cb4f03f09c37f935bb955c/wxpython-4.2.5-cp310-cp310-win32.whl", hash = "sha256:d7e3b69a1f2ad383e8305efee11130dbe7542b6f6d8d5ba02fdce3cfc4c67ad6", size = 14804965, upload-time = "2026-02-08T20:39:34.763Z" },
-    { url = "https://files.pythonhosted.org/packages/6c/48/9d861888d3f9ff6d0559fe6578020d65fb5f5f8821be384a33d9331cfb4e/wxpython-4.2.5-cp310-cp310-win_amd64.whl", hash = "sha256:74fc76f8d22226e607d7072278cc09052da0cda508dea14a9933b014a4e5aeeb", size = 16823187, upload-time = "2026-02-08T20:39:37.834Z" },
 ]
 
 [[package]]

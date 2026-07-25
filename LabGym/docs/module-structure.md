@@ -2,13 +2,13 @@
 
 This document describes the repository layout and the responsibilities of each major package, module, and supporting subsystem in LabGym (version 3.x). It is intended for developers, maintainers, and contributors who need a map of the codebase—not as an end-user guide.
 
-LabGym is a desktop application (wxPython GUI, CLI entry point) for detecting animals/objects in videos or images, recognizing user-defined behaviors, and quantifying those behaviors with kinematic and statistical outputs.
+LabGym is a desktop application (**PySide6 workbench GUI**, CLI entry points) for detecting animals/objects in videos or images, recognizing user-defined behaviors, and quantifying those behaviors with kinematic and statistical outputs.
 
 ---
 
 ## 1. High-level architecture
 
-LabGym is organized around three user-facing functional modules, backed by core analysis engines, shared computer-vision utilities, a vendored Detectron2 stack, and infrastructure for configuration, logging, and packaging.
+LabGym is organized around FreeCAD-style **workbenches** (Preprocess, Detector, Categorizer, Results), backed by core analysis engines, shared computer-vision utilities, a vendored Detectron2 stack, and infrastructure for configuration, logging, and packaging.
 
 ```text
                         ┌─────────────────────────────────┐
@@ -19,33 +19,31 @@ LabGym is organized around three user-facing functional modules, backed by core 
               config / logging / probes / registration / selftest
                                         │
                         ┌───────────────▼─────────────────┐
-                        │  gui_main.MainFrame             │
-                        │  InitialPanel (welcome)         │
-                        └───┬─────────────┬───────────┬───┘
-                            │             │           │
-              Preprocessing │   Training  │  Analysis │
-                            │             │           │
-              gui_preprocessor   gui_detector    gui_analyzer
-                                 gui_categorizer
-                            │             │           │
-                            ▼             ▼           ▼
-                         tools.py    detector.py   analyzebehavior.py
-                                     categorizer.py analyzebehavior_dt.py
-                                                   minedata.py
-                            │             │           │
-                            └─────────────┴───────────┘
-                                          │
+                        │  gui_pyside WorkbenchMainWindow │
+                        │  workbench bar + project shell  │
+                        └───┬──────────┬──────────┬───────┘
+                            │          │          │
+              Preprocessing │ Detector │ Categorizer │ Results
+                            │          │          │
+              workbenches/* tabs  tools_windows (dense gen+sort)
+                            │          │          │
+                            ▼          ▼          ▼
+                         tools.py  detector.py  analyzebehavior*.py
+                                   categorizer.py  minedata.py
+                                   id_review / annotator / training
+                            │
                     OpenCV / TensorFlow-Keras / PyTorch
                     LabGym.detectron2 (instance segmentation)
 ```
 
-**User workflow (functional modules):**
+**User workflow (workbenches):**
 
-| Module | Purpose |
-|--------|---------|
-| **Preprocessing** | Prepare videos (trim, crop, contrast, FPS, markers) before analysis. |
-| **Training** | Train Detectors (animals/objects) and Categorizers (behaviors). |
-| **Analysis** | Track subjects, classify behaviors, export metrics, mine results. |
+| Workbench | Purpose |
+|-----------|---------|
+| **Preprocess** | Prepare videos (trim, crop, contrast, FPS, markers). |
+| **Detector** | Frame extraction, train/test detectors, batch detect+track, review IDs. |
+| **Categorizer** | Ethogram-first training data, train/test categorizer, process videos. |
+| **Results** | Mine summary stats, behavior plots, distance calculations. |
 
 **Detection strategies:**
 
@@ -96,76 +94,53 @@ LabGym is organized around three user-facing functional modules, backed by core 
 - Bootstraps deferred logging and configures logging.
 - Optional **selftest** path: if configured, runs tests and exits.
 - Checks PyPI for newer versions and prints upgrade advice.
-- **Default:** launches the PySide6 workbench shell (`gui_pyside`).
-- **Deprecated:** `LabGym --legacy-wx` (or `LABGYM_LEGACY_WX=1`) launches classic wx via `gui_main`.
+- Launches the **PySide6 workbench shell** (`gui_pyside`).
+
+Aliases: `LabGym-workflow` (same shell), `LabGym-annotate` (standalone ethogram annotator).
 
 ---
 
-## 4. User interface layer
+## 4. User interface layer (`gui_pyside`)
 
-The GUI is a multi-level notebook of wxPython panels. Level-1 panels map to the three product modules; level-2/3 panels implement specific tools.
+The default GUI is a FreeCAD-style shell: top **workbench bar**, per-workbench **tabs**, shared **project** (`*.labproj.json`).
 
-### `gui_main.py` — Shell and navigation
+### Shell
 
-| Class | Responsibility |
-|-------|----------------|
-| `MainFrame` | Top-level frame, notebook host, menubar (including selftest help). |
-| `InitialPanel` | Welcome screen; routes to Preprocessing / Training / Analysis. |
-| `PanelLv1_ProcessModule` | Preprocessing module menu. |
-| `PanelLv1_TrainingModule` | Training module menu (detectors + categorizers). |
-| `PanelLv1_AnalysisModule` | Analysis module menu (analyze, mine, plot, distances). |
-| `main_window()` | Creates and shows the main window. |
+| Module / class | Responsibility |
+|----------------|----------------|
+| `gui_pyside/main_window.py` → `WorkbenchMainWindow` | Menus, workbench bar, stack of workbenches, project status. |
+| `gui_pyside/shell/workbench_bar.py` | Exclusive workbench switcher. |
+| `gui_pyside/shell/workbench_host.py` | Hosts active workbench widget. |
+| `gui_pyside/project/*` | Project model, controller, path resolution, editor dialog. |
+| `gui_pyside/jobs/*` | Sequential job queue for long-running batch work. |
 
-### `gui_preprocessor.py` — Preprocessing UI
+### Workbenches
 
-| Class | Responsibility |
-|-------|----------------|
-| `PanelLv2_ProcessVideos` | UI for contrast enhancement, crop, trim, FPS reduction (calls `tools.preprocess_video`). |
-| `PanelLv2_DrawMarkers` / `WindowLv3_DrawMarkers` | UI for drawing colored location markers into videos. |
+| Package | Tabs (high level) |
+|---------|-------------------|
+| `workbenches/preprocessing/` | Preprocess videos; Draw markers |
+| `workbenches/detector/` | Generate training data (images + annotate placeholder); Train/Test; Detect + track; Review IDs |
+| `workbenches/categorizer/` | Generate training data (ethogram + examples); Train/Test; Process videos |
+| `workbenches/results/` | Mine results; Behavior plot; Calculate distances |
 
-### `gui_detector.py` — Detector training UI
-
-| Class | Responsibility |
-|-------|----------------|
-| `PanelLv2_GenerateImages` | Extract frames from videos for annotation (`tools.extract_frames`). |
-| `PanelLv2_TrainDetectors` | Train Detectron2-based Detectors from COCO annotations. |
-| `PanelLv2_TestDetectors` | Evaluate Detectors on held-out annotated images. |
-
-### `gui_categorizer.py` — Categorizer training UI
-
-| Class | Responsibility |
-|-------|----------------|
-| `PanelLv2_GenerateExamples` | Generate behavior example pairs (animation + pattern image) from videos. |
-| `PanelLv2_SortBehaviors` / `PanelLv3_SortExamples` / `PanelLv3_SortExamplesCSV` | Manually or CSV-assisted sorting of examples into behavior classes. |
-| `PanelLv2_TrainCategorizers` | Configure and train Pattern Recognizer, Animation Analyzer, or combined networks. |
-| `PanelLv2_TestCategorizers` | Test categorizer accuracy against labeled examples. |
-
-### `gui_analyzer.py` — Analysis UI
-
-| Class | Responsibility |
-|-------|----------------|
-| `PanelLv2_AnalyzeBehaviors` | Primary analysis workflow: choose detection method, categorizer, parameters, run tracking/classification/export. |
-| `PanelLv2_MineResults` | Statistical comparison of analysis spreadsheets (`minedata.data_mining`). |
-| `PanelLv2_PlotBehaviors` | Temporal raster / event visualization from analysis outputs. |
-| `PanelLv2_CalculateDistances` | Distance-related post-processing from event data. |
-| `ColorPicker` | Dialog for selecting behavior/ID colors. |
-
-### Supporting GUI modules
+### Secondary tools
 
 | Module | Responsibility |
 |--------|----------------|
-| `gui_utils.py` | Notebook helpers (e.g. `add_or_select_notebook_page`). |
-| `gui_app_icon.py` | Cross-platform application icons (window, taskbar, dock). |
-| `mywx/` | wxPython utilities: strict-singleton `wx.App` monkeypatch, dialogs, foreground helpers. |
-| `mywx/custom.py` | Custom dialog/widget classes. |
-| `mywx/patch.py` | App singleton patch implementation. |
+| `gui_pyside/tools_windows/` | Tools → Dense generate + sort (classic unsorted examples + sort) |
+
+### Other UI
+
+| Module | Responsibility |
+|--------|----------------|
+| `annotator/` | Multi-subject ethogram annotation (embeddable + standalone). |
 | `assets/icons/` | Icon resources (`.ico`, `.icns`, `.png`). |
 
 ---
 
 ## 5. Core analysis and ML engines
 
-These modules implement the scientific pipeline invoked by the GUI (and usable programmatically).
+These modules implement the scientific pipeline invoked by the workbench (and usable programmatically).
 
 ### `detector.py` — Object/animal Detector (Detectron2)
 
@@ -344,7 +319,7 @@ Sphinx site (MyST Markdown) published to Read the Docs:
 
 | Stack | Used for |
 |-------|----------|
-| **wxPython** | Desktop GUI. |
+| **PySide6** | Desktop workbench GUI (and Qt registration/survey dialogs). |
 | **OpenCV** (`opencv-python`, contrib) | Video I/O, contours, preprocessing, annotation drawing. |
 | **TensorFlow / Keras** | Categorizer neural networks (Animation Analyzer, Pattern Recognizer). |
 | **PyTorch + Detectron2 (vendored)** | Detector training and inference. |
@@ -362,33 +337,39 @@ Python requirement (from packaging metadata): **3.9–3.10**.
 ### A. Preprocess a video
 
 ```text
-gui_preprocessor.PanelLv2_ProcessVideos
+gui_pyside Preprocess tab
   → tools.preprocess_video
 ```
 
 ### B. Train a Detector
 
 ```text
-gui_detector.PanelLv2_GenerateImages → tools.extract_frames
+Detector → Generate images → tools.extract_frames
   → (external annotation: EZannot / Roboflow COCO JSON)
-gui_detector.PanelLv2_TrainDetectors → detector.Detector.train
+Detector → Train detector → detector.Detector.train
 ```
 
-### C. Train a Categorizer
+### C. Train a Categorizer (ethogram-first)
 
 ```text
-gui_categorizer.PanelLv2_GenerateExamples
-  → analyzebehavior.AnalyzeAnimal.generate_data*
-     or analyzebehavior_dt.AnalyzeAnimalDetector.generate_data*
-  → tools (background / pattern image helpers)
-gui_categorizer sort panels → user-labeled folders
-gui_categorizer.PanelLv2_TrainCategorizers → categorizer.Categorizers.train_*
+Categorizer → Annotate ethogram → annotator / annotations JSON
+Categorizer → Generate examples → training.ethogram_examples
+Categorizer → Train → categorizer.Categorizers.train_*
+```
+
+Dense (Tools) alternative:
+
+```text
+Tools → Dense generate → analyzebehavior*.generate_data*
+Tools → Sort (manual/CSV/annotations)
+→ Train categorizer on sorted folders
 ```
 
 ### D. Analyze behaviors (background subtraction)
 
 ```text
-gui_analyzer.PanelLv2_AnalyzeBehaviors
+analysis backends (AnalyzeAnimal) still support background subtraction;
+workbench Process videos currently emphasizes detector + categorizer path.
   → AnalyzeAnimal.prepare_analysis
   → acquire_information* / craft_data
   → categorize_behaviors (Keras model)
@@ -398,7 +379,7 @@ gui_analyzer.PanelLv2_AnalyzeBehaviors
 ### E. Analyze behaviors (Detector)
 
 ```text
-gui_analyzer.PanelLv2_AnalyzeBehaviors
+gui_pyside Process videos / analysis.process_videos
   → AnalyzeAnimalDetector.prepare_analysis
   → Detector.load + detect_track_*
   → craft_data → categorize_behaviors → export
@@ -407,7 +388,7 @@ gui_analyzer.PanelLv2_AnalyzeBehaviors
 ### F. Mine results
 
 ```text
-gui_analyzer.PanelLv2_MineResults
+gui_pyside Results → Mine results
   → minedata.data_mining.statistical_analysis
 ```
 
@@ -415,7 +396,7 @@ gui_analyzer.PanelLv2_MineResults
 
 ## 12. Design notes for contributors
 
-1. **GUI vs. engine separation** — Prefer keeping algorithm changes in `tools`, `analyzebehavior*`, `categorizer`, and `detector`. GUI modules should orchestrate parameters and paths, not reimplement CV logic.
+1. **GUI vs. engine separation** — Prefer keeping algorithm changes in `tools`, `analyzebehavior*`, `categorizer`, and `detector`. Workbench tabs should orchestrate parameters and paths, not reimplement CV logic.
 2. **Two analysis pipelines** — Background subtraction and Detector paths are deliberately parallel. Shared behavior (export schemas, pattern-image conventions) should stay consistent when one side is changed.
 3. **User data outside the package** — Models and detectors belong in configured external directories; `userdata_survey` exists to prevent packaging user data into installs.
 4. **Detectron2 is vendored** — Prefer extending `detector.py` and configs used by LabGym rather than forking deep Detectron2 internals unless necessary for upstream sync.
@@ -426,32 +407,29 @@ gui_analyzer.PanelLv2_MineResults
 
 ## 13. Quick file index (application code)
 
-| File | One-line role |
-|------|----------------|
-| `__main__.py` | Process entry, upgrade check, GUI launch. |
+| File / package | One-line role |
+|----------------|---------------|
+| `__main__.py` | Process entry, upgrade check, workbench launch. |
 | `__init__.py` | Package version. |
-| `gui_main.py` | Main window and module navigation. |
-| `gui_preprocessor.py` | Preprocessing UI. |
-| `gui_detector.py` | Detector train/test UI. |
-| `gui_categorizer.py` | Categorizer example/train/test UI. |
-| `gui_analyzer.py` | Behavior analysis and post-processing UI. |
-| `gui_utils.py` | Shared GUI helpers. |
-| `gui_app_icon.py` | App icons. |
+| `gui_pyside/` | PySide6 workbench shell, project, workbenches, tools windows. |
+| `annotator/` | Ethogram annotation UI + export helpers. |
 | `tools.py` | Shared CV, preprocess, pattern images, plots. |
 | `detector.py` | Detectron2 Detector train/load/infer. |
 | `categorizer.py` | Keras Categorizer train/test architectures. |
 | `analyzebehavior.py` | Background-subtraction analysis pipeline. |
 | `analyzebehavior_dt.py` | Detector-based analysis pipeline. |
+| `analysis/process_videos.py` | Batch process adapter used by Process videos tab. |
 | `minedata.py` | Statistical mining of result tables. |
+| `id_review/` | Tracklets, contact risk, remaps. |
+| `training/` | Ethogram example gen, soft labels, aug export, sort helpers. |
 | `config.py` | Hierarchical configuration. |
 | `myargparse.py` | CLI parsing. |
 | `mylogging.py` | Logging bootstrap. |
 | `central_logging.py` | Optional remote logging. |
-| `registration.py` | Optional user registration. |
+| `registration.py` | Optional user registration (Qt dialog). |
 | `probes.py` | Startup health checks. |
-| `userdata_survey.py` | Legacy userdata placement warnings. |
+| `userdata_survey.py` | Userdata placement warnings (Qt dialogs). |
 | `mypkg_resources.py` | Resource loading compatibility. |
-| `mywx/` | wxPython singleton + dialogs. |
 | `pkghash/` | Version + hash reporting. |
 | `selftest/` | On-demand pytest selftest runner. |
 | `detectron2/` | Vendored detection framework. |

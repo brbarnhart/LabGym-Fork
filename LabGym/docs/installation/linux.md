@@ -49,20 +49,11 @@ If you're using Arch Linux or one of its derivatives, we assume you have the `ya
    python3 -m pip install --upgrade pip wheel setuptools
    ```
 
-4. Install wxPython
+4. Install LabGym via `pip`.
 
-   ```console
-   sudo apt-get install libgtk-3-dev
-   ```
-   ```console
-   sudo apt-get install git curl libsdl2-mixer-2.0-0 libsdl2-image-2.0-0 libsdl2-2.0-0
-   ```
-   ```console
-   python3 -m pip install -U -f https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-20.04 wxPython
-   ```
+   LabGym’s desktop UI is **PySide6** (pulled in as a dependency). No separate
+   wxPython install is required.
 
-5. Install LabGym via `pip`.
- 
    ```console
    pip install --upgrade setuptools packaging
    ```
@@ -70,7 +61,14 @@ If you're using Arch Linux or one of its derivatives, we assume you have the `ya
    ```console
    python3 -m pip install LabGym
    ```
-   
+
+   On some desktops you may need Qt/X11 libraries (distro-specific), for example
+   on Debian/Ubuntu:
+
+   ```console
+   sudo apt-get install libxcb-cursor0 libxkbcommon-x11-0
+   ```
+
 &nbsp;
 
 Launch LabGym:
@@ -79,7 +77,7 @@ Launch LabGym:
    LabGym
    ```
 
-   The GUI will take a few minutes to start up during the first launch. If the LabGym GUI shows up, you have successfully installed LabGym!
+   The GUI will take a few minutes to start up during the first launch. If the LabGym workbench window shows up, you have successfully installed LabGym!
 
    If this doesn't work, which typically is because the python3/script is not in your environment path. You can google 'add python3 script to path linux' to add it to path, or simply use the following commands to initiate LabGym:
 

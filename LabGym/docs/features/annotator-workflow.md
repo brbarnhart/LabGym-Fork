@@ -1,8 +1,8 @@
 # Ethogram-first training workflow
 
-This is the **recommended** path for multi-animal behavior categorizer training in
-this LabGym workspace build. Ethograms are the durable ground truth; training
-clip length and sampling can change later **without re-annotating**.
+This is the **recommended** path for multi-animal behavior categorizer training.
+Ethograms are the durable ground truth; training clip length and sampling can
+change later **without re-annotating**.
 
 ## Pipeline
 
@@ -14,18 +14,18 @@ Raw video
   → Save video.annotations.json  ← source of truth
   → Generate LabGym pairs FROM ethogram + fixed tracklets
   → Train categorizer (hard ± soft labels)
-  → Analyze new videos
+  → Process / analyze new videos
 ```
 
-**Not** the classic path: generate many unlabeled windows → manually sort clips.
-Sorting dense `generate_data*` output is still available as a **legacy** option.
+**Primary path** is ethogram-first. Dense “generate many unsorted clips then
+sort” remains available as a **power-user tool** (Tools → Dense generate + sort
+examples…), not as the default workbench workflow.
 
 ## Launch
 
 ```bash
 LabGym                 # default: PySide6 ethogram-first workbench shell
 LabGym-workflow        # same shell (compat alias)
-LabGym --legacy-wx     # deprecated classic wxPython GUI
 LabGym-annotate        # standalone multi-subject ethogram annotator
 python -m LabGym.gui_pyside
 ```
@@ -37,10 +37,10 @@ FreeCAD-style **workbenches** (top bar) with **tabs** per subtask. See repo-root
 
 | Workbench | Role |
 |-----------|------|
-| **Preprocess** | **Preprocess videos** + **Draw markers** |
-| **Detector** | Detect + track, Review IDs, **Train/Test detector** |
-| **Categorizer** | Generate training data, Train/Test categorizer, **Process videos** |
-| **Results** | Coming soon placeholder |
+| **Preprocess** | Preprocess videos + Draw markers |
+| **Detector** | Generate training data (frames + annotate placeholder), Train/Test, Detect + track, Review IDs |
+| **Categorizer** | Ethogram annotate / generate pairs, Train/Test, Process videos |
+| **Results** | Mine results, behavior plots, distance calculations |
 
 **Projects** (`*.labproj.json`): root folder + explicit video list + defaults.
 File → New/Open/Save; Project → Edit Project.
@@ -48,8 +48,8 @@ File → New/Open/Save; Project → Edit Project.
 **Annotate / Generate:** pick a project video, load tracklets from `id_review` (or
 per-video `detection_dir`), save `*.annotations.json`, then generate sorted pairs.
 
-**Legacy wx:** `LabGym --legacy-wx` or Tools → Open LabGym (legacy wx)…  
-The classic GUI is deprecated; prefer workbench tabs.
+**Dense classic pipeline:** Tools → **Dense generate + sort examples…** (pop-out
+window for unsorted generation + manual/CSV/annotations sort).
 
 ```bash
 # CLI ethogram → training pairs
@@ -66,7 +66,7 @@ python -m LabGym.training.ethogram_examples \
 
 ### 1–2. Detect & track; fix IDs
 
-Use LabGym analysis / detector so that `id_review/{kind}_tracklets.npz` exists
+Use Detector → Detect + track so that `id_review/{kind}_tracklets.npz` exists
 **after** ID remaps are applied. These tracklets are the frozen identity layer
 for annotation and example generation (no re-detection required).
 
@@ -76,14 +76,18 @@ for annotation and example generation (no re-detection required).
 python -m LabGym.annotator
 ```
 
+Or open **Categorizer → Generate training data → Annotate ethogram** in the
+workbench.
+
 - Open the video; tracklets auto-load when found beside the video.
 - Mode **0 / 1 / 2** = non-interactive / interactive basic / interactive advanced.
 - Annotate with hotkeys; save **`video.annotations.json`**.
 - Ethogram does **not** bake in training window length.
 
-### 4. Generate examples from ethogram (Stage C)
+### 4. Generate examples from ethogram
 
-In the annotator: **Tools → Generate LabGym training pairs from ethogram…**
+In the workbench: **Categorizer → Generate training data → Generate examples**,
+or in the annotator: **Tools → Generate LabGym training pairs from ethogram…**
 
 | Parameter | Meaning |
 |-----------|---------|
@@ -109,10 +113,10 @@ Re-run with a new `--length` anytime; ethogram stays the same.
 
 ### 5. Train categorizer
 
-LabGym **Train Categorizers** → select the sorted folders from Stage C.
+**Categorizer → Train categorizer** → select the sorted folders from Stage 4.
 
 - Optional **hard_soft_aux** with `soft_labels.csv` next to prepared examples.
-- Then analyze with the trained model as usual.
+- Then **Process videos** with the trained model.
 
 ## Modes (behavior)
 
@@ -122,10 +126,10 @@ LabGym **Train Categorizers** → select the sorted folders from Stage C.
 | 1 | Group `interaction_bouts` | All animals in joint crop (`_itbs`) |
 | 2 | Per subject + partners | Main + costars (`_itadv`) |
 
-## Legacy path
+## Classic dense path (Tools menu)
 
-1. LabGym **Generate Behavior Examples** (dense sample).  
-2. **Sort from annotation session** or subject-aware CSV.  
+1. Tools → Dense generate + sort → **Generate unsorted**.  
+2. Sort with **manual keys**, **CSV**, or **annotations JSON**.  
 
 Prefer ethogram-first generation so only labeled windows become examples.
 
@@ -137,3 +141,5 @@ Prefer ethogram-first generation so only labeled windows become examples.
 | `LabGym.training.ethogram_examples` | Bout → LabGym pairs |
 | `LabGym.training.soft_labels` | Soft targets |
 | `LabGym.id_review` | Tracklets + ID fixes |
+| `LabGym.gui_pyside` | Workbench shell |
+| `LabGym.gui_pyside.tools_windows` | Dense generate + sort pop-out |
