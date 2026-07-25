@@ -2,12 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
-from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
     QLabel,
-    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -16,18 +12,18 @@ from PySide6.QtWidgets import (
 class PlaceholderTab(QWidget):
     """Empty state for tabs not yet ported to PySide."""
 
-    launch_legacy = Signal()
-
     def __init__(
         self,
         title: str,
         body: str,
         *,
         phase_note: str = "",
-        show_legacy: bool = True,
+        show_legacy: bool = False,  # Phase 8: unused; legacy is Tools menu only
         parent=None,
     ):
         super().__init__(parent)
+        # show_legacy kept for call-site compatibility; no longer adds a button.
+        _ = show_legacy
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
 
@@ -44,14 +40,5 @@ class PlaceholderTab(QWidget):
             note.setWordWrap(True)
             note.setStyleSheet("color: #9ab; margin-top: 8px;")
             layout.addWidget(note)
-
-        if show_legacy:
-            btn = QPushButton("Open LabGym (legacy wx) — temporary")
-            btn.setToolTip(
-                "Launches the classic wxPython GUI in a separate process. "
-                "Removed when this tab is fully ported."
-            )
-            btn.clicked.connect(self.launch_legacy.emit)
-            layout.addWidget(btn)
 
         layout.addStretch(1)

@@ -35,8 +35,6 @@ from LabGym import mylogging
 mylogging.defer()
 
 # Log the load of this module (by the module loader, on first import).
-# Intentionally positioning these statements before other imports, against the
-# guidance of PEP 8, to log the load before other imports log messages.
 logger = logging.getLogger(__name__)
 logger.debug('%s', f'loading {__name__}')
 
@@ -47,60 +45,73 @@ mylogging.configure()
 from packaging import version  # Core utilities for Python packages
 import requests  # Python HTTP for Humans.
 
-# On Windows, PyTorch must be imported before wxPython. Loading wx first can
-# leave DLLs in a state that makes torch fail with WinError 1114 on c10.dll.
-import torch  # noqa: F401  # pylint: disable=unused-import
-
-from LabGym import mywx  # on load, monkeypatch wx.App to be a strict-singleton
-import wx  # wxPython, Cross platform GUI toolkit for Python, "Phoenix" version
-
 # Local application/library specific imports.
 # pylint: disable=ungrouped-imports
 # pylint: disable-next=unused-import
 from LabGym import mypkg_resources  # replace deprecated pkg_resources
-from LabGym import __version__, gui_main, probes
+from LabGym import __version__, probes
 from LabGym import config, selftest
 
 
 logger.debug('%s: %r', '(__name__, __package__)', (__name__, __package__))
 
 
-def main() -> None:
-	"""Perform some pre-op probing, then display the main window."""
-
-	# Get all of the values needed from config.get_config().
-	flag_selftest: bool = config.get_config()['selftest']
-
-	if flag_selftest:
-		logger.info('%s -- %s', 'run_selftests()', 'calling...')
-		result = selftest.run_selftests()
-		logger.info('%s -- %s', 'run_selftests()', f'returned {result!r}')
-		logger.info('%s -- %s', f'sys.exit({result!r})', 'calling...')
-		sys.exit(result)
-
-
+def _maybe_print_upgrade_hint() -> None:
+	"""Print a non-fatal upgrade notice when PyPI reports a newer version."""
 	try:
-
-		current_version=version.parse(__version__)
+		current_version = version.parse(__version__)
 		logger.debug('%s: %r', 'current_version', current_version)
-		pypi_json=requests.get('https://pypi.org/pypi/LabGym/json').json()
-		latest_version=version.parse(pypi_json['info']['version'])
+		pypi_json = requests.get('https://pypi.org/pypi/LabGym/json', timeout=5).json()
+		latest_version = version.parse(pypi_json['info']['version'])
 		logger.debug('%s: %r', 'latest_version', latest_version)
 
-		if latest_version>current_version:
-
+		if latest_version > current_version:
 			if 'pipx' in str(Path(__file__)):
-				upgrade_command='pipx upgrade LabGym'
+				upgrade_command = 'pipx upgrade LabGym'
 			else:
-				upgrade_command='python3 -m pip install --upgrade LabGym'
+				upgrade_command = 'python3 -m pip install --upgrade LabGym'
 
-			print(f'You are using LabGym {current_version}, but version {latest_version} is available.')
+			print(
+				f'You are using LabGym {current_version}, but version '
+				f'{latest_version} is available.'
+			)
 			print(f'Consider upgrading LabGym by using the command "{upgrade_command}".')
-			print('For the details of new changes, check https://github.com/umyelab/LabGym.\n')
-
-	except:
-
+			print(
+				'For the details of new changes, check '
+				'https://github.com/umyelab/LabGym.\n'
+			)
+	except Exception:
 		pass
+
+
+def _main_workbench() -> None:
+	"""Default UI: PySide6 FreeCAD-style workbench shell (Phase 8)."""
+	logger.info('Starting LabGym workbench shell (PySide6)')
+	# Registration / userdata probes do not require wx.
+	probes.probes()
+	from LabGym.gui_pyside.main_window import main as workbench_main
+
+	workbench_main()
+
+
+def _main_legacy_wx() -> None:
+	"""Deprecated classic wxPython GUI (``LabGym --legacy-wx``)."""
+	logger.warning(
+		'Starting legacy wxPython LabGym GUI (--legacy-wx). '
+		'This interface is deprecated; use the default workbench shell when possible.'
+	)
+	print(
+		'NOTE: The classic wxPython LabGym window is deprecated.\n'
+		'      Prefer ``LabGym`` (PySide workbench). Use ``LabGym --legacy-wx`` only if needed.\n'
+	)
+
+	# On Windows, PyTorch must be imported before wxPython. Loading wx first can
+	# leave DLLs in a state that makes torch fail with WinError 1114 on c10.dll.
+	import torch  # noqa: F401  # pylint: disable=unused-import
+
+	from LabGym import mywx  # on load, monkeypatch wx.App to be a strict-singleton
+	import wx  # wxPython, Cross platform GUI toolkit for Python, "Phoenix" version
+	from LabGym import gui_main
 
 	# Create a single persistent, wx.App instance, as it may be
 	# needed for probe dialogs prior to calling gui_main.main_window.
@@ -113,9 +124,32 @@ def main() -> None:
 
 	gui_main.main_window()
 
+
+def main() -> None:
+	"""Launch LabGym: workbench by default, or legacy wx with ``--legacy-wx``."""
+
+	# Get all of the values needed from config.get_config().
+	cfg = config.get_config()
+	flag_selftest: bool = bool(cfg.get('selftest', False))
+	flag_legacy_wx: bool = bool(cfg.get('legacy_wx', False))
+
+	if flag_selftest:
+		logger.info('%s -- %s', 'run_selftests()', 'calling...')
+		result = selftest.run_selftests()
+		logger.info('%s -- %s', 'run_selftests()', f'returned {result!r}')
+		logger.info('%s -- %s', f'sys.exit({result!r})', 'calling...')
+		sys.exit(result)
+
+	_maybe_print_upgrade_hint()
+
+	if flag_legacy_wx:
+		_main_legacy_wx()
+	else:
+		_main_workbench()
+
 	logger.debug('Milestone -- exiting main')
 
 
-if __name__=='__main__':  # pragma: no cover
+if __name__ == '__main__':  # pragma: no cover
 
 	main()

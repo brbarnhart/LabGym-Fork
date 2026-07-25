@@ -89,8 +89,8 @@ Phases are ordered for **daily-usable ethogram-first path first**, then fill the
 ### Phase 0 — Spec freeze & scaffolding (docs only if already done)
 
 - [x] `specifications.md` agreed  
-- [ ] Point README / `docs/features` at workbench + ethogram-first docs  
-- [ ] Optional: `LabGym --legacy-wx` flag stub so default can flip later without surprise  
+- [x] Point README / `docs/features` at workbench + ethogram-first docs  
+- [x] `LabGym --legacy-wx` flag (Phase 8)
 
 **Exit:** team uses this plan + spec as contract.
 
@@ -261,14 +261,14 @@ Phases are ordered for **daily-usable ethogram-first path first**, then fill the
 
 ---
 
-### Phase 8 — Default entry + retire wx
+### Phase 8 — Default entry + retire wx ✅
 
-| Work | Detail |
-|------|--------|
-| `LabGym` main | Launch PySide shell by default |
-| Legacy | `--legacy-wx` only; document deprecation |
-| Remove | `legacy_launch` from normal tabs; delete dead wx menu paths when unused |
-| Results | Still placeholder unless starting Results epic |
+| Work | Detail | Status |
+|------|--------|--------|
+| `LabGym` main | Launch PySide shell by default | Done |
+| Legacy | `--legacy-wx` / `LABGYM_LEGACY_WX=1`; Tools menu spawn | Done |
+| Remove | No tab-level “open legacy” buttons; placeholders clean | Done |
+| Results | Still placeholder unless starting Results epic | Done |
 
 **Acceptance:** daily workflow matches spec §7 without opening wx.
 

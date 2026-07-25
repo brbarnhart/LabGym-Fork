@@ -23,13 +23,14 @@ Sorting dense `generate_data*` output is still available as a **legacy** option.
 ## Launch
 
 ```bash
-LabGym                 # full legacy GUI (detect, ID review, train, analyze)
+LabGym                 # default: PySide6 ethogram-first workbench shell
+LabGym-workflow        # same shell (compat alias)
+LabGym --legacy-wx     # deprecated classic wxPython GUI
 LabGym-annotate        # standalone multi-subject ethogram annotator
-LabGym-workflow        # PySide6 ethogram-first shell (recommended)
 python -m LabGym.gui_pyside
 ```
 
-### LabGym-workflow (PySide6 workbench shell)
+### LabGym (PySide6 workbench shell)
 
 FreeCAD-style **workbenches** (top bar) with **tabs** per subtask. See repo-root
 `specifications.md` and `implementation-plan.md`.
@@ -46,7 +47,9 @@ File → New/Open/Save; Project → Edit Project.
 
 **Annotate / Generate:** pick a project video, load tracklets from `id_review` (or
 per-video `detection_dir`), save `*.annotations.json`, then generate sorted pairs.
-Temporary **legacy wx** remains on unported tabs only.
+
+**Legacy wx:** `LabGym --legacy-wx` or Tools → Open LabGym (legacy wx)…  
+The classic GUI is deprecated; prefer workbench tabs.
 
 ```bash
 # CLI ethogram → training pairs

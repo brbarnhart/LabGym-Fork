@@ -71,6 +71,8 @@ defaults = {
 
 	'anonymous': False,
 	'selftest': False,
+	# False → PySide6 workbench (default). True via ``LabGym --legacy-wx``.
+	'legacy_wx': False,
 
 	'detectors': str(Path(__file__).parent.joinpath('detectors')),
 	'models': str(Path(__file__).parent.joinpath('models')),
@@ -91,6 +93,9 @@ def get_config_from_argv() -> dict:
 
 def get_config_from_environ() -> dict:
 	"""Get config values from os.environ.
+
+	Recognized variables include ``LABGYM_LEGACY_WX=1`` to force the
+	classic wxPython GUI (same as ``--legacy-wx``).
 
 	Weaknesses
 	*   Environment variables are case-sensitive.
@@ -230,10 +235,30 @@ def get_fullconfig() -> dict:
 	myupdate(result, config_from_argv)
 	mypathexpand(result)  # replace relative paths with absolute paths
 
+	# Coerce flags that may arrive as strings from the environment.
+	result['selftest'] = _as_bool(result.get('selftest', False))
+	result['legacy_wx'] = _as_bool(result.get('legacy_wx', False))
+
 	# logger.debug('%s: %s', 'provenance', provenance)
 	logger.debug('%s:\n%s', 'result', pprint.pformat(result))
 	_cached_config = result
 	return result
+
+
+def _as_bool(value) -> bool:
+	"""Parse bool-like values from argv/env/config."""
+	if isinstance(value, bool):
+		return value
+	if value is None:
+		return False
+	if isinstance(value, (int, float)):
+		return bool(value)
+	s = str(value).strip().lower()
+	if s in ('1', 'true', 'yes', 'on', 'y'):
+		return True
+	if s in ('0', 'false', 'no', 'off', 'n', ''):
+		return False
+	return bool(s)
 
 
 def myupdate(target: dict, addendum: dict) -> None:

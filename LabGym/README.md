@@ -57,12 +57,14 @@
 This workspace includes an integrated **PySide6 Behavior Annotator** and **ethogram-first** training:
 
 ```bash
+LabGym                   # default: PySide6 workbench shell (projects + workbenches)
+LabGym-workflow          # same workbench shell (compat alias)
+LabGym --legacy-wx       # deprecated classic wxPython GUI
 LabGym-annotate          # standalone multi-subject ethogram annotation
-LabGym-workflow          # PySide6 workbench shell (projects + workbenches)
 ```
 
 **Recommended training path:** detect → fix IDs → annotate ethogram →  
-**Tools → Generate LabGym training pairs from ethogram** → train categorizer.  
+generate LabGym training pairs from ethogram → train categorizer.  
 Ethograms stay reusable when you change clip length.  
 See `docs/features/annotator-workflow.md`.
 

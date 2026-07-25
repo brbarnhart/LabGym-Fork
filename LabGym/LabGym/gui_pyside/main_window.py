@@ -1,9 +1,10 @@
-"""PySide6 workbench shell for the ethogram-first UI migration.
+"""PySide6 workbench shell — default LabGym UI (Phase 8).
 
 Workbench icons across the top; each workbench owns its subtask tabs.
 Projects are ``*.labproj.json`` (root folder + video list + defaults).
 
-Phase 2: Categorizer → Generate training data (Annotate | Generate) is live.
+Launch: ``LabGym`` or ``LabGym-workflow`` or ``python -m LabGym.gui_pyside``.
+Legacy wx: ``LabGym --legacy-wx`` (Tools menu can also spawn that process).
 """
 
 from __future__ import annotations
@@ -75,7 +76,6 @@ class WorkbenchMainWindow(QMainWindow):
             self.wb_results,
         ):
             self.host.add_workbench(wb)
-            wb.connect_legacy(self._launch_legacy)
         self.wb_categorizer.connect_edit_project(self._edit_project)
         self.wb_detector.connect_edit_project(self._edit_project)
         self.wb_preprocessing.connect_edit_project(self._edit_project)
@@ -146,6 +146,10 @@ class WorkbenchMainWindow(QMainWindow):
 
         tools_menu = menubar.addMenu("&Tools")
         act_legacy = QAction("Open LabGym (legacy wx)…", self)
+        act_legacy.setToolTip(
+            "Deprecated classic wxPython GUI (same as: LabGym --legacy-wx). "
+            "Prefer workbench tabs for the ethogram-first workflow."
+        )
         act_legacy.triggered.connect(self._launch_legacy)
         tools_menu.addAction(act_legacy)
 
@@ -327,7 +331,7 @@ class WorkbenchMainWindow(QMainWindow):
         try:
             launch_legacy_labgym()
             self.statusBar().showMessage(
-                "Launched legacy LabGym (wx) in a separate process.", 5000
+                "Launched deprecated wx LabGym (LabGym --legacy-wx).", 5000
             )
         except Exception as exc:
             QMessageBox.critical(self, "Launch failed", str(exc))
@@ -336,14 +340,13 @@ class WorkbenchMainWindow(QMainWindow):
         QMessageBox.information(
             self,
             "About LabGym",
-            "LabGym workbench shell (PySide6)\n\n"
+            "LabGym workbench shell (PySide6) — default UI\n\n"
             "Ethogram-first workflow:\n"
             "Detect → Review IDs → Annotate ethogram → Generate pairs → "
             "Train → Process\n\n"
-            "Workbench shell (Phases 2–7):\n"
-            "Preprocess, Detect + track, Review IDs,\n"
-            "Annotate / Generate, Train/Test models,\n"
-            "Process videos with categorizer.\n"
+            "Workbenches: Preprocess, Detector, Categorizer, Results.\n"
+            "Classic wx GUI: Tools → Open LabGym (legacy wx)…\n"
+            "or: LabGym --legacy-wx\n\n"
             "See specifications.md and implementation-plan.md.",
         )
 

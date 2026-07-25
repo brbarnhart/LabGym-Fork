@@ -93,10 +93,11 @@ LabGym is organized around three user-facing functional modules, backed by core 
 ### `LabGym/__main__.py`
 
 - Console entry point (`LabGym = LabGym.__main__:main` in `pyproject.toml`).
-- Bootstraps deferred logging, configures logging, applies `mywx` singleton patch for wxPython.
+- Bootstraps deferred logging and configures logging.
 - Optional **selftest** path: if configured, runs tests and exits.
 - Checks PyPI for newer versions and prints upgrade advice.
-- Launches the main GUI via `gui_main` after pre-op probes.
+- **Default:** launches the PySide6 workbench shell (`gui_pyside`).
+- **Deprecated:** `LabGym --legacy-wx` (or `LABGYM_LEGACY_WX=1`) launches classic wx via `gui_main`.
 
 ---
 

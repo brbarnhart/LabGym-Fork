@@ -103,6 +103,9 @@ def parse_args() -> ResultType:
 								where LEVEL is a term recognized by the
 								logging system, like DEBUG, INFO,
 								WARNING, or ERROR.
+		  --legacy-wx           Launch the classic wxPython GUI
+								(deprecated; default is the PySide6
+								workbench shell).
 		  --selftest            Run selftest, then exit instead of
 								proceeding to normal LabGym operation.
 		  -v, --verbose         Equivalent to --logging_level DEBUG.
@@ -166,6 +169,10 @@ def parse_args() -> ResultType:
 
 		elif arg in ['--selftest']:
 			result['selftest'] = True
+			args = args[1:]  # shift 1
+
+		elif arg in ['--legacy-wx', '--legacy_wx']:
+			result['legacy_wx'] = True
 			args = args[1:]  # shift 1
 
 		# standard options
