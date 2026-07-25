@@ -363,16 +363,44 @@ class Categorizers():
 		return apply_class_mean_soft_to_labels(hard_Y,classnames,class_means,label_mode)
 
 
+	# Single-file artifact inside the categorizer folder. Avoids TensorFlow
+	# SavedModel nested temp paths (…/variables/variables_temp/…) that often
+	# exceed Windows MAX_PATH (~260) when model folder names are long.
+	CATEGORIZER_MODEL_FILENAME='model.keras'
+
+	@staticmethod
+	def categorizer_model_file(model_path):
+		'''Path to the primary Keras model file inside a categorizer folder.'''
+		return os.path.join(model_path,Categorizers.CATEGORIZER_MODEL_FILENAME)
+
+	@staticmethod
+	def load_categorizer_model(model_path,compile=True):
+		'''Load a categorizer from folder (prefer model.keras; fall back to SavedModel dir).'''
+		keras_file=Categorizers.categorizer_model_file(model_path)
+		if os.path.isfile(keras_file):
+			return load_model(keras_file,compile=compile)
+		# Legacy LabGym layout: whole folder is a SavedModel
+		return load_model(model_path,compile=compile)
+
+	@staticmethod
+	def save_categorizer_model(model,model_path):
+		'''Save categorizer as model.keras inside model_path (Windows-safe).'''
+		os.makedirs(model_path,exist_ok=True)
+		out=Categorizers.categorizer_model_file(model_path)
+		model.save(out)
+		return out
+
 	def _standard_fit_callbacks(self,model_path,train_progress_cb=None,cancel_event=None):
 		'''Checkpoint + early stop + LR plateau + optional epoch progress / cancel callbacks.'''
 		from LabGym.training.progress import (
-			is_cancelled,
 			make_cancel_callback,
 			make_epoch_progress_callback,
-			TrainingCancelled,
 		)
 
-		cp=ModelCheckpoint(model_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
+		os.makedirs(model_path,exist_ok=True)
+		# Single-file .keras checkpoint: much shorter paths than SavedModel dirs on Windows
+		ckpt_path=self.categorizer_model_file(model_path)
+		cp=ModelCheckpoint(ckpt_path,monitor='val_loss',verbose=1,save_best_only=True,save_weights_only=False,mode='min',save_freq='epoch')
 		es=EarlyStopping(monitor='val_loss',min_delta=0.001,mode='min',verbose=1,patience=6,restore_best_weights=True)
 		rl=ReduceLROnPlateau(monitor='val_loss',min_delta=0.001,factor=0.2,patience=3,verbose=1,mode='min',min_lr=1e-7)
 		cbs=[cp,es,rl]
@@ -1198,7 +1226,7 @@ class Categorizers():
 				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
 				self._raise_if_fit_cancelled(cancel_event)
 
-				model.save(model_path)
+				self.save_categorizer_model(model,model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
@@ -1449,7 +1477,7 @@ class Categorizers():
 				H=model.fit(trainX,trainY,batch_size=batch_size,validation_data=(testX_tensor,testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
 				self._raise_if_fit_cancelled(cancel_event)
 
-				model.save(model_path)
+				self.save_categorizer_model(model,model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
@@ -1684,7 +1712,7 @@ class Categorizers():
 				H=model.fit([train_animations,train_pattern_images],trainY,batch_size=batch_size,validation_data=([test_animations_tensor,test_pattern_images_tensor],testY_tensor),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
 				self._raise_if_fit_cancelled(cancel_event)
 
-				model.save(model_path)
+				self.save_categorizer_model(model,model_path)
 				print('Trained Categorizer saved in: '+str(model_path))
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
@@ -1898,7 +1926,7 @@ class Categorizers():
 			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
 			self._raise_if_fit_cancelled(cancel_event)
 
-			model.save(model_path)
+			self.save_categorizer_model(model,model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
@@ -2011,7 +2039,7 @@ class Categorizers():
 			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
 			self._raise_if_fit_cancelled(cancel_event)
 
-			model.save(model_path)
+			self.save_categorizer_model(model,model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
@@ -2129,7 +2157,7 @@ class Categorizers():
 			H=model.fit(train_data,validation_data=(validation_data),epochs=1000000,callbacks=self._standard_fit_callbacks(model_path,train_progress_cb,cancel_event))
 			self._raise_if_fit_cancelled(cancel_event)
 
-			model.save(model_path)
+			self.save_categorizer_model(model,model_path)
 			print('Trained Categorizer saved in: '+str(model_path))
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
@@ -2292,7 +2320,7 @@ class Categorizers():
 
 			labels=np.array(labels)
 
-			model=load_model(model_path)
+			model=self.load_categorizer_model(model_path)
 
 			if network==0:
 				predictions=model.predict(pattern_images,batch_size=32)

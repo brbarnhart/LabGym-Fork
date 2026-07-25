@@ -994,7 +994,8 @@ class AnalyzeAnimalDetector():
 		print(datetime.datetime.now())
 		self.log.append(str(datetime.datetime.now()))
 
-		categorizer=load_model(path_to_categorizer)
+		from LabGym.categorizer import Categorizers
+		categorizer=Categorizers.load_categorizer_model(path_to_categorizer)
 
 		if self.behavior_mode==1:
 			self.animal_kinds=[self.animal_kinds[0]]
@@ -2268,7 +2269,8 @@ class AnalyzeAnimalDetector():
 		if generate:
 			print('Generating behavior examples...')
 		else:
-			categorizer=load_model(path_to_categorizer)
+			from LabGym.categorizer import Categorizers
+			categorizer=Categorizers.load_categorizer_model(path_to_categorizer)
 			animal_information={}
 			colors={}
 			for behavior_name in names_and_colors:

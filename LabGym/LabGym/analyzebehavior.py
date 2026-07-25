@@ -588,7 +588,8 @@ class AnalyzeAnimal():
 		else:
 			inputs=pattern_images
 
-		categorizer=load_model(path_to_categorizer)
+		from LabGym.categorizer import Categorizers
+		categorizer=Categorizers.load_categorizer_model(path_to_categorizer)
 		predictions=categorizer.predict(inputs,batch_size=32)
 
 		for behavior_name in self.all_behavior_parameters:

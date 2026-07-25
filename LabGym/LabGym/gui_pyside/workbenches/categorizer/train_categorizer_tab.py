@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtGui import QPixmap
+from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -29,8 +30,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-# QFormLayout used for prepare + train groups
-
 from LabGym.gui_pyside.project.controller import ProjectController
 
 
@@ -42,6 +41,259 @@ def _auto_aug_workers() -> int:
     except Exception:
         cpu = os.cpu_count() or 1
         return max(1, min(8, cpu - 1 if cpu > 1 else 1))
+
+
+class TrainProgressDialog(QDialog):
+    """Pop-out window for augmentation + training progress (keeps the form readable)."""
+
+    cancel_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Categorizer training progress")
+        self.setMinimumSize(560, 640)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+        self._running = False
+        self._hist: Dict[str, List[float]] = {
+            "loss": [],
+            "val_loss": [],
+            "accuracy": [],
+            "val_accuracy": [],
+        }
+
+        layout = QVBoxLayout(self)
+
+        self.lbl_phase = QLabel("Starting…")
+        self.lbl_phase.setWordWrap(True)
+        layout.addWidget(self.lbl_phase)
+
+        self.progress_aug = QProgressBar()
+        self.progress_aug.setRange(0, 100)
+        self.progress_aug.setValue(0)
+        self.progress_aug.setFormat("Augmentation: %p%")
+        self.progress_aug.setToolTip(
+            "Progress while exporting augmented train/validation examples "
+            "(by source example count)."
+        )
+        layout.addWidget(self.progress_aug)
+
+        self.progress_train = QProgressBar()
+        self.progress_train.setRange(0, 0)
+        self.progress_train.setFormat("Training: waiting…")
+        self.progress_train.setToolTip(
+            "Training runs until early stopping. Bar is indeterminate; epoch "
+            "metrics update below after each epoch."
+        )
+        layout.addWidget(self.progress_train)
+
+        metrics = QGroupBox("Training metrics (live)")
+        metrics.setToolTip("Updated after each training epoch.")
+        mform = QFormLayout(metrics)
+        self.lbl_epoch = QLabel("—")
+        self.lbl_loss = QLabel("—")
+        self.lbl_val_loss = QLabel("—")
+        self.lbl_acc = QLabel("—")
+        self.lbl_val_acc = QLabel("—")
+        mform.addRow("Epoch:", self.lbl_epoch)
+        mform.addRow("loss:", self.lbl_loss)
+        mform.addRow("val_loss:", self.lbl_val_loss)
+        mform.addRow("accuracy:", self.lbl_acc)
+        mform.addRow("val_accuracy:", self.lbl_val_acc)
+        self.lbl_curve = QLabel()
+        self.lbl_curve.setMinimumHeight(140)
+        self.lbl_curve.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # White panel so matplotlib's default black tick/axis labels stay readable
+        # under any app theme.
+        self.lbl_curve.setStyleSheet(
+            "QLabel { background: #ffffff; color: #222; border: 1px solid #ccc; border-radius: 4px; }"
+        )
+        self.lbl_curve.setText("Loss curves appear after the first epoch.")
+        mform.addRow(self.lbl_curve)
+        layout.addWidget(metrics)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        layout.addWidget(self.log, 1)
+
+        btn_row = QHBoxLayout()
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setToolTip(
+            "Cooperatively stop augmentation (between source examples) or training "
+            "(at the next epoch/batch boundary). May take a short time to finish."
+        )
+        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
+        self.btn_close = QPushButton("Close")
+        self.btn_close.setEnabled(False)
+        self.btn_close.setToolTip("Close this window (enabled when the job finishes).")
+        self.btn_close.clicked.connect(self.accept)
+        btn_row.addWidget(self.btn_cancel)
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.btn_close)
+        layout.addLayout(btn_row)
+
+    def begin_job(self) -> None:
+        self._running = True
+        self.btn_cancel.setEnabled(True)
+        self.btn_close.setEnabled(False)
+        self.progress_aug.setValue(0)
+        self.progress_train.setRange(0, 0)
+        self.progress_train.setFormat("Training: waiting for fit…")
+        self._reset_metrics()
+        self.lbl_phase.setText("Starting…")
+        self.log.clear()
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def mark_finished(self, *, cancelled: bool = False, failed: bool = False) -> None:
+        self._running = False
+        self.btn_cancel.setEnabled(False)
+        self.btn_close.setEnabled(True)
+        if failed:
+            self.progress_train.setRange(0, 1)
+            self.progress_train.setValue(0)
+            self.progress_train.setFormat("Training: failed")
+        elif cancelled:
+            self.progress_train.setRange(0, 1)
+            self.progress_train.setValue(0)
+            self.progress_train.setFormat("Training: cancelled")
+        else:
+            self.progress_aug.setValue(100)
+            self.progress_train.setRange(0, 1)
+            self.progress_train.setValue(1)
+            self.progress_train.setFormat("Training: done")
+
+    def _on_cancel_clicked(self) -> None:
+        self.btn_cancel.setEnabled(False)
+        self.lbl_phase.setText("Cancel requested… finishing current step")
+        self.log.append(
+            "Cancel requested — will stop after the current augmentation source "
+            "or training epoch/batch boundary."
+        )
+        self.cancel_requested.emit()
+
+    def closeEvent(self, event: QCloseEvent) -> None:
+        if self._running:
+            # Keep training; just hide the window. User can re-open is not needed —
+            # ask to cancel or stay open.
+            r = QMessageBox.question(
+                self,
+                "Training in progress",
+                "Training is still running.\n\n"
+                "Cancel training and close?\n"
+                "Choose No to keep the window open.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if r == QMessageBox.StandardButton.Yes:
+                self._on_cancel_clicked()
+                event.ignore()  # wait until job ends to free UI; still show cancelled state
+            else:
+                event.ignore()
+            return
+        event.accept()
+
+    def _reset_metrics(self) -> None:
+        self._hist = {"loss": [], "val_loss": [], "accuracy": [], "val_accuracy": []}
+        self.lbl_epoch.setText("—")
+        self.lbl_loss.setText("—")
+        self.lbl_val_loss.setText("—")
+        self.lbl_acc.setText("—")
+        self.lbl_val_acc.setText("—")
+        self.lbl_curve.clear()
+        self.lbl_curve.setText("Loss curves appear after the first epoch.")
+
+    def append_log(self, msg: str) -> None:
+        self.log.append(msg)
+
+    def set_phase(self, msg: str) -> None:
+        self.lbl_phase.setText(msg)
+
+    def on_status(self, msg: str) -> None:
+        self.log.append(msg)
+        self.lbl_phase.setText(msg)
+        if "train" in msg.lower() and "augment" not in msg.lower():
+            self.progress_train.setRange(0, 0)
+            self.progress_train.setFormat("Training…")
+
+    def on_aug_progress(self, done: int, total: int, msg: str) -> None:
+        if total > 0:
+            self.progress_aug.setValue(int(100 * done / total))
+        self.lbl_phase.setText(msg)
+        if total > 0 and (done == total or done % max(1, total // 20) == 0):
+            self.log.append(msg)
+        if total > 0 and done >= total:
+            self.progress_train.setRange(0, 0)
+            self.progress_train.setFormat("Training: fitting…")
+            self.lbl_phase.setText("Training (epochs until early stop)…")
+
+    def on_train_progress(self, epoch: int, logs: dict) -> None:
+        self.progress_train.setRange(0, 0)
+        self.progress_train.setFormat(f"Training: epoch {epoch}")
+        self.lbl_epoch.setText(str(epoch))
+
+        def _fmt(key: str) -> str:
+            if key not in logs:
+                return "—"
+            try:
+                return f"{float(logs[key]):.4f}"
+            except (TypeError, ValueError):
+                return str(logs[key])
+
+        self.lbl_loss.setText(_fmt("loss"))
+        self.lbl_val_loss.setText(_fmt("val_loss"))
+        self.lbl_acc.setText(_fmt("accuracy"))
+        self.lbl_val_acc.setText(_fmt("val_accuracy"))
+        for k in self._hist:
+            if k in logs:
+                try:
+                    self._hist[k].append(float(logs[k]))
+                except (TypeError, ValueError):
+                    pass
+        self.lbl_phase.setText(
+            f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')}"
+        )
+        self.log.append(
+            f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')} "
+            f"acc={_fmt('accuracy')} val_acc={_fmt('val_accuracy')}"
+        )
+        self._refresh_curve()
+
+    def _refresh_curve(self) -> None:
+        loss = self._hist.get("loss") or []
+        if not loss:
+            return
+        try:
+            import matplotlib
+
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+
+            fig, ax = plt.subplots(figsize=(5.0, 2.0), dpi=90, facecolor="white")
+            ax.set_facecolor("white")
+            ax.plot(range(1, len(loss) + 1), loss, label="loss", color="#1f77b4")
+            vl = self._hist.get("val_loss") or []
+            if vl:
+                ax.plot(range(1, len(vl) + 1), vl, label="val_loss", color="#d62728")
+            ax.set_xlabel("Epoch", color="black")
+            ax.set_ylabel("Loss", color="black")
+            ax.tick_params(colors="black")
+            for spine in ax.spines.values():
+                spine.set_color("black")
+            legend = ax.legend(loc="upper right", fontsize=8, facecolor="white", edgecolor="#ccc")
+            for text in legend.get_texts():
+                text.set_color("black")
+            ax.grid(True, alpha=0.3, color="#888")
+            fig.tight_layout()
+            buf = BytesIO()
+            fig.savefig(buf, format="png", facecolor="white", edgecolor="none")
+            plt.close(fig)
+            pix = QPixmap()
+            pix.loadFromData(buf.getvalue())
+            self.lbl_curve.setPixmap(
+                pix.scaledToWidth(480, Qt.TransformationMode.SmoothTransformation)
+            )
+        except Exception:
+            pass
 
 
 class _PrepWorker(QObject):
@@ -83,7 +335,6 @@ class _TrainWorker(QObject):
     def run(self) -> None:
         try:
             from LabGym.categorizer import Categorizers
-            from LabGym.training.progress import TrainingCancelled
 
             p = self.params
             Path(p["model_path"]).mkdir(parents=True, exist_ok=True)
@@ -181,12 +432,17 @@ class TrainCategorizerTab(QWidget):
         super().__init__(parent)
         self.project = project
         self._thread: Optional[QThread] = None
+        self._cancel_event: Optional[threading.Event] = None
+        self._progress_dlg: Optional[TrainProgressDialog] = None
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        intro = QLabel(
             "Train on <b>prepared</b> ethogram-generated example folders "
-            "(behavior subfolders of .avi+.jpg pairs). Dense generate-then-sort is not offered."
-        ))
+            "(behavior subfolders of .avi+.jpg pairs). Dense generate-then-sort is not offered. "
+            "Progress opens in a separate window when training starts."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
 
         prep = QGroupBox("Optional: prepare sorted folders → flat labeled examples")
         prep.setToolTip(
@@ -225,6 +481,8 @@ class TrainCategorizerTab(QWidget):
 
         train = QGroupBox("Train")
         form = QFormLayout(train)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.ed_data = QLineEdit()
         self.ed_data.setPlaceholderText("Prepared examples folder (or ethogram examples root)")
         self.ed_data.setToolTip(
@@ -392,7 +650,6 @@ class TrainCategorizerTab(QWidget):
         self.chk_skip_aug.setToolTip(tip_skip)
         form.addRow(self.chk_skip_aug)
 
-        # Augmentation workers
         self.chk_auto_workers = QCheckBox("Auto workers")
         self.chk_auto_workers.setChecked(True)
         tip_auto = (
@@ -407,8 +664,7 @@ class TrainCategorizerTab(QWidget):
             "Number of CPU processes for export augmentation. More workers = faster "
             "aug but more RAM/CPU. Set to 1 if unstable or low memory. Does not "
             "speed up GPU training epochs. Jobs with fewer than 16 source examples "
-            "stay sequential. Cancel stops between examples (or at epoch boundaries "
-            "during fit)."
+            "stay sequential. Cancel is available in the progress window."
         )
         self.spin_workers.setToolTip(tip_workers)
         self.spin_workers.setEnabled(False)
@@ -433,74 +689,19 @@ class TrainCategorizerTab(QWidget):
 
         layout.addWidget(train)
 
-        self.lbl_phase = QLabel("Idle")
-        layout.addWidget(self.lbl_phase)
-        self.progress_aug = QProgressBar()
-        self.progress_aug.setRange(0, 100)
-        self.progress_aug.setValue(0)
-        self.progress_aug.setFormat("Augmentation: %p%")
-        self.progress_aug.setToolTip(
-            "Progress while exporting augmented train/validation examples "
-            "(by source example count)."
-        )
-        layout.addWidget(self.progress_aug)
-
-        self.progress_train = QProgressBar()
-        self.progress_train.setRange(0, 0)  # indeterminate during fit (early stopping)
-        self.progress_train.setFormat("Training: waiting…")
-        self.progress_train.setToolTip(
-            "Training runs until early stopping. Bar is indeterminate; epoch "
-            "metrics update below after each epoch."
-        )
-        layout.addWidget(self.progress_train)
-
-        metrics = QGroupBox("Training metrics (live)")
-        metrics.setToolTip("Updated after each training epoch (export/onfly path).")
-        mform = QFormLayout(metrics)
-        self.lbl_epoch = QLabel("—")
-        self.lbl_loss = QLabel("—")
-        self.lbl_val_loss = QLabel("—")
-        self.lbl_acc = QLabel("—")
-        self.lbl_val_acc = QLabel("—")
-        mform.addRow("Epoch:", self.lbl_epoch)
-        mform.addRow("loss:", self.lbl_loss)
-        mform.addRow("val_loss:", self.lbl_val_loss)
-        mform.addRow("accuracy:", self.lbl_acc)
-        mform.addRow("val_accuracy:", self.lbl_val_acc)
-        self.lbl_curve = QLabel()
-        self.lbl_curve.setMinimumHeight(120)
-        self.lbl_curve.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.lbl_curve.setStyleSheet(
-            "QLabel { background: #1e1e1e; border: 1px solid #444; border-radius: 4px; }"
-        )
-        self.lbl_curve.setText("Loss curves appear after the first epoch.")
-        mform.addRow(self.lbl_curve)
-        layout.addWidget(metrics)
-        self._hist: Dict[str, List[float]] = {
-            "loss": [],
-            "val_loss": [],
-            "accuracy": [],
-            "val_accuracy": [],
-        }
-
-        run_row = QHBoxLayout()
         self.btn = QPushButton("Train categorizer")
-        self.btn.clicked.connect(self._train)
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.setToolTip(
-            "Cooperatively stop augmentation (between source examples) or training "
-            "(at the next epoch/batch boundary). May take a short time to finish."
+        self.btn.setToolTip(
+            "Starts training. Augmentation and epoch progress open in a separate window."
         )
-        self.btn_cancel.clicked.connect(self._cancel)
-        run_row.addWidget(self.btn, 1)
-        run_row.addWidget(self.btn_cancel)
-        layout.addLayout(run_row)
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        layout.addWidget(self.log, 1)
+        self.btn.clicked.connect(self._train)
+        layout.addWidget(self.btn)
 
-        self._cancel_event: Optional[threading.Event] = None
+        self.lbl_status = QLabel("Idle")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("color: #aaa;")
+        layout.addWidget(self.lbl_status)
+        layout.addStretch(1)
+
         self._defaults()
 
     def _on_auto_workers(self, checked: bool) -> None:
@@ -553,7 +754,7 @@ class TrainCategorizerTab(QWidget):
             QMessageBox.warning(self, "Prepare", "Set sorted source and prepared output folders.")
             return
         Path(dst).mkdir(parents=True, exist_ok=True)
-        self.log.append(f"Preparing {src} → {dst}")
+        self.lbl_status.setText(f"Preparing {src} → {dst}…")
         self._thread = QThread(self)
         worker = _PrepWorker(src, dst)
         worker.moveToThread(self._thread)
@@ -568,13 +769,19 @@ class TrainCategorizerTab(QWidget):
 
     def _prep_done(self, path: str) -> None:
         self.ed_data.setText(path)
-        self.log.append(f"Prepared examples in {path}")
+        self.lbl_status.setText(f"Prepared examples in {path}")
         QMessageBox.information(self, "Prepare", f"Prepared:\n{path}")
 
     def _resolved_workers(self) -> int:
         if self.chk_auto_workers.isChecked():
             return _auto_aug_workers()
         return int(self.spin_workers.value())
+
+    def _ensure_progress_dialog(self) -> TrainProgressDialog:
+        if self._progress_dlg is None:
+            self._progress_dlg = TrainProgressDialog(self)
+            self._progress_dlg.cancel_requested.connect(self._cancel)
+        return self._progress_dlg
 
     def _train(self) -> None:
         if self._thread is not None:
@@ -638,25 +845,24 @@ class TrainCategorizerTab(QWidget):
             skip_augment=self.chk_skip_aug.isChecked(),
         )
         self.btn.setEnabled(False)
-        self.btn_cancel.setEnabled(True)
-        self.progress_aug.setValue(0)
-        self.progress_train.setRange(0, 0)
-        self.progress_train.setFormat("Training: waiting for fit…")
-        self._reset_metrics()
-        self.lbl_phase.setText("Starting…")
-        self.log.append(f"Training → {model_path}")
-        self.log.append(f"Augmented export → {export}")
-        self.log.append(f"Augmentation workers → {n_workers}")
+        self.lbl_status.setText("Training in progress (see progress window)…")
+
+        dlg = self._ensure_progress_dialog()
+        dlg.begin_job()
+        dlg.append_log(f"Training → {model_path}")
+        dlg.append_log(f"Augmented export → {export}")
+        dlg.append_log(f"Augmentation workers → {n_workers}")
         if self.chk_skip_aug.isChecked():
-            self.log.append("Reuse existing export: ON (skip re-augment if complete)")
+            dlg.append_log("Reuse existing export: ON (skip re-augment if complete)")
+
         self._cancel_event = threading.Event()
         self._thread = QThread(self)
         worker = _TrainWorker(params, self._cancel_event)
         worker.moveToThread(self._thread)
         self._thread.started.connect(worker.run)
-        worker.progress.connect(self._on_status)
-        worker.progress_aug.connect(self._on_aug_progress)
-        worker.progress_train.connect(self._on_train_progress)
+        worker.progress.connect(dlg.on_status)
+        worker.progress_aug.connect(dlg.on_aug_progress)
+        worker.progress_train.connect(dlg.on_train_progress)
         worker.finished.connect(self._train_done)
         worker.cancelled.connect(self._train_cancelled)
         worker.error.connect(self._err)
@@ -671,128 +877,29 @@ class TrainCategorizerTab(QWidget):
         if self._cancel_event is None:
             return
         self._cancel_event.set()
-        self.btn_cancel.setEnabled(False)
-        self.lbl_phase.setText("Cancel requested… finishing current step")
-        self.log.append(
-            "Cancel requested — will stop after the current augmentation source "
-            "or training epoch/batch boundary."
-        )
-
-    def _reset_metrics(self) -> None:
-        self._hist = {"loss": [], "val_loss": [], "accuracy": [], "val_accuracy": []}
-        self.lbl_epoch.setText("—")
-        self.lbl_loss.setText("—")
-        self.lbl_val_loss.setText("—")
-        self.lbl_acc.setText("—")
-        self.lbl_val_acc.setText("—")
-        self.lbl_curve.clear()
-        self.lbl_curve.setText("Loss curves appear after the first epoch.")
-
-    def _on_status(self, msg: str) -> None:
-        self.log.append(msg)
-        self.lbl_phase.setText(msg)
-        if "train" in msg.lower() and "augment" not in msg.lower():
-            self.progress_train.setRange(0, 0)
-            self.progress_train.setFormat("Training…")
-
-    def _on_aug_progress(self, done: int, total: int, msg: str) -> None:
-        if total > 0:
-            self.progress_aug.setValue(int(100 * done / total))
-        self.lbl_phase.setText(msg)
-        # Log sparsely to avoid flooding
-        if total > 0 and (done == total or done % max(1, total // 20) == 0):
-            self.log.append(msg)
-        if total > 0 and done >= total:
-            self.progress_train.setRange(0, 0)
-            self.progress_train.setFormat("Training: fitting…")
-            self.lbl_phase.setText("Training (epochs until early stop)…")
-
-    def _on_train_progress(self, epoch: int, logs: dict) -> None:
-        self.progress_train.setRange(0, 0)
-        self.progress_train.setFormat(f"Training: epoch {epoch}")
-        self.lbl_epoch.setText(str(epoch))
-
-        def _fmt(key: str) -> str:
-            if key not in logs:
-                return "—"
-            try:
-                return f"{float(logs[key]):.4f}"
-            except (TypeError, ValueError):
-                return str(logs[key])
-
-        self.lbl_loss.setText(_fmt("loss"))
-        self.lbl_val_loss.setText(_fmt("val_loss"))
-        self.lbl_acc.setText(_fmt("accuracy"))
-        self.lbl_val_acc.setText(_fmt("val_accuracy"))
-        for k in self._hist:
-            if k in logs:
-                try:
-                    self._hist[k].append(float(logs[k]))
-                except (TypeError, ValueError):
-                    pass
-        self.lbl_phase.setText(
-            f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')}"
-        )
-        self.log.append(
-            f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')} "
-            f"acc={_fmt('accuracy')} val_acc={_fmt('val_accuracy')}"
-        )
-        self._refresh_curve()
-
-    def _refresh_curve(self) -> None:
-        loss = self._hist.get("loss") or []
-        if not loss:
-            return
-        try:
-            import matplotlib
-
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-
-            fig, ax = plt.subplots(figsize=(4.5, 1.8), dpi=90)
-            ax.plot(range(1, len(loss) + 1), loss, label="loss", color="#6ea8fe")
-            vl = self._hist.get("val_loss") or []
-            if vl:
-                ax.plot(range(1, len(vl) + 1), vl, label="val_loss", color="#ffb86c")
-            ax.set_xlabel("Epoch")
-            ax.set_ylabel("Loss")
-            ax.legend(loc="upper right", fontsize=8)
-            ax.grid(True, alpha=0.3)
-            fig.tight_layout()
-            buf = BytesIO()
-            fig.savefig(buf, format="png", facecolor="#1e1e1e", edgecolor="none")
-            plt.close(fig)
-            pix = QPixmap()
-            pix.loadFromData(buf.getvalue())
-            self.lbl_curve.setPixmap(
-                pix.scaledToWidth(420, Qt.TransformationMode.SmoothTransformation)
-            )
-        except Exception:
-            pass
+        self.lbl_status.setText("Cancel requested…")
 
     def _cleanup(self) -> None:
         self._thread = None
         self._cancel_event = None
         self.btn.setEnabled(True)
-        self.btn_cancel.setEnabled(False)
 
     def _train_done(self, path: str) -> None:
-        self.progress_aug.setValue(100)
-        self.progress_train.setRange(0, 1)
-        self.progress_train.setValue(1)
-        self.progress_train.setFormat("Training: done")
-        self.lbl_phase.setText("Done")
-        self.log.append(f"Done: {path}")
+        if self._progress_dlg is not None:
+            self._progress_dlg.append_log(f"Done: {path}")
+            self._progress_dlg.set_phase("Done")
+            self._progress_dlg.mark_finished()
+        self.lbl_status.setText(f"Done: {path}")
         self.project.project.defaults.categorizer_name = path
         self.project.mark_dirty()
         QMessageBox.information(self, "Train categorizer", f"Saved:\n{path}")
 
     def _train_cancelled(self, msg: str) -> None:
-        self.progress_train.setRange(0, 1)
-        self.progress_train.setValue(0)
-        self.progress_train.setFormat("Training: cancelled")
-        self.lbl_phase.setText("Cancelled")
-        self.log.append(f"Cancelled: {msg}")
+        if self._progress_dlg is not None:
+            self._progress_dlg.append_log(f"Cancelled: {msg}")
+            self._progress_dlg.set_phase("Cancelled")
+            self._progress_dlg.mark_finished(cancelled=True)
+        self.lbl_status.setText(f"Cancelled: {msg}")
         QMessageBox.information(
             self,
             "Cancelled",
@@ -800,9 +907,9 @@ class TrainCategorizerTab(QWidget):
         )
 
     def _err(self, msg: str) -> None:
-        self.progress_train.setRange(0, 1)
-        self.progress_train.setValue(0)
-        self.progress_train.setFormat("Training: failed")
-        self.lbl_phase.setText("Failed")
-        self.log.append(f"ERROR: {msg}")
+        if self._progress_dlg is not None and self._progress_dlg.isVisible():
+            self._progress_dlg.append_log(f"ERROR: {msg}")
+            self._progress_dlg.set_phase("Failed")
+            self._progress_dlg.mark_finished(failed=True)
+        self.lbl_status.setText(f"ERROR: {msg}")
         QMessageBox.critical(self, "Failed", msg)
