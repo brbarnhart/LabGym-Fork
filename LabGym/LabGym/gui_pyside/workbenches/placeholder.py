@@ -18,12 +18,9 @@ class PlaceholderTab(QWidget):
         body: str,
         *,
         phase_note: str = "",
-        show_legacy: bool = False,  # Phase 8: unused; legacy is Tools menu only
         parent=None,
     ):
         super().__init__(parent)
-        # show_legacy kept for call-site compatibility; no longer adds a button.
-        _ = show_legacy
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
 

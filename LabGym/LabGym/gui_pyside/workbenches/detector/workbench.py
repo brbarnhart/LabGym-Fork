@@ -76,9 +76,6 @@ class DetectorWorkbench(Workbench):
         self.add_subtab("detect_track", "Detect + track", self.detect_tab)
         self.add_subtab("review_ids", "Review IDs", self.review_tab)
 
-    def connect_legacy(self, slot) -> None:
-        return
-
     def connect_edit_project(self, slot) -> None:
         self.review_tab.request_edit_project.connect(slot)
         self.detect_tab.request_edit_project.connect(slot)

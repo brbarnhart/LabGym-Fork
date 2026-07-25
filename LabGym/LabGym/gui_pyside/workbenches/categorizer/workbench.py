@@ -77,9 +77,6 @@ class CategorizerWorkbench(Workbench):
         self.add_subtab("test", "Test categorizer", self.test_tab)
         self.add_subtab("process", "Process videos", self.process_tab)
 
-    def connect_legacy(self, slot) -> None:
-        return
-
     def connect_edit_project(self, slot) -> None:
         self.generate_host.request_edit_project.connect(slot)
         self.process_tab.request_edit_project.connect(slot)

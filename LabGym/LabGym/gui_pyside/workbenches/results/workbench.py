@@ -23,5 +23,3 @@ class ResultsWorkbench(Workbench):
         self.add_subtab("plot", "Behavior plot", self.plot_tab)
         self.add_subtab("distances", "Calculate distances", self.distances_tab)
 
-    def connect_legacy(self, slot) -> None:
-        return

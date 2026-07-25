@@ -19,8 +19,6 @@ class PreprocessingWorkbench(Workbench):
         self.add_subtab("preprocess", "Preprocess videos", self.preprocess_tab)
         self.add_subtab("markers", "Draw markers", self.markers_tab)
 
-    def connect_legacy(self, slot) -> None:
-        return
 
     def connect_edit_project(self, slot) -> None:
         self.preprocess_tab.request_edit_project.connect(slot)
