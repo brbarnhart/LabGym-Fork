@@ -96,7 +96,7 @@ def test_import_LabGym_package():
 	# load all of the package's py-files... (that's why we are
 	# attempting to load all of LabGym package's first-generation
 	# py-files)
-	submodules.extend(['detectron2', 'mywx', 'pkghash', 'selftest'])
+	submodules.extend(['detectron2', 'pkghash', 'selftest'])
 
 
 def test_imports_with_sysargv_initialized(monkeypatch):

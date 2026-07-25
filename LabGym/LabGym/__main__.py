@@ -85,53 +85,31 @@ def _maybe_print_upgrade_hint() -> None:
 
 
 def _main_workbench() -> None:
-	"""Default UI: PySide6 FreeCAD-style workbench shell (Phase 8)."""
+	"""Default UI: PySide6 FreeCAD-style workbench shell."""
 	logger.info('Starting LabGym workbench shell (PySide6)')
-	# Registration / userdata probes do not require wx.
-	probes.probes()
-	from LabGym.gui_pyside.main_window import main as workbench_main
+	# Create Qt app first so registration / survey dialogs can run under PySide.
+	from PySide6.QtWidgets import QApplication
 
-	workbench_main()
+	app = QApplication.instance() or QApplication(sys.argv)
+	app.setApplicationName('LabGym')
+	app.setOrganizationName('LabGym')
+	app.setStyle('Fusion')
 
-
-def _main_legacy_wx() -> None:
-	"""Deprecated classic wxPython GUI (``LabGym --legacy-wx``)."""
-	logger.warning(
-		'Starting legacy wxPython LabGym GUI (--legacy-wx). '
-		'This interface is deprecated; use the default workbench shell when possible.'
-	)
-	print(
-		'NOTE: The classic wxPython LabGym window is deprecated.\n'
-		'      Prefer ``LabGym`` (PySide workbench). Use ``LabGym --legacy-wx`` only if needed.\n'
-	)
-
-	# On Windows, PyTorch must be imported before wxPython. Loading wx first can
-	# leave DLLs in a state that makes torch fail with WinError 1114 on c10.dll.
-	import torch  # noqa: F401  # pylint: disable=unused-import
-
-	from LabGym import mywx  # on load, monkeypatch wx.App to be a strict-singleton
-	import wx  # wxPython, Cross platform GUI toolkit for Python, "Phoenix" version
-	from LabGym import gui_main
-
-	# Create a single persistent, wx.App instance, as it may be
-	# needed for probe dialogs prior to calling gui_main.main_window.
-	assert wx.GetApp() is None
-	wx.App()
-	mywx.bring_wxapp_to_foreground()
-
-	# Perform some pre-op sanity checks and probes of outside resources.
 	probes.probes()
 
-	gui_main.main_window()
+	from LabGym.gui_pyside.main_window import WorkbenchMainWindow
+
+	window = WorkbenchMainWindow()
+	window.show()
+	sys.exit(app.exec())
 
 
 def main() -> None:
-	"""Launch LabGym: workbench by default, or legacy wx with ``--legacy-wx``."""
+	"""Launch LabGym workbench shell."""
 
 	# Get all of the values needed from config.get_config().
 	cfg = config.get_config()
 	flag_selftest: bool = bool(cfg.get('selftest', False))
-	flag_legacy_wx: bool = bool(cfg.get('legacy_wx', False))
 
 	if flag_selftest:
 		logger.info('%s -- %s', 'run_selftests()', 'calling...')
@@ -141,11 +119,7 @@ def main() -> None:
 		sys.exit(result)
 
 	_maybe_print_upgrade_hint()
-
-	if flag_legacy_wx:
-		_main_legacy_wx()
-	else:
-		_main_workbench()
+	_main_workbench()
 
 	logger.debug('Milestone -- exiting main')
 

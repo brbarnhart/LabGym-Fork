@@ -59,7 +59,6 @@ This workspace includes an integrated **PySide6 Behavior Annotator** and **ethog
 ```bash
 LabGym                   # default: PySide6 workbench shell (projects + workbenches)
 LabGym-workflow          # same workbench shell (compat alias)
-LabGym --legacy-wx       # deprecated classic wxPython GUI
 LabGym-annotate          # standalone multi-subject ethogram annotation
 ```
 

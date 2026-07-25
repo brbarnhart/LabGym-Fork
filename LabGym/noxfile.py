@@ -23,23 +23,13 @@ import platform
 nox.options.error_on_missing_interpreters=True
 nox.options.reuse_existing_virtualenvs=False
 
-EXTRAS_WX_URL = "https://extras.wxpython.org/wxPython4/extras/linux/gtk3/ubuntu-22.04"
-
-
 @nox.session(python=['3.9','3.10'])
 def tests(session:nox.Session):
 	# prefer wheels globally
 	session.env["PIP_PREFER_BINARY"]="1"
 	session.env["PIP_NO_CACHE_DIR"]="1"
 
-	# Preinstall a wxPython wheel to avoid building from source
 	if platform.system() == "Linux":
-		session.install(
-			"--only-binary=:all:",
-			"-f", EXTRAS_WX_URL,
-			"wxPython==4.2.1"
-		)
-
 		# Force CPU-only PyTorch stack to avoid large CUDA downloads
 		session.install(
 			"--no-cache-dir",

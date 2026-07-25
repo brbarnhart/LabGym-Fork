@@ -71,8 +71,6 @@ defaults = {
 
 	'anonymous': False,
 	'selftest': False,
-	# False → PySide6 workbench (default). True via ``LabGym --legacy-wx``.
-	'legacy_wx': False,
 
 	'detectors': str(Path(__file__).parent.joinpath('detectors')),
 	'models': str(Path(__file__).parent.joinpath('models')),
@@ -93,9 +91,6 @@ def get_config_from_argv() -> dict:
 
 def get_config_from_environ() -> dict:
 	"""Get config values from os.environ.
-
-	Recognized variables include ``LABGYM_LEGACY_WX=1`` to force the
-	classic wxPython GUI (same as ``--legacy-wx``).
 
 	Weaknesses
 	*   Environment variables are case-sensitive.
@@ -237,7 +232,6 @@ def get_fullconfig() -> dict:
 
 	# Coerce flags that may arrive as strings from the environment.
 	result['selftest'] = _as_bool(result.get('selftest', False))
-	result['legacy_wx'] = _as_bool(result.get('legacy_wx', False))
 
 	# logger.debug('%s: %s', 'provenance', provenance)
 	logger.debug('%s:\n%s', 'result', pprint.pformat(result))

@@ -25,7 +25,6 @@ dependencies=[
     'scikit-learn',
     'scikit-image',
     'seaborn',
-    'wxPython',
     'PySide6>=6.5',
     'scikit-posthocs',
     'packaging',
