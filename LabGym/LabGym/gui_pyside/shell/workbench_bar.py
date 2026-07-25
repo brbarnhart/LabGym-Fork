@@ -12,7 +12,7 @@ WORKBENCHES: List[Tuple[str, str, str]] = [
     ("preprocessing", "Preprocess", "Prepare videos and draw markers"),
     ("detector", "Detector", "Train/test detector, detect+track, review IDs"),
     ("categorizer", "Categorizer", "Ethograms, training pairs, train, process"),
-    ("results", "Results", "Export and figures (coming soon)"),
+    ("results", "Results", "Mine results, behavior plots, distance calculations"),
 ]
 
 
