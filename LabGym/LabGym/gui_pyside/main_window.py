@@ -1,10 +1,9 @@
-"""PySide6 workbench shell — default LabGym UI (Phase 8).
+"""PySide6 workbench shell — default LabGym UI.
 
 Workbench icons across the top; each workbench owns its subtask tabs.
 Projects are ``*.labproj.json`` (root folder + video list + defaults).
 
 Launch: ``LabGym`` or ``LabGym-workflow`` or ``python -m LabGym.gui_pyside``.
-Legacy wx: ``LabGym --legacy-wx`` (Tools menu can also spawn that process).
 """
 
 from __future__ import annotations
@@ -24,7 +23,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from LabGym.gui_pyside.legacy_launch import launch_legacy_labgym
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.editor_dialog import ProjectEditorDialog
 from LabGym.gui_pyside.project.model import PROJECT_FILE_SUFFIX
@@ -145,13 +143,13 @@ class WorkbenchMainWindow(QMainWindow):
         project_menu.addAction(act_process)
 
         tools_menu = menubar.addMenu("&Tools")
-        act_legacy = QAction("Open LabGym (legacy wx)…", self)
-        act_legacy.setToolTip(
-            "Deprecated classic wxPython GUI (same as: LabGym --legacy-wx). "
-            "Prefer workbench tabs for the ethogram-first workflow."
+        act_dense = QAction("Dense generate + sort examples…", self)
+        act_dense.setToolTip(
+            "Classic LabGym generate-unsorted then sort pipeline (pop-out window). "
+            "Prefer Categorizer ethogram-first for multi-animal work."
         )
-        act_legacy.triggered.connect(self._launch_legacy)
-        tools_menu.addAction(act_legacy)
+        act_dense.triggered.connect(self._open_dense_generate_sort)
+        tools_menu.addAction(act_dense)
 
         help_menu = menubar.addMenu("&Help")
         act_about = QAction("&About…", self)
@@ -327,26 +325,33 @@ class WorkbenchMainWindow(QMainWindow):
         self.project.clear_recent()
         self._rebuild_recent_menu()
 
-    def _launch_legacy(self) -> None:
-        try:
-            launch_legacy_labgym()
-            self.statusBar().showMessage(
-                "Launched deprecated wx LabGym (LabGym --legacy-wx).", 5000
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Launch failed", str(exc))
+    def _open_dense_generate_sort(self) -> None:
+        from LabGym.gui_pyside.tools_windows.dense_generate_sort import (
+            DenseGenerateSortWindow,
+        )
+
+        # Keep a reference so the window is not garbage-collected.
+        win = getattr(self, "_dense_window", None)
+        if win is None:
+            self._dense_window = DenseGenerateSortWindow(self)
+            win = self._dense_window
+        win.show()
+        win.raise_()
+        win.activateWindow()
+        self.statusBar().showMessage(
+            "Opened dense generate + sort tools window.", 4000
+        )
 
     def _about(self) -> None:
         QMessageBox.information(
             self,
             "About LabGym",
-            "LabGym workbench shell (PySide6) — default UI\n\n"
+            "LabGym workbench shell (PySide6)\n\n"
             "Ethogram-first workflow:\n"
             "Detect → Review IDs → Annotate ethogram → Generate pairs → "
             "Train → Process\n\n"
             "Workbenches: Preprocess, Detector, Categorizer, Results.\n"
-            "Classic wx GUI: Tools → Open LabGym (legacy wx)…\n"
-            "or: LabGym --legacy-wx\n\n"
+            "Tools → Dense generate + sort (classic pipeline).\n\n"
             "See specifications.md and implementation-plan.md.",
         )
 
