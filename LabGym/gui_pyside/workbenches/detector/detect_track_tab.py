@@ -31,6 +31,7 @@ from LabGym.detection.batch_detect import (
     DetectTrackResult,
     detect_and_track_video,
     load_detector_animal_kinds,
+    validate_detector_folder,
 )
 from LabGym.gui_pyside.jobs.sequential_queue import (
     JobItem,
@@ -40,7 +41,10 @@ from LabGym.gui_pyside.jobs.sequential_queue import (
 )
 from LabGym.gui_pyside.model_paths import scan_detector_paths
 from LabGym.gui_pyside.project.controller import ProjectController
-from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.gui_pyside.project.paths import (
+    discover_tracklets_dir,
+    list_project_video_choices,
+)
 from LabGym.gui_pyside.widgets.path_browse import browse_existing_directory
 from LabGym.gui_pyside.workbenches.detector.detect_track_progress import (
     DetectTrackProgressDialog,
@@ -378,11 +382,37 @@ class DetectTrackTab(QWidget):
         if path and Path(path).is_dir():
             try:
                 kinds = load_detector_animal_kinds(path)
-                self.lbl_kinds.setText(", ".join(kinds))
+                # Prefer full validation for the kinds line when weights are present.
+                try:
+                    validate_detector_folder(path, require_weights=True)
+                    self.lbl_kinds.setText(", ".join(kinds))
+                except ValueError as wexc:
+                    # Params OK but incomplete (or similar) — still show kinds.
+                    self.lbl_kinds.setText(
+                        f"{', '.join(kinds)}  (warning: {wexc})"
+                    )
             except Exception as exc:
-                self.lbl_kinds.setText(f"(error: {exc})")
+                # First line only in the kinds label; full text on tooltip.
+                brief = str(exc).splitlines()[0]
+                self.lbl_kinds.setText(f"(error: {brief})")
+                self.lbl_kinds.setToolTip(str(exc))
+                return
         else:
             self.lbl_kinds.setText("—")
+        self.lbl_kinds.setToolTip(
+            "Animal/object category names defined inside the selected detector."
+        )
+
+    def _status_for_video(self, path: str) -> Tuple[str, str]:
+        """Sticky in-session status, else done if id_review exists on disk."""
+        if path in self._status_by_path:
+            return self._status_by_path[path]
+        tracks = discover_tracklets_dir(self.project.project, path)
+        if tracks:
+            # Persist so later refreshes stay cheap / consistent.
+            self._status_by_path[path] = ("done", tracks)
+            return "done", tracks
+        return "pending", ""
 
     def _manual_refresh_videos(self) -> None:
         from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
@@ -428,7 +458,7 @@ class DetectTrackTab(QWidget):
             chk.setData(Qt.ItemDataRole.UserRole, path)
             self.table.setItem(r, 0, chk)
             self.table.setItem(r, 1, QTableWidgetItem(label))
-            status, note = self._status_by_path.get(path, ("pending", ""))
+            status, note = self._status_for_video(path)
             self.table.setItem(r, 2, QTableWidgetItem(status))
             self.table.setItem(r, 3, QTableWidgetItem(note))
 
@@ -476,8 +506,18 @@ class DetectTrackTab(QWidget):
             QMessageBox.information(self, "Busy", "A batch is already running.")
             return
         detector = self.ed_detector.currentText().strip()
-        if not detector or not Path(detector).is_dir():
+        if not detector:
             QMessageBox.warning(self, "Detect + track", "Select a valid detector folder.")
+            return
+        try:
+            validate_detector_folder(detector, require_weights=True)
+            load_detector_animal_kinds(detector)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self,
+                "Detect + track — invalid detector",
+                str(exc),
+            )
             return
         videos = self._selected_videos()
         if not videos:
@@ -489,7 +529,7 @@ class DetectTrackTab(QWidget):
         # Block table rebuilds for the whole batch (including mark_dirty below).
         self._batch_active = True
 
-        # Persist detector choice on project
+        # Persist detector choice on project only after validation.
         self.project.project.defaults.detector_name = detector
         self.project.mark_dirty()
 
@@ -650,6 +690,10 @@ class DetectTrackTab(QWidget):
                 if row is not None:
                     self._set_status(row, it.job_id, "cancelled", "")
 
+        # Re-discover id_review folders written during the batch.
+        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
+
+        clear_tracklets_discovery_cache()
         # Sync table with any project video-list changes deferred during the batch.
         self.refresh_videos()
         n_ok, n_err, _n_cancel = summarize_job_statuses(self.queue.items)
