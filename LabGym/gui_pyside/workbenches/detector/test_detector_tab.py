@@ -103,8 +103,8 @@ class TestDetectorTab(QWidget):
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
 
-        if self.project.project.defaults.detector_name:
-            self.ed_det.setText(self.project.project.defaults.detector_name)
+        self.project.project_replaced.connect(self._apply_project_defaults)
+        self._apply_project_defaults()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -112,7 +112,10 @@ class TestDetectorTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-
+    def _apply_project_defaults(self) -> None:
+        name = (self.project.project.defaults.detector_name or "").strip()
+        if name:
+            self.ed_det.setText(name)
 
     def _browse_file(self, edit: QLineEdit) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "JSON", edit.text(), "JSON (*.json)")

@@ -95,9 +95,6 @@ class TestCategorizerTab(QWidget):
         )
         layout.addLayout(form)
 
-        if project.project.defaults.categorizer_name:
-            self.ed_model.setText(project.project.defaults.categorizer_name)
-
         self.btn = QPushButton("Test categorizer")
         self.btn.clicked.connect(self._run)
         layout.addWidget(self.btn)
@@ -105,11 +102,19 @@ class TestCategorizerTab(QWidget):
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
 
+        self.project.project_replaced.connect(self._apply_project_defaults)
+        self._apply_project_defaults()
+
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
         lab = QLabel(text)
         lab.setToolTip(tip)
         return lab
+
+    def _apply_project_defaults(self) -> None:
+        name = (self.project.project.defaults.categorizer_name or "").strip()
+        if name:
+            self.ed_model.setText(name)
 
 
 

@@ -146,7 +146,7 @@ class TrainCategorizerTab(QWidget):
 
         self.spin_len = QSpinBox()
         self.spin_len.setRange(1, 200)
-        self.spin_len.setValue(int(project.project.defaults.window_length or 15))
+        self.spin_len.setValue(15)
         tip_len = (
             "Number of frames per example (time_step). Must match the window length "
             "used when generating examples (see Generate examples)."
@@ -315,22 +315,26 @@ class TrainCategorizerTab(QWidget):
         layout.addWidget(self.lbl_status)
         layout.addStretch(1)
 
-        self._defaults()
+        self.project.project_replaced.connect(self._apply_project_defaults)
+        self._apply_project_defaults()
 
     def _on_auto_workers(self, checked: bool) -> None:
         self.spin_workers.setEnabled(not checked)
         if checked:
             self.spin_workers.setValue(auto_aug_workers())
 
-    def _defaults(self) -> None:
+    def _apply_project_defaults(self) -> None:
+        """Pull Edit Project defaults (mode, window length, paths) into this form."""
         p = self.project.project
+        d = p.defaults
         if p.root_dir:
             self.ed_models.setText(str(p.resolve_path(p.paths.models_root or "models")))
             ex = p.resolve_path(p.paths.examples_root or "examples")
             self.ed_data.setPlaceholderText(str(ex))
-        idx = self.combo_mode.findData(int(p.defaults.behavior_mode))
+        idx = self.combo_mode.findData(int(d.behavior_mode))
         if idx >= 0:
             self.combo_mode.setCurrentIndex(idx)
+        self.spin_len.setValue(max(1, int(d.window_length or 15)))
         self.spin_workers.setValue(auto_aug_workers())
 
     @staticmethod

@@ -306,16 +306,19 @@ class ProcessVideosTab(QWidget):
         self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
 
-        # Full table rebuild only on project replace/open/edit — not every dirty/save.
-        self.project.project_replaced.connect(self.refresh_videos)
-        self._init_defaults()
-        self.refresh_videos()
+        # Full rebuild / defaults only on project replace/open/edit — not every dirty/save.
+        self.project.project_replaced.connect(self._on_project_replaced)
+        self._on_project_replaced()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
         lab = QLabel(text)
         lab.setToolTip(tip)
         return lab
+
+    def _on_project_replaced(self) -> None:
+        self._init_defaults()
+        self.refresh_videos()
 
     def _init_defaults(self) -> None:
         p = self.project.project

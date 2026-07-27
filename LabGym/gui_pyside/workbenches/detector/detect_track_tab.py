@@ -316,10 +316,9 @@ class DetectTrackTab(QWidget):
         self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
 
-        # Full table rebuild only on project replace/open/edit — not every dirty/save.
-        self.project.project_replaced.connect(self.refresh_videos)
-        self._init_detector_defaults()
-        self.refresh_videos()
+        # Full rebuild / defaults only on project replace/open/edit — not every dirty/save.
+        self.project.project_replaced.connect(self._on_project_replaced)
+        self._on_project_replaced()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -327,14 +326,35 @@ class DetectTrackTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
+    def _on_project_replaced(self) -> None:
+        self._init_detector_defaults()
+        self._apply_project_defaults()
+        self.refresh_videos()
+
+    def _apply_project_defaults(self) -> None:
+        """Sync Edit Project defaults into tracking params."""
+        d = self.project.project.defaults
+        mode = int(d.behavior_mode)
+        # This tab only offers 0 and 2; map interactive-basic (1) → 0.
+        if mode == 1:
+            mode = 0
+        idx = self.combo_mode.findData(mode)
+        if idx >= 0:
+            self.combo_mode.setCurrentIndex(idx)
+        self.spin_length.setValue(max(1, int(d.window_length or 15)))
+
     def _init_detector_defaults(self) -> None:
         p = self.project.project
-        if p.defaults.detector_name:
-            self.ed_detector.setEditText(p.defaults.detector_name)
+        cur = (p.defaults.detector_name or self.ed_detector.currentText() or "").strip()
+        self.ed_detector.blockSignals(True)
+        self.ed_detector.clear()
         for s in scan_detector_paths(p):
             self.ed_detector.addItem(s)
-        if self.ed_detector.count() and not self.ed_detector.currentText():
+        if cur:
+            self.ed_detector.setEditText(cur)
+        elif self.ed_detector.count():
             self.ed_detector.setCurrentIndex(0)
+        self.ed_detector.blockSignals(False)
         self._on_detector_changed(self.ed_detector.currentText())
 
     def _scan_detectors(self) -> None:
