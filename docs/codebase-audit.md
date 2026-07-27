@@ -388,7 +388,7 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 3. ~~**AUD-DOM-002 + AUD-HYG**~~ — **Done** / ongoing: old-GUI comment cleanup; local `gui_*.pyc` remains gitignored.  
 4. ~~**AUD-GUI-003 / 004 / 005**~~ — **Done** / partial (wave 3b + follow-up).  
 5. ~~**AUD-GUI-006 / 007 / 008**~~ — **Done** for wave 3c scope (extracts + shared scan/browse/progress base).  
-6. **AUD-TEST-001** — Expand workbench behavioral tests ← **next Now** (wave **3e**).  
+6. ~~**AUD-TEST-001**~~ — **Done** (wave 3e start): `tests/unit/test_workbench_behavioral.py` (construct smoke, batch-active refresh, sticky status, progress dialogs, review helpers).  
 
 ### Backlog (opportunistic / not a wave blocker)
 
@@ -398,9 +398,9 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 | **AUD-GUI-004b** | Optional full project `changed` signal split (dirty chrome vs data rebuild) — only if fan-out pain returns. |
 | **AUD-GUI-008b** | Optional further progress-dialog unification beyond `JobProgressDialogBase`. |
 
-### Next (after TEST-001)
+### Next Now
 
-7. **AUD-TEST-002** — Optional integration/smoke suite.  
+7. **AUD-TEST-002** — Optional integration/smoke suite (or more targeted unit tests as features change).  
 8. **AUD-ANN-002** — Annotator export/schema regressions when bugs appear.  
 
 ### Later
@@ -453,7 +453,7 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 0 Inventory | **Done** (this doc §1) |
 | 1 Findings draft | **Done** (this doc §3; may grow) |
 | 2 Prioritization with owner | Wave 3b + follow-up accepted |
-| 3 Implementation waves | 3a/3b done; **3c complete on branch** (merge TBD); next **3e / AUD-TEST-001** |
+| 3 Implementation waves | 3a–3c on main; **3e AUD-TEST-001 started** (behavioral unit tests) |
 
 ---
 
@@ -468,3 +468,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Wave 3c: Review IDs split — `review_ids_package`, `review_ids_render`, `review_ids_markers`. |
 | 2026-07-27 | Wave 3c polish: shared `model_paths`, path browse widgets, `JobProgressDialogBase`. |
 | 2026-07-27 | Backlog **AUD-GUI-007b** (remaining path-browse migrations); next Now = **AUD-TEST-001** (wave 3e). |
+| 2026-07-27 | Wave 3c merged to main; AUD-TEST-001: `test_workbench_behavioral.py`. |
