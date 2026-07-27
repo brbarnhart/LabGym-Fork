@@ -388,7 +388,8 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 3. ~~**AUD-DOM-002 + AUD-HYG**~~ — **Done** / ongoing: old-GUI comment cleanup; local `gui_*.pyc` remains gitignored.  
 4. ~~**AUD-GUI-003 / 004 / 005**~~ — **Done** / partial (wave 3b + follow-up).  
 5. ~~**AUD-GUI-006 / 007 / 008**~~ — **Done** for wave 3c scope (extracts + shared scan/browse/progress base).  
-6. ~~**AUD-TEST-001**~~ — **Done** (wave 3e start): `tests/unit/test_workbench_behavioral.py` (construct smoke, batch-active refresh, sticky status, progress dialogs, review helpers).  
+6. ~~**AUD-TEST-001**~~ — **Done** (wave 3e): `test_workbench_behavioral.py` and follow-on coverage.  
+6b. ~~**AUD-TEST-001 expand**~~ — **Done**: path_browse, review render, package load fixture, queue cancel/exception/frame signals, more tab constructs.  
 
 ### Backlog (opportunistic / not a wave blocker)
 
@@ -400,8 +401,9 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 
 ### Next Now
 
-7. **AUD-TEST-002** — Optional integration/smoke suite (or more targeted unit tests as features change).  
+7. **AUD-TEST-002** — Optional integration/smoke suite (still light; unit layer is the main 3e investment).  
 8. **AUD-ANN-002** — Annotator export/schema regressions when bugs appear.  
+9. **AUD-GUI-007b** — Path-browse migrate remaining tabs (backlog, opportunistic).  
 
 ### Later
 
@@ -453,7 +455,7 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 0 Inventory | **Done** (this doc §1) |
 | 1 Findings draft | **Done** (this doc §3; may grow) |
 | 2 Prioritization with owner | Wave 3b + follow-up accepted |
-| 3 Implementation waves | 3a–3c on main; **3e AUD-TEST-001 started** (behavioral unit tests) |
+| 3 Implementation waves | 3a–3c on main; **3e unit/behavioral tests expanded** (TEST-002 optional next) |
 
 ---
 
@@ -469,3 +471,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Wave 3c polish: shared `model_paths`, path browse widgets, `JobProgressDialogBase`. |
 | 2026-07-27 | Backlog **AUD-GUI-007b** (remaining path-browse migrations); next Now = **AUD-TEST-001** (wave 3e). |
 | 2026-07-27 | Wave 3c merged to main; AUD-TEST-001: `test_workbench_behavioral.py`. |
+| 2026-07-27 | Wave 3e continue: path_browse, review render/package load, queue cancel/frame signals, expanded behavioral tests. |

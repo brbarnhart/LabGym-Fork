@@ -93,3 +93,76 @@ def test_worker_soft_fail_status(qapp=None):
     assert finished == ["/a.mp4"]
     assert failed == [("/b.mp4", "track failed")]
     assert summarize_job_statuses(items) == (1, 1, 0)
+
+
+def test_worker_cancel_skips_remaining():
+    from LabGym.gui_pyside.jobs.sequential_queue import _Worker
+
+    items = [
+        JobItem(job_id="1", label="1"),
+        JobItem(job_id="2", label="2"),
+        JobItem(job_id="3", label="3"),
+    ]
+    worker = _Worker(items, lambda job, prog: _OkResult())
+
+    def runner(job: JobItem, prog: JobProgress):
+        if job.job_id == "1":
+            worker.cancel()
+            return _OkResult()
+        return _OkResult()
+
+    worker.runner = runner
+    worker.run()
+    assert items[0].status == "done"
+    assert items[1].status == "cancelled"
+    assert items[2].status == "cancelled"
+    assert summarize_job_statuses(items) == (1, 0, 2)
+
+
+def test_worker_exception_continues_queue():
+    from LabGym.gui_pyside.jobs.sequential_queue import _Worker
+
+    items = [
+        JobItem(job_id="x", label="x"),
+        JobItem(job_id="y", label="y"),
+    ]
+
+    def runner_ex(job: JobItem, prog: JobProgress):
+        if job.job_id == "x":
+            raise RuntimeError("hard fail")
+        return _OkResult()
+
+    w3 = _Worker(items, runner_ex)
+    failed = []
+    w3.failed_one.connect(lambda jid, err: failed.append((jid, err)))
+    w3.run()
+    assert items[0].status == "error"
+    assert "hard fail" in items[0].error
+    assert items[1].status == "done"
+    assert failed[0][0] == "x"
+
+
+def test_worker_emits_frame_and_message_progress():
+    from LabGym.gui_pyside.jobs.sequential_queue import _Worker
+
+    items = [JobItem(job_id="/v.mp4", label="v")]
+
+    def runner(job: JobItem, prog: JobProgress):
+        prog("starting")
+        prog.frame(2, 10)
+        prog.frame(10, 10)
+        return _OkResult()
+
+    worker = _Worker(items, runner)
+    messages = []
+    frames = []
+    worker.progress.connect(lambda jid, msg: messages.append((jid, msg)))
+    worker.frame_progress.connect(
+        lambda jid, c, t: frames.append((jid, c, t))
+    )
+    started = []
+    worker.started_one.connect(started.append)
+    worker.run()
+    assert started == ["/v.mp4"]
+    assert messages == [("/v.mp4", "starting")]
+    assert frames == [("/v.mp4", 2, 10), ("/v.mp4", 10, 10)]

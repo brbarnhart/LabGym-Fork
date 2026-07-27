@@ -287,3 +287,109 @@ def test_review_clone_markers_and_events_for_kind():
     only_mouse = events_for_kind(events, "mouse")
     assert len(only_mouse) == 1
     assert only_mouse[0].event_id == "e1"
+
+
+def test_process_videos_preserves_check_state_on_refresh(tmp_path: Path):
+    _app()
+    from LabGym.gui_pyside.workbenches.categorizer.process_videos_tab import (
+        ProcessVideosTab,
+    )
+
+    ctrl = _controller_with_videos(tmp_path)
+    tab = ProcessVideosTab(ctrl)
+    tab.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    path_unchecked = str(tab.table.item(0, 0).data(Qt.ItemDataRole.UserRole))
+    tab.refresh_videos()
+    for r in range(tab.table.rowCount()):
+        p = str(tab.table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+        if p == path_unchecked:
+            assert tab.table.item(r, 0).checkState() == Qt.CheckState.Unchecked
+            return
+    pytest.fail("unchecked path missing")
+
+
+def test_detect_track_start_uses_path_job_ids(tmp_path: Path, monkeypatch):
+    """Queue is started with path job_ids without running real detection."""
+    _app()
+    from LabGym.gui_pyside.workbenches.detector.detect_track_tab import DetectTrackTab
+    from LabGym.gui_pyside.jobs.sequential_queue import SequentialJobQueue
+
+    ctrl = _controller_with_videos(tmp_path)
+    tab = DetectTrackTab(ctrl)
+    det = tmp_path / "det"
+    det.mkdir()
+    (det / "model_parameters.txt").write_text(
+        '{"animal_names": ["mouse"]}', encoding="utf-8"
+    )
+    tab.ed_detector.setEditText(str(det))
+
+    captured = {}
+
+    def fake_start(self, items, runner):
+        captured["items"] = list(items)
+        captured["runner"] = runner
+
+    monkeypatch.setattr(SequentialJobQueue, "start", fake_start)
+    # Avoid QMessageBox / real batch side effects after start
+    tab._start_batch()
+    assert "items" in captured
+    assert len(captured["items"]) == 2
+    for it in captured["items"]:
+        assert it.job_id == it.payload
+        assert Path(it.job_id).suffix.lower() in {".avi", ".mp4"}
+        assert tab._job_rows[it.job_id] is not None
+    assert tab._batch_active is True
+    # reset so teardown doesn't leave flag
+    tab._batch_active = False
+
+
+def test_markers_table_selection_and_frame():
+    _app()
+    from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
+    from LabGym.id_review.types import SwitchMarker
+
+    panel = MarkersTable()
+    markers = [
+        SwitchMarker(
+            marker_id="s10",
+            frame=10,
+            animal_kind="mouse",
+            involved_ids=[0, 1],
+            time_sec=1.0,
+        ),
+        SwitchMarker(
+            marker_id="s3",
+            frame=3,
+            animal_kind="mouse",
+            involved_ids=[0, 1],
+            time_sec=0.3,
+        ),
+    ]
+    panel.set_markers(markers)
+    # Sorted by frame: s3 then s10
+    assert panel.table.rowCount() == 2
+    assert panel.table.item(0, 0).text() == "s3"
+    assert panel.frame_at_row(0) == 3
+    assert panel.selected_marker_id() is None
+    panel.table.selectRow(1)
+    assert panel.selected_marker_id() == "s10"
+    assert panel.frame_at_row(1) == 10
+
+
+def test_construct_generate_and_annotate_placeholders():
+    _app()
+    from LabGym.gui_pyside.project.controller import ProjectController
+    from LabGym.gui_pyside.workbenches.detector.generate_images_tab import (
+        GenerateImagesTab,
+    )
+    from LabGym.gui_pyside.workbenches.detector.annotate_images_tab import (
+        AnnotateImagesTab,
+    )
+    from LabGym.gui_pyside.workbenches.categorizer.generate_examples_tab import (
+        GenerateExamplesTab,
+    )
+
+    p = ProjectController()
+    assert GenerateImagesTab(p) is not None
+    assert AnnotateImagesTab() is not None
+    assert GenerateExamplesTab(p) is not None
