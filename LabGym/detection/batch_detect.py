@@ -322,6 +322,7 @@ def detect_and_track_video(
                 background_free=bool(config.background_free),
                 black_background=bool(config.black_background),
                 frame_progress=frame_progress,
+                status_progress=_prog,
             )
         else:
             aad.acquire_information(
@@ -330,6 +331,7 @@ def detect_and_track_video(
                 black_background=bool(config.black_background),
                 color_costar=bool(config.color_costar),
                 frame_progress=frame_progress,
+                status_progress=_prog,
             )
         if int(config.behavior_mode) != 1:
             _prog("Crafting track data…")

@@ -295,6 +295,7 @@ def process_video(
                     background_free=background_free,
                     black_background=black_background,
                     frame_progress=frame_progress,
+                    status_progress=_prog,
                 )
             else:
                 aad.acquire_information(
@@ -303,6 +304,7 @@ def process_video(
                     black_background=black_background,
                     color_costar=color_costar,
                     frame_progress=frame_progress,
+                    status_progress=_prog,
                 )
             if behavior_mode != 1:
                 _prog("Crafting track data…")

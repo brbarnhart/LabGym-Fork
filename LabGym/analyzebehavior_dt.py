@@ -25,6 +25,7 @@ import gc
 import math
 import operator
 import os
+import time
 
 # Related third party imports.
 import cv2
@@ -56,6 +57,7 @@ def _emit_frame_progress(callback, current, total, stride=1, force=False):
 	callback(current, total)
 
 # Local application/library specific imports.
+from .detection.acquisition_timing import AcquisitionTiming, emit_status as _emit_status
 from .detector import Detector
 from .tools import (
 	crop_frame,
@@ -405,10 +407,13 @@ class AnalyzeAnimalDetector():
 		# background_free: whether to include background in animations
 		# black_background: whether to set background black
 
+		t_infer0=time.perf_counter()
 		tensor_frames=[torch.as_tensor(frame.astype('float32').transpose(2,0,1)) for frame in frames]
 		inputs=[{'image':tensor_frame} for tensor_frame in tensor_frames]
 
 		outputs=self.detector.inference(inputs)
+		t_infer1=time.perf_counter()
+		t_post0=t_infer1
 
 		for batch_count,output in enumerate(outputs):
 
@@ -508,6 +513,10 @@ class AnalyzeAnimalDetector():
 										animation.append(img_to_array(blob))
 									self.animations[animal_name][i][frame_count_analyze+1-batch_size+batch_count]=np.array(animation)
 
+		timing=getattr(self,'_acq_timing',None)
+		if timing is not None:
+			timing.add_batch(len(frames),t_infer1-t_infer0,time.perf_counter()-t_post0)
+
 
 	def detect_track_interact(self,frames,batch_size,frame_count_analyze,background_free=True,black_background=True,color_costar=False):
 
@@ -518,10 +527,13 @@ class AnalyzeAnimalDetector():
 		# black_background: whether to set background black
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
 
+		t_infer0=time.perf_counter()
 		tensor_frames=[torch.as_tensor(frame.astype('float32').transpose(2,0,1)) for frame in frames]
 		inputs=[{'image':tensor_frame} for tensor_frame in tensor_frames]
 
 		outputs=self.detector.inference(inputs)
+		t_infer1=time.perf_counter()
+		t_post0=t_infer1
 
 		for batch_count,output in enumerate(outputs):
 
@@ -697,19 +709,29 @@ class AnalyzeAnimalDetector():
 
 						self.track_animal_interact(frame_count_analyze+1-batch_size+batch_count,all_contours,other_contours,all_centers,all_heights,inners=all_inners,other_inners=other_inners,blobs=all_blobs)
 
+		timing=getattr(self,'_acq_timing',None)
+		if timing is not None:
+			timing.add_batch(len(frames),t_infer1-t_infer0,time.perf_counter()-t_post0)
 
-	def acquire_information(self,batch_size=1,background_free=True,black_background=True,color_costar=False,frame_progress=None):
+
+	def acquire_information(self,batch_size=1,background_free=True,black_background=True,color_costar=False,frame_progress=None,status_progress=None):
 
 		# batch_size: for batch inferencing by the Detector
 		# background_free: whether to include background in animations
 		# black_background: whether to set background black
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
 		# frame_progress: optional callback(current_frame, total_frames) for UI progress
+		# status_progress: optional callback(str) for timing / status lines in the UI log
 
 		print('Acquiring information in each frame...')
 		self.log.append('Acquiring information in each frame...')
 		print(datetime.datetime.now())
 		self.log.append(str(datetime.datetime.now()))
+		_emit_status(
+			status_progress,
+			self.log,
+			f'timing: start acquire_information (batch_size={int(batch_size)})',
+		)
 
 		capture=cv2.VideoCapture(self.path_to_video)
 		batch=[]
@@ -717,6 +739,8 @@ class AnalyzeAnimalDetector():
 		animation=deque([np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8')],maxlen=self.length)*self.length
 		total_frames=int(self.total_analysis_framecount or 0)
 		progress_every=_frame_progress_stride(total_frames)
+		timing_every=max(300,progress_every*10)
+		self._acq_timing=AcquisitionTiming()
 
 		start_t=round((self.t-self.length/self.fps),2)
 		if start_t<0:
@@ -728,15 +752,17 @@ class AnalyzeAnimalDetector():
 
 		while True:
 
+			t_dec0=time.perf_counter()
 			retval,frame=capture.read()
-			time=round((frame_count+1)/self.fps,2)
+			t_after_read=time.perf_counter()
+			frame_time=round((frame_count+1)/self.fps,2)
 
-			if time>=end_t or frame is None:
+			if frame_time>=end_t or frame is None:
 				break
 
-			if time>=start_t:
+			if frame_time>=start_t:
 
-				self.all_time.append(round((time-start_t),2))
+				self.all_time.append(round((frame_time-start_t),2))
 
 				if (frame_count_analyze+1)%1000==0:
 					print(str(frame_count_analyze+1)+' frames processed...')
@@ -746,6 +772,7 @@ class AnalyzeAnimalDetector():
 
 				if self.framewidth is not None:
 					frame=cv2.resize(frame,(self.framewidth,self.frameheight),interpolation=cv2.INTER_AREA)
+				self._acq_timing.add_decode(time.perf_counter()-t_dec0)
 
 				batch.append(frame)
 				batch_count+=1
@@ -757,9 +784,15 @@ class AnalyzeAnimalDetector():
 					else:
 						self.detect_track_individuals(batch,batch_size,frame_count_analyze,background_free=background_free,black_background=black_background,animation=animation)
 					batch=[]
+					report=self._acq_timing.maybe_report(every_frames=timing_every,batch_size=batch_size)
+					if report:
+						_emit_status(status_progress,self.log,report)
 
 				frame_count_analyze+=1
 				_emit_frame_progress(frame_progress,frame_count_analyze,total_frames,progress_every)
+			else:
+				# Still count skip-region decode cost (seek/skip overhead).
+				self._acq_timing.add_decode(t_after_read-t_dec0)
 
 			frame_count+=1
 
@@ -777,21 +810,33 @@ class AnalyzeAnimalDetector():
 			print('The area of '+str(animal_name)+' is: '+str(self.animal_area[animal_name])+'.')
 			self.log.append('The area of '+str(animal_name)+' is: '+str(self.animal_area[animal_name])+'.')
 
+		_emit_status(
+			status_progress,
+			self.log,
+			self._acq_timing.format_line(final=True,batch_size=batch_size),
+		)
 		print('Information acquisition completed!')
 		self.log.append('Information acquisition completed!')
+		self._acq_timing=None
 
 
-	def acquire_information_interact_basic(self,batch_size=1,background_free=True,black_background=True,frame_progress=None):
+	def acquire_information_interact_basic(self,batch_size=1,background_free=True,black_background=True,frame_progress=None,status_progress=None):
 
 		# batch_size: for batch inferencing by the Detector
 		# background_free: whether to include background in animations
 		# black_background: whether to set background black
 		# frame_progress: optional callback(current_frame, total_frames) for UI progress
+		# status_progress: optional callback(str) for timing / status lines in the UI log
 
 		print('Acquiring information in each frame...')
 		self.log.append('Acquiring information in each frame...')
 		print(datetime.datetime.now())
 		self.log.append(str(datetime.datetime.now()))
+		_emit_status(
+			status_progress,
+			self.log,
+			f'timing: start acquire_information_interact_basic (batch_size={int(batch_size)})',
+		)
 
 		name=self.animal_kinds[0]
 		self.register_counts={}
@@ -818,6 +863,8 @@ class AnalyzeAnimalDetector():
 		animation=deque([np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8')],maxlen=self.length)*self.length
 		total_frames=int(self.total_analysis_framecount or 0)
 		progress_every=_frame_progress_stride(total_frames)
+		timing_every=max(300,progress_every*10)
+		self._acq_timing=AcquisitionTiming()
 
 		start_t=round((self.t-self.length/self.fps),2)
 		if start_t<0:
@@ -829,15 +876,17 @@ class AnalyzeAnimalDetector():
 
 		while True:
 
+			t_dec0=time.perf_counter()
 			retval,frame=capture.read()
-			time=round((frame_count+1)/self.fps,2)
+			t_after_read=time.perf_counter()
+			frame_time=round((frame_count+1)/self.fps,2)
 
-			if time>=end_t or frame is None:
+			if frame_time>=end_t or frame is None:
 				break
 
-			if time>=start_t:
+			if frame_time>=start_t:
 
-				self.all_time.append(round((time-start_t),2))
+				self.all_time.append(round((frame_time-start_t),2))
 
 				if (frame_count_analyze+1)%1000==0:
 					print(str(frame_count_analyze+1)+' frames processed...')
@@ -847,16 +896,20 @@ class AnalyzeAnimalDetector():
 
 				if self.framewidth is not None:
 					frame=cv2.resize(frame,(self.framewidth,self.frameheight),interpolation=cv2.INTER_AREA)
+				self._acq_timing.add_decode(time.perf_counter()-t_dec0)
 
 				batch.append(frame)
 				batch_count+=1
 
 				if batch_count==batch_size:
 
+					t_infer0=time.perf_counter()
 					tensor_frames=[torch.as_tensor(frame.astype('float32').transpose(2,0,1)) for frame in batch]
 					inputs=[{'image':tensor_frame} for tensor_frame in tensor_frames]
 
 					outputs=self.detector.inference(inputs)
+					t_infer1=time.perf_counter()
+					t_post0=t_infer1
 
 					for batch_count,output in enumerate(outputs):
 
@@ -939,11 +992,17 @@ class AnalyzeAnimalDetector():
 									animation.append(img_to_array(blob))
 									self.animations[name][0][frame_count_analyze+1-batch_size+batch_count]=np.array(animation)
 
+					self._acq_timing.add_batch(len(batch),t_infer1-t_infer0,time.perf_counter()-t_post0)
 					batch=[]
 					batch_count=0
+					report=self._acq_timing.maybe_report(every_frames=timing_every,batch_size=batch_size)
+					if report:
+						_emit_status(status_progress,self.log,report)
 
 				frame_count_analyze+=1
 				_emit_frame_progress(frame_progress,frame_count_analyze,total_frames,progress_every)
+			else:
+				self._acq_timing.add_decode(t_after_read-t_dec0)
 
 			frame_count+=1
 
@@ -958,13 +1017,20 @@ class AnalyzeAnimalDetector():
 		capture.release()
 
 		length=len(self.all_time)
-		self.animations[name][0]=self.animations[name][0][:length]
+		if self.animation_analyzer:
+			self.animations[name][0]=self.animations[name][0][:length]
 		self.pattern_images[name][0]=self.pattern_images[name][0][:length]
 		self.animal_contours[name][0]=self.animal_contours[name][0][:length]
 		self.animal_centers[name][0]=self.animal_centers[name][0][:length]
 
+		_emit_status(
+			status_progress,
+			self.log,
+			self._acq_timing.format_line(final=True,batch_size=batch_size),
+		)
 		print('Information acquisition completed!')
 		self.log.append('Information acquisition completed!')
+		self._acq_timing=None
 
 
 	def craft_data(self):
