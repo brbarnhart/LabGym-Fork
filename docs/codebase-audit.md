@@ -386,19 +386,26 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 1. ~~**AUD-GUI-001 + AUD-GUI-002**~~ — **Done** (wave 3b): Process videos sticky status + path job ids.  
 2. ~~**AUD-TEST-003**~~ — **Done** (wave 3b): `tests/unit/test_sequential_queue.py`.  
 3. ~~**AUD-DOM-002 + AUD-HYG**~~ — **Done** / ongoing: old-GUI comment cleanup; local `gui_*.pyc` remains gitignored.  
+4. ~~**AUD-GUI-003 / 004 / 005**~~ — **Done** / partial (wave 3b + follow-up).  
+5. ~~**AUD-GUI-006 / 007 / 008**~~ — **Done** for wave 3c scope (extracts + shared scan/browse/progress base).  
+6. **AUD-TEST-001** — Expand workbench behavioral tests ← **next Now** (wave **3e**).  
 
-### Next
+### Backlog (opportunistic / not a wave blocker)
 
-4. ~~**AUD-GUI-004**~~ — **Partial (wave 3b follow-up):** batch-active / preserve selection on Preprocess, Draw markers, Review IDs; controller docs. Full signal split still optional later.  
-5. ~~**AUD-GUI-003**~~ — **Done** (wave 3b): process_video frame progress + status note.  
-6. ~~**AUD-GUI-005**~~ — **Done** (wave 3b): soft-fail `ok=False` on queue.  
-7. ~~**AUD-GUI-006**~~ — **Wave 3c:** train progress/workers, detect-track progress, review_ids package/render/markers modules extracted.  
-7b. ~~**AUD-GUI-007 / 008**~~ — **Wave 3c polish:** `model_paths` scan + `widgets/path_browse` + `JobProgressDialogBase` shared by train/detect-track dialogs.  
-8. **AUD-TEST-001** — Expand workbench behavioral tests.  
+| ID | Item |
+|----|------|
+| **AUD-GUI-007b** | Migrate remaining workbench local `_browse_dir` / folder-pick rows to `gui_pyside.widgets.path_browse` (train/test detector, results tabs, preprocess, etc.). Drive-by when editing those tabs, or a small `chore/path-browse-migrate` PR. **Not** owned by 3d/3e/3f. |
+| **AUD-GUI-004b** | Optional full project `changed` signal split (dirty chrome vs data rebuild) — only if fan-out pain returns. |
+| **AUD-GUI-008b** | Optional further progress-dialog unification beyond `JobProgressDialogBase`. |
+
+### Next (after TEST-001)
+
+7. **AUD-TEST-002** — Optional integration/smoke suite.  
+8. **AUD-ANN-002** — Annotator export/schema regressions when bugs appear.  
 
 ### Later
 
-9. **AUD-CORE-001 / 002** — Engine decomposition only with characterization.  
+9. **AUD-CORE-001 / 002** — Engine decomposition only with characterization (wave 3f).  
 10. **AUD-ANN-001** — Annotator UI deep clean.  
 11. **AUD-PROD-001** — In-app detector annotation (product).  
 
@@ -416,9 +423,9 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 |------|-------|-------------|
 | **3a** Hygiene | AUD-DOM-002, AUD-HYG-001, AUD-HYG-002, opportunistic AUD-CORE-003 |
 | **3b** Cross-UI jobs/status | AUD-GUI-001–005, AUD-GUI-009 (targeted) |
-| **3c** Tab decomposition | AUD-GUI-006–008 |
+| **3c** Tab decomposition | AUD-GUI-006–008 (**done** on branch; merge pending). Residual: **AUD-GUI-007b** backlog only |
 | **3d** Domain API | AUD-DOM-001 as policy; adapter cleanups as needed |
-| **3e** Tests | AUD-TEST-001–003, AUD-ANN-002 |
+| **3e** Tests | **AUD-TEST-001** next; also TEST-002, ANN-002 (TEST-003 done) |
 | **3f** Core (optional) | AUD-CORE-001–002 |
 
 Each wave: branch off `main` → small PR → smoke relevant workbench path → merge.
@@ -446,7 +453,7 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 0 Inventory | **Done** (this doc §1) |
 | 1 Findings draft | **Done** (this doc §3; may grow) |
 | 2 Prioritization with owner | Wave 3b + follow-up accepted |
-| 3 Implementation waves | 3a/3b done; **3c started** (train + detect-track progress extract) |
+| 3 Implementation waves | 3a/3b done; **3c complete on branch** (merge TBD); next **3e / AUD-TEST-001** |
 
 ---
 
@@ -460,3 +467,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Wave 3c: extract `train_progress_dialog` / `train_workers`; extract `detect_track_progress`. |
 | 2026-07-27 | Wave 3c: Review IDs split — `review_ids_package`, `review_ids_render`, `review_ids_markers`. |
 | 2026-07-27 | Wave 3c polish: shared `model_paths`, path browse widgets, `JobProgressDialogBase`. |
+| 2026-07-27 | Backlog **AUD-GUI-007b** (remaining path-browse migrations); next Now = **AUD-TEST-001** (wave 3e). |
