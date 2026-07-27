@@ -26,6 +26,10 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    path_edit_row,
+    set_line_edit_directory,
+)
 from LabGym.gui_pyside.workbenches.categorizer.train_progress_dialog import (
     TrainProgressDialog,
 )
@@ -67,20 +71,20 @@ class TrainCategorizerTab(QWidget):
             "as produced by Generate examples."
         )
         b_s = QPushButton("Browse…")
-        b_s.clicked.connect(lambda: self._browse_dir(self.ed_sorted))
+        b_s.clicked.connect(lambda: set_line_edit_directory(self, self.ed_sorted))
         prep_l.addRow(
             self._lab("Sorted examples:", "Behavior-subfolder layout."),
-            self._row(self.ed_sorted, b_s),
+            path_edit_row(self.ed_sorted, b_s),
         )
         self.ed_prepared = QLineEdit()
         self.ed_prepared.setToolTip(
             "Output folder for prepared examples (all files together, labels in names)."
         )
         b_p = QPushButton("Browse…")
-        b_p.clicked.connect(lambda: self._browse_dir(self.ed_prepared))
+        b_p.clicked.connect(lambda: set_line_edit_directory(self, self.ed_prepared))
         prep_l.addRow(
             self._lab("Prepared output:", "Empty or new folder recommended."),
-            self._row(self.ed_prepared, b_p),
+            path_edit_row(self.ed_prepared, b_p),
         )
         btn_prep = QPushButton("Prepare examples (rename_label)")
         btn_prep.setToolTip("Run LabGym Categorizers.rename_label on the folders above.")
@@ -99,19 +103,19 @@ class TrainCategorizerTab(QWidget):
             "structure LabGym’s trainer accepts for your version."
         )
         b_d = QPushButton("Browse…")
-        b_d.clicked.connect(lambda: self._browse_dir(self.ed_data))
+        b_d.clicked.connect(lambda: set_line_edit_directory(self, self.ed_data))
         form.addRow(
             self._lab("Training data folder:", "Must contain enough labeled examples."),
-            self._row(self.ed_data, b_d),
+            path_edit_row(self.ed_data, b_d),
         )
 
         self.ed_models = QLineEdit()
         self.ed_models.setToolTip("Parent directory where the new categorizer folder is created.")
         b_m = QPushButton("Browse…")
-        b_m.clicked.connect(lambda: self._browse_dir(self.ed_models))
+        b_m.clicked.connect(lambda: set_line_edit_directory(self, self.ed_models))
         form.addRow(
             self._lab("Models parent folder:", "Usually project models/."),
-            self._row(self.ed_models, b_m),
+            path_edit_row(self.ed_models, b_m),
         )
 
         self.ed_name = QLineEdit("New_categorizer")
@@ -211,7 +215,7 @@ class TrainCategorizerTab(QWidget):
         b_soft.clicked.connect(lambda: self._browse_file(self.ed_soft))
         form.addRow(
             self._lab("Soft labels CSV:", "Optional; used by soft training modes."),
-            self._row(self.ed_soft, b_soft),
+            path_edit_row(self.ed_soft, b_soft),
         )
 
         self.chk_bg = QCheckBox("Background-free")
@@ -242,10 +246,10 @@ class TrainCategorizerTab(QWidget):
         )
         self.ed_export.setToolTip(tip_export)
         b_ex = QPushButton("Browse…")
-        b_ex.clicked.connect(lambda: self._browse_dir(self.ed_export))
+        b_ex.clicked.connect(lambda: set_line_edit_directory(self, self.ed_export))
         form.addRow(
             self._lab("Augmented export folder:", tip_export),
-            self._row(self.ed_export, b_ex),
+            path_edit_row(self.ed_export, b_ex),
         )
 
         self.chk_skip_aug = QCheckBox("Reuse existing augmented export (skip re-augment)")
@@ -290,10 +294,10 @@ class TrainCategorizerTab(QWidget):
             "Optional folder for training history / metric reports. Leave empty to skip."
         )
         b_r = QPushButton("Browse…")
-        b_r.clicked.connect(lambda: self._browse_dir(self.ed_report))
+        b_r.clicked.connect(lambda: set_line_edit_directory(self, self.ed_report))
         form.addRow(
             self._lab("Training reports (optional):", "Export training curves if set."),
-            self._row(self.ed_report, b_r),
+            path_edit_row(self.ed_report, b_r),
         )
 
         layout.addWidget(train)
@@ -334,20 +338,6 @@ class TrainCategorizerTab(QWidget):
         lab = QLabel(text)
         lab.setToolTip(tip)
         return lab
-
-    @staticmethod
-    def _row(edit, btn):
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(edit, 1)
-        h.addWidget(btn)
-        return w
-
-    def _browse_dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
-        if d:
-            edit.setText(d)
 
     def _browse_file(self, edit: QLineEdit) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "CSV", edit.text(), "CSV (*.csv)")

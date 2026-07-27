@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -31,7 +30,6 @@ from LabGym.detection.batch_detect import (
     DetectTrackConfig,
     DetectTrackResult,
     detect_and_track_video,
-    list_detectors,
     load_detector_animal_kinds,
 )
 from LabGym.gui_pyside.jobs.sequential_queue import (
@@ -40,12 +38,13 @@ from LabGym.gui_pyside.jobs.sequential_queue import (
     SequentialJobQueue,
     summarize_job_statuses,
 )
+from LabGym.gui_pyside.model_paths import scan_detector_paths
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.gui_pyside.widgets.path_browse import browse_existing_directory
 from LabGym.gui_pyside.workbenches.detector.detect_track_progress import (
     DetectTrackProgressDialog,
 )
-from LabGym.mypkg_resources import resource_filename
 
 
 class DetectTrackTab(QWidget):
@@ -329,52 +328,27 @@ class DetectTrackTab(QWidget):
         return lab
 
     def _init_detector_defaults(self) -> None:
-        # Prefer project models root, then bundled detectors
-        roots = []
         p = self.project.project
-        if p.root_dir:
-            roots.append(p.resolve_path(p.paths.models_root))
         if p.defaults.detector_name:
             self.ed_detector.setEditText(p.defaults.detector_name)
-        try:
-            bundled = Path(resource_filename("LabGym", "detectors"))
-            if bundled.is_dir():
-                roots.append(bundled)
-        except Exception:
-            pass
-        for root in roots:
-            for d in list_detectors(root):
-                self.ed_detector.addItem(str(d))
+        for s in scan_detector_paths(p):
+            self.ed_detector.addItem(s)
         if self.ed_detector.count() and not self.ed_detector.currentText():
             self.ed_detector.setCurrentIndex(0)
         self._on_detector_changed(self.ed_detector.currentText())
 
     def _scan_detectors(self) -> None:
-        p = self.project.project
-        roots = []
-        if p.root_dir:
-            roots.append(p.resolve_path(p.paths.models_root))
-        try:
-            bundled = Path(resource_filename("LabGym", "detectors"))
-            roots.append(bundled)
-        except Exception:
-            pass
         cur = self.ed_detector.currentText()
         self.ed_detector.clear()
-        seen = set()
-        for root in roots:
-            for d in list_detectors(root):
-                s = str(d)
-                if s not in seen:
-                    seen.add(s)
-                    self.ed_detector.addItem(s)
+        for s in scan_detector_paths(self.project.project):
+            self.ed_detector.addItem(s)
         if cur:
             self.ed_detector.setEditText(cur)
         self._on_detector_changed(self.ed_detector.currentText())
 
     def _browse_detector(self) -> None:
         start = self.ed_detector.currentText() or self.project.project.root_dir or ""
-        d = QFileDialog.getExistingDirectory(self, "Select detector folder", start)
+        d = browse_existing_directory(self, start, "Select detector folder")
         if d:
             self.ed_detector.setEditText(d)
             self._on_detector_changed(d)

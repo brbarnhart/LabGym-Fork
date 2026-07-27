@@ -5,10 +5,9 @@ from __future__ import annotations
 from io import BytesIO
 from typing import Dict, List
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QCloseEvent, QPixmap
 from PySide6.QtWidgets import (
-    QDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,18 +19,19 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from LabGym.gui_pyside.widgets.progress_dialog_base import JobProgressDialogBase
 
-class TrainProgressDialog(QDialog):
+
+class TrainProgressDialog(JobProgressDialogBase):
     """Pop-out window for augmentation + training progress (keeps the form readable)."""
 
-    cancel_requested = Signal()
-
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Categorizer training progress")
-        self.setMinimumSize(560, 640)
-        self.setWindowFlag(Qt.WindowType.Window, True)
-        self._running = False
+        super().__init__(
+            "Categorizer training progress",
+            parent,
+            min_width=560,
+            min_height=640,
+        )
         self._hist: Dict[str, List[float]] = {
             "loss": [],
             "val_loss": [],
@@ -110,7 +110,7 @@ class TrainProgressDialog(QDialog):
         layout.addLayout(btn_row)
 
     def begin_job(self) -> None:
-        self._running = True
+        self.set_job_running(True)
         self.btn_cancel.setEnabled(True)
         self.btn_close.setEnabled(False)
         self.progress_aug.setValue(0)
@@ -119,12 +119,10 @@ class TrainProgressDialog(QDialog):
         self._reset_metrics()
         self.lbl_phase.setText("Starting…")
         self.log.clear()
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.show_as_window()
 
     def mark_finished(self, *, cancelled: bool = False, failed: bool = False) -> None:
-        self._running = False
+        self.set_job_running(False)
         self.btn_cancel.setEnabled(False)
         self.btn_close.setEnabled(True)
         if failed:
@@ -151,7 +149,7 @@ class TrainProgressDialog(QDialog):
         self.cancel_requested.emit()
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._running:
+        if self.is_job_running:
             r = QMessageBox.question(
                 self,
                 "Training in progress",

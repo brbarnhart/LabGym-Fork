@@ -10,7 +10,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QDoubleSpinBox,
-    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,39 +32,26 @@ from LabGym.analysis.process_videos import (
     load_categorizer_metadata,
     process_video,
 )
-from LabGym.detection.batch_detect import (
-    list_detectors,
-    load_detector_animal_kinds,
-)
+from LabGym.detection.batch_detect import load_detector_animal_kinds
 from LabGym.gui_pyside.jobs.sequential_queue import (
     JobItem,
     JobProgress,
     SequentialJobQueue,
     summarize_job_statuses,
 )
+from LabGym.gui_pyside.model_paths import (
+    scan_categorizer_paths,
+    scan_detector_paths,
+)
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
 )
-from LabGym.mypkg_resources import resource_filename
-
-
-def _list_categorizers(models_root: str | Path) -> List[Path]:
-    root = Path(models_root)
-    if not root.is_dir():
-        return []
-    found: List[Path] = []
-    for p in root.rglob("model_parameters.txt"):
-        # skip detector folders that use json not csv - try read
-        try:
-            # categorizer uses CSV; detector uses JSON
-            text = p.read_text(encoding="utf-8", errors="ignore")[:80]
-            if "classnames" in text or "network" in text or "time_step" in text:
-                found.append(p.parent)
-        except Exception:
-            continue
-    return sorted(set(found))
+from LabGym.gui_pyside.widgets.path_browse import (
+    path_edit_row,
+    set_line_edit_directory,
+)
 
 
 class ProcessVideosTab(QWidget):
@@ -106,14 +92,18 @@ class ProcessVideosTab(QWidget):
             "Used to find and track animals before categorization."
         )
         b_d = QPushButton("Browse…")
-        b_d.clicked.connect(lambda: self._browse_dir(self.ed_detector))
+        b_d.clicked.connect(
+            lambda: set_line_edit_directory(
+                self, self.ed_detector, caption="Select detector folder"
+            )
+        )
         mform.addRow(
             self._lab(
                 "Detector:",
                 "Path to the detector used for locating animals. Same type as "
                 "Detect + track.",
             ),
-            self._row(self.ed_detector, b_d),
+            path_edit_row(self.ed_detector, b_d),
         )
         self.lbl_kinds = QLabel("—")
         self.lbl_kinds.setToolTip("Categories the detector was trained to detect.")
@@ -130,13 +120,17 @@ class ProcessVideosTab(QWidget):
             "input sizes are loaded automatically from that file."
         )
         b_c = QPushButton("Browse…")
-        b_c.clicked.connect(lambda: self._browse_dir(self.ed_categorizer))
+        b_c.clicked.connect(
+            lambda: set_line_edit_directory(
+                self, self.ed_categorizer, caption="Select categorizer folder"
+            )
+        )
         mform.addRow(
             self._lab(
                 "Categorizer:",
                 "Model that assigns behavior labels over time for each tracked animal.",
             ),
-            self._row(self.ed_categorizer, b_c),
+            path_edit_row(self.ed_categorizer, b_c),
         )
         self.lbl_behaviors = QLabel("—")
         self.lbl_behaviors.setToolTip(
@@ -250,14 +244,18 @@ class ProcessVideosTab(QWidget):
             "video stem (annotated video, spreadsheets, etc.)."
         )
         b_o = QPushButton("Browse…")
-        b_o.clicked.connect(lambda: self._browse_dir(self.ed_out))
+        b_o.clicked.connect(
+            lambda: set_line_edit_directory(
+                self, self.ed_out, caption="Select results root folder"
+            )
+        )
         pform.addRow(
             self._lab(
                 "Results root:",
                 "Where per-video analysis folders are written (default: project "
                 "analysis/).",
             ),
-            self._row(self.ed_out, b_o),
+            path_edit_row(self.ed_out, b_o),
         )
         layout.addWidget(pbox)
 
@@ -319,20 +317,6 @@ class ProcessVideosTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-    @staticmethod
-    def _row(edit, btn):
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(edit, 1)
-        h.addWidget(btn)
-        return w
-
-    def _browse_dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
-        if d:
-            edit.setText(d)
-
     def _init_defaults(self) -> None:
         p = self.project.project
         if p.defaults.detector_name:
@@ -346,22 +330,9 @@ class ProcessVideosTab(QWidget):
         self._on_categorizer_changed(self.ed_categorizer.text())
 
     def _scan_models(self) -> None:
-        roots: List[Path] = []
         p = self.project.project
-        if p.root_dir:
-            roots.append(p.resolve_path(p.paths.models_root or "models"))
-        try:
-            roots.append(Path(resource_filename("LabGym", "detectors")))
-            roots.append(Path(resource_filename("LabGym", "models")))
-        except Exception:
-            pass
-        dets: List[str] = []
-        cats: List[str] = []
-        for root in roots:
-            for d in list_detectors(root):
-                dets.append(str(d))
-            for c in _list_categorizers(root):
-                cats.append(str(c))
+        dets = scan_detector_paths(p)
+        cats = scan_categorizer_paths(p)
         if dets and not self.ed_detector.text().strip():
             self.ed_detector.setText(dets[0])
         if cats and not self.ed_categorizer.text().strip():

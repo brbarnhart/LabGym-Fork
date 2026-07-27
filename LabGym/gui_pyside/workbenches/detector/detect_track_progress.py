@@ -2,26 +2,16 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (
-    QDialog,
-    QLabel,
-    QProgressBar,
-    QPushButton,
-    QVBoxLayout,
-)
+from PySide6.QtWidgets import QLabel, QProgressBar, QPushButton, QVBoxLayout
+
+from LabGym.gui_pyside.widgets.progress_dialog_base import JobProgressDialogBase
 
 
-class DetectTrackProgressDialog(QDialog):
+class DetectTrackProgressDialog(JobProgressDialogBase):
     """Pop-out progress for batch detect+track (files + frames in current file)."""
 
-    cancel_requested = Signal()
-
     def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Detect + track progress")
-        self.setMinimumWidth(480)
-        self.setWindowFlag(Qt.WindowType.Window, True)
+        super().__init__("Detect + track progress", parent, min_width=480)
 
         layout = QVBoxLayout(self)
         self.lbl_overall = QLabel("Starting batch…")
@@ -61,6 +51,7 @@ class DetectTrackProgressDialog(QDialog):
         self._done_files = 0
 
     def begin_batch(self, n_files: int) -> None:
+        self.set_job_running(True)
         self._n_files = max(0, int(n_files))
         self._done_files = 0
         bar_max = max(1, self._n_files)
@@ -73,12 +64,9 @@ class DetectTrackProgressDialog(QDialog):
         self.lbl_current.setText("Current video: —")
         self.lbl_status.setText("")
         self.btn_cancel.setEnabled(True)
-        self.show()
-        self.raise_()
-        self.activateWindow()
+        self.show_as_window()
 
     def set_current_video(self, label: str, index: int) -> None:
-        # index is 0-based among jobs; show 1-based position
         n = max(1, self._n_files)
         self.lbl_current.setText(f"Current video ({index + 1} of {n}): {label}")
         self.bar_frames.setRange(0, 0)
@@ -108,6 +96,7 @@ class DetectTrackProgressDialog(QDialog):
         )
 
     def finish_batch(self) -> None:
+        self.set_job_running(False)
         self.btn_cancel.setEnabled(False)
         self.lbl_status.setText("Batch finished.")
         if self.bar_frames.maximum() > 0:

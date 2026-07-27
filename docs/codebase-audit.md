@@ -393,6 +393,7 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 5. ~~**AUD-GUI-003**~~ — **Done** (wave 3b): process_video frame progress + status note.  
 6. ~~**AUD-GUI-005**~~ — **Done** (wave 3b): soft-fail `ok=False` on queue.  
 7. ~~**AUD-GUI-006**~~ — **Wave 3c:** train progress/workers, detect-track progress, review_ids package/render/markers modules extracted.  
+7b. ~~**AUD-GUI-007 / 008**~~ — **Wave 3c polish:** `model_paths` scan + `widgets/path_browse` + `JobProgressDialogBase` shared by train/detect-track dialogs.  
 8. **AUD-TEST-001** — Expand workbench behavioral tests.  
 
 ### Later
@@ -458,3 +459,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Wave 3a/3b follow-up: Preprocess status+batch-active; Draw markers / Review IDs selection preserve; survey/controller hygiene; audit status update. |
 | 2026-07-27 | Wave 3c: extract `train_progress_dialog` / `train_workers`; extract `detect_track_progress`. |
 | 2026-07-27 | Wave 3c: Review IDs split — `review_ids_package`, `review_ids_render`, `review_ids_markers`. |
+| 2026-07-27 | Wave 3c polish: shared `model_paths`, path browse widgets, `JobProgressDialogBase`. |
