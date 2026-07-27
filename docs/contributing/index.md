@@ -11,3 +11,6 @@ docs
 internal
 ```
 
+Maintainer notes: living post-migration quality inventory is in
+[`docs/codebase-audit.md`](../codebase-audit.md) (not part of the end-user docs tree).
+
