@@ -5,18 +5,21 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
-    QFileDialog,
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -25,12 +28,16 @@ from PySide6.QtWidgets import (
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.widgets.path_browse import (
     browse_existing_directory,
-    path_edit_row,
     set_line_edit_directory,
 )
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
+)
+from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
+    AnalysisFrameRange,
+    default_output_dir,
+    extract_hard_case_frames,
 )
 from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
@@ -51,6 +58,50 @@ from LabGym.gui_pyside.workbenches.detector.risk_timeline import RiskTimeline
 from LabGym.gui_pyside.workbenches.detector.subjects_table import SubjectsTable
 from LabGym.id_review.dataset import make_swap_marker
 from LabGym.id_review.types import ContactEvent, SwitchMarker
+
+
+class _HardCaseExtractWorker(QObject):
+    finished = Signal(object)  # ExtractHardCaseResult
+    error = Signal(str)
+    progress = Signal(str)
+
+    def __init__(
+        self,
+        video_path: str,
+        out_path: str,
+        ranges: List[AnalysisFrameRange],
+        store_meta: dict,
+        fps: float,
+        skip: int,
+        framewidth: Optional[int],
+        n_frames: int,
+    ):
+        super().__init__()
+        self.video_path = video_path
+        self.out_path = out_path
+        self.ranges = ranges
+        self.store_meta = store_meta
+        self.fps = fps
+        self.skip = skip
+        self.framewidth = framewidth
+        self.n_frames = n_frames
+
+    def run(self) -> None:
+        try:
+            result = extract_hard_case_frames(
+                self.video_path,
+                self.out_path,
+                self.ranges,
+                store_meta=self.store_meta,
+                fps=self.fps,
+                skip=self.skip,
+                framewidth=self.framewidth,
+                n_frames=self.n_frames,
+                progress_callback=self.progress.emit,
+            )
+            self.finished.emit(result)
+        except Exception as exc:
+            self.error.emit(str(exc))
 
 
 class ReviewIdsTab(QWidget):
@@ -80,6 +131,9 @@ class ReviewIdsTab(QWidget):
         self.min_risk = 0.0
         self._dirty = False
         self._already_corrected = False
+        self._training_ranges: List[AnalysisFrameRange] = []
+        self._range_start: Optional[int] = None
+        self._extract_thread: Optional[QThread] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -88,15 +142,19 @@ class ReviewIdsTab(QWidget):
         self._bind_shortcuts()
         # Tracklet discovery per video is expensive — only on replace/open/edit.
         self.project.project_replaced.connect(self.refresh_video_list)
+        self.project.project_replaced.connect(self._prefills_hard_case_out)
         self.refresh_video_list()
+        self._prefills_hard_case_out()
 
     def _build_ui(self) -> None:
         root = QVBoxLayout(self)
 
         help_txt = QLabel(
             "Orange/red timeline = automatic contact risk. Green ticks = your switch markers. "
+            "Cyan bands = periods marked for extra detector training images. "
             "Mark where IDs flip, assign experimental names/roles, then Save. "
-            "Keys: ←/→ step, Space play, S mark swap, Delete remove, Ctrl+Z undo."
+            "Keys: ←/→ step, Space play, S mark swap, [ / ] range start/end, "
+            "Delete remove, Ctrl+Z undo."
         )
         help_txt.setWordWrap(True)
         root.addWidget(help_txt)
@@ -239,6 +297,107 @@ class ReviewIdsTab(QWidget):
         subj_l.addWidget(self.subjects_table)
         right_l.addWidget(subj_box, 1)
 
+        hard_box = QGroupBox("Hard cases → detector training images")
+        hard_l = QVBoxLayout(hard_box)
+        hard_help = QLabel(
+            "Select time periods where the detector struggled. Frames from those "
+            "ranges are written as JPGs you can annotate (EZannot) and use to "
+            "retrain the detector."
+        )
+        hard_help.setWordWrap(True)
+        hard_l.addWidget(hard_help)
+
+        self.lbl_range_pending = QLabel("Range start: (not set)")
+        hard_l.addWidget(self.lbl_range_pending)
+
+        range_btns = QHBoxLayout()
+        self.btn_range_start = QPushButton("Set start here ([)")
+        self.btn_range_start.setToolTip(
+            "Mark the current analysis frame as the start of a training range."
+        )
+        self.btn_range_start.clicked.connect(self._set_range_start)
+        self.btn_range_end = QPushButton("Set end & add (])")
+        self.btn_range_end.setToolTip(
+            "Close the range at the current frame and add it to the list."
+        )
+        self.btn_range_end.clicked.connect(self._set_range_end_and_add)
+        self.btn_add_risk = QPushButton("Add current risk band")
+        self.btn_add_risk.setToolTip(
+            "If the playhead is inside an automatic contact-risk band, add that "
+            "whole band as a training range."
+        )
+        self.btn_add_risk.clicked.connect(self._add_current_risk_band)
+        range_btns.addWidget(self.btn_range_start)
+        range_btns.addWidget(self.btn_range_end)
+        range_btns.addWidget(self.btn_add_risk)
+        hard_l.addLayout(range_btns)
+
+        self.list_ranges = QListWidget()
+        self.list_ranges.setMinimumHeight(72)
+        self.list_ranges.setToolTip("Analysis-frame ranges that will be exported.")
+        hard_l.addWidget(self.list_ranges)
+
+        range_edit = QHBoxLayout()
+        self.btn_remove_range = QPushButton("Remove selected")
+        self.btn_remove_range.clicked.connect(self._remove_selected_range)
+        self.btn_clear_ranges = QPushButton("Clear all")
+        self.btn_clear_ranges.clicked.connect(self._clear_ranges)
+        range_edit.addWidget(self.btn_remove_range)
+        range_edit.addWidget(self.btn_clear_ranges)
+        range_edit.addStretch(1)
+        hard_l.addLayout(range_edit)
+
+        out_row = QHBoxLayout()
+        self.ed_hard_out = QLineEdit()
+        self.ed_hard_out.setToolTip(
+            "Folder for extracted JPGs (same default as Generate images: "
+            "project/detector_training_images)."
+        )
+        b_hard_out = QPushButton("Browse…")
+        b_hard_out.clicked.connect(self._browse_hard_out)
+        out_row.addWidget(QLabel("Output:"), 0)
+        out_row.addWidget(self.ed_hard_out, 1)
+        out_row.addWidget(b_hard_out, 0)
+        hard_l.addLayout(out_row)
+
+        opts = QHBoxLayout()
+        self.spin_hard_skip = QSpinBox()
+        self.spin_hard_skip.setRange(1, 1_000_000)
+        self.spin_hard_skip.setValue(10)
+        self.spin_hard_skip.setToolTip(
+            "Write one image every N analysis frames within each range "
+            "(start and end of each range are always kept). "
+            "Smaller values = denser sampling of hard cases."
+        )
+        opts.addWidget(QLabel("Skip (frames):"))
+        opts.addWidget(self.spin_hard_skip)
+        self.chk_hard_resize = QCheckBox("Resize width")
+        self.chk_hard_resize.setToolTip(
+            "Optional proportional resize before writing JPGs."
+        )
+        self.spin_hard_width = QSpinBox()
+        self.spin_hard_width.setRange(10, 10000)
+        self.spin_hard_width.setValue(480)
+        self.spin_hard_width.setEnabled(False)
+        self.chk_hard_resize.toggled.connect(self.spin_hard_width.setEnabled)
+        opts.addWidget(self.chk_hard_resize)
+        opts.addWidget(self.spin_hard_width)
+        opts.addStretch(1)
+        hard_l.addLayout(opts)
+
+        self.btn_gen_hard = QPushButton("Generate training images from ranges")
+        self.btn_gen_hard.setToolTip(
+            "Extract still frames from the source video for every listed range."
+        )
+        self.btn_gen_hard.clicked.connect(self._generate_hard_case_images)
+        hard_l.addWidget(self.btn_gen_hard)
+
+        self.lbl_hard_status = QLabel("")
+        self.lbl_hard_status.setWordWrap(True)
+        hard_l.addWidget(self.lbl_hard_status)
+
+        right_l.addWidget(hard_box)
+
         save_row = QHBoxLayout()
         self.btn_save = QPushButton(
             "Save package (switches + remapped tracklets + subjects)"
@@ -273,8 +432,22 @@ class ReviewIdsTab(QWidget):
             self.btn_save,
             self.subjects_table,
             self.marker_table,
+            self.btn_range_start,
+            self.btn_range_end,
+            self.btn_add_risk,
+            self.btn_remove_range,
+            self.btn_clear_ranges,
+            self.btn_gen_hard,
+            self.list_ranges,
+            self.ed_hard_out,
+            self.spin_hard_skip,
+            self.chk_hard_resize,
         ):
             w.setEnabled(on)
+        if on:
+            self.spin_hard_width.setEnabled(self.chk_hard_resize.isChecked())
+        else:
+            self.spin_hard_width.setEnabled(False)
 
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_play)
@@ -285,6 +458,8 @@ class ReviewIdsTab(QWidget):
         QShortcut(QKeySequence("Ctrl+Z"), self, self._undo)
         QShortcut(QKeySequence("U"), self, self._undo)
         QShortcut(QKeySequence("R"), self, lambda: self._remove_at_current_frame())
+        QShortcut(QKeySequence("["), self, self._set_range_start)
+        QShortcut(QKeySequence("]"), self, self._set_range_end_and_add)
 
     # --- package load ---
 
@@ -376,6 +551,10 @@ class ReviewIdsTab(QWidget):
         self.fps = pkg.fps
         self.frame = 0
         self._dirty = False
+        self._training_ranges = []
+        self._range_start = None
+        self._refresh_range_list()
+        self._prefills_hard_case_out()
 
         self.kind_combo.blockSignals(True)
         self.kind_combo.clear()
@@ -542,7 +721,216 @@ class ReviewIdsTab(QWidget):
             self._events_for_kind(),
             [m for m in self.markers if m.animal_kind == self.animal_kind],
             min_risk=self.min_risk,
+            training_ranges=[
+                (r.start_frame, r.end_frame) for r in self._training_ranges
+            ],
+            pending_start=self._range_start,
         )
+
+    # --- hard-case training ranges ---
+
+    def _prefills_hard_case_out(self) -> None:
+        if self.ed_hard_out.text().strip():
+            return
+        root = self.project.project.root_dir or ""
+        self.ed_hard_out.setText(default_output_dir(root or None))
+
+    def _browse_hard_out(self) -> None:
+        set_line_edit_directory(
+            self, self.ed_hard_out, caption="Select folder for training images"
+        )
+
+    def _set_range_start(self) -> None:
+        if not self.review_dir:
+            return
+        self._range_start = int(self.frame)
+        self.lbl_range_pending.setText(f"Range start: analysis frame {self._range_start}")
+        self._refresh_timeline()
+
+    def _set_range_end_and_add(self) -> None:
+        if not self.review_dir:
+            return
+        end = int(self.frame)
+        start = self._range_start if self._range_start is not None else end
+        self._add_range(AnalysisFrameRange(start, end))
+        self._range_start = None
+        self.lbl_range_pending.setText("Range start: (not set)")
+        self._refresh_timeline()
+
+    def _add_range(self, rng: AnalysisFrameRange) -> None:
+        rng = AnalysisFrameRange(
+            max(0, min(rng.start_frame, self.n_frames - 1)),
+            max(0, min(rng.end_frame, self.n_frames - 1)),
+            note=rng.note,
+        )
+        self._training_ranges.append(rng)
+        self._refresh_range_list()
+        self._refresh_timeline()
+
+    def _add_current_risk_band(self) -> None:
+        if not self.review_dir:
+            return
+        bands = [
+            e
+            for e in self._events_for_kind()
+            if e.risk_score >= self.min_risk
+            and e.start_frame <= self.frame <= e.end_frame
+        ]
+        if not bands:
+            QMessageBox.information(
+                self,
+                "No risk band",
+                "Playhead is not inside a contact-risk band (or all bands are "
+                "hidden by the Min risk filter).",
+            )
+            return
+        # Prefer the tightest band containing the playhead.
+        bands.sort(key=lambda e: (e.end_frame - e.start_frame, e.start_frame))
+        e = bands[0]
+        self._add_range(
+            AnalysisFrameRange(e.start_frame, e.end_frame, note="risk")
+        )
+
+    def _remove_selected_range(self) -> None:
+        row = self.list_ranges.currentRow()
+        if row < 0 or row >= len(self._training_ranges):
+            return
+        del self._training_ranges[row]
+        self._refresh_range_list()
+        self._refresh_timeline()
+
+    def _clear_ranges(self) -> None:
+        self._training_ranges.clear()
+        self._range_start = None
+        self.lbl_range_pending.setText("Range start: (not set)")
+        self._refresh_range_list()
+        self._refresh_timeline()
+
+    def _refresh_range_list(self) -> None:
+        self.list_ranges.clear()
+        for r in self._training_ranges:
+            self.list_ranges.addItem(r.label(self.fps))
+
+    def _generate_hard_case_images(self) -> None:
+        if self._extract_thread is not None:
+            QMessageBox.warning(self, "Busy", "Image extraction is already running.")
+            return
+        if not self.review_dir:
+            QMessageBox.information(self, "Generate images", "Load a package first.")
+            return
+        if not self._training_ranges:
+            QMessageBox.warning(
+                self,
+                "No ranges",
+                "Add at least one time range (Set start / Set end, or Add current "
+                "risk band).",
+            )
+            return
+        out = self.ed_hard_out.text().strip()
+        if not out:
+            QMessageBox.warning(
+                self, "Missing output", "Choose an output folder for the images."
+            )
+            return
+
+        video, meta, fps = self._video_meta()
+        if not video:
+            QMessageBox.warning(
+                self,
+                "No video",
+                "Could not resolve the source video for this package.\n"
+                "Select the project video or ensure the package meta points at a file.",
+            )
+            return
+
+        n_est = 0
+        from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
+            frames_to_extract,
+        )
+
+        n_est = len(
+            frames_to_extract(
+                self._training_ranges,
+                skip=int(self.spin_hard_skip.value()),
+                n_frames=self.n_frames,
+            )
+        )
+        reply = QMessageBox.question(
+            self,
+            "Generate training images?",
+            f"Extract ~{n_est} frame(s) from {len(self._training_ranges)} range(s)\n"
+            f"Video:\n{video}\n\nInto:\n{out}",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Release preview capture so the worker can open the same file on Windows.
+        self._stop_play()
+        self._release_cap()
+
+        framewidth = (
+            int(self.spin_hard_width.value())
+            if self.chk_hard_resize.isChecked()
+            else None
+        )
+        worker = _HardCaseExtractWorker(
+            video_path=str(video),
+            out_path=out,
+            ranges=list(self._training_ranges),
+            store_meta=dict(meta),
+            fps=float(fps),
+            skip=int(self.spin_hard_skip.value()),
+            framewidth=framewidth,
+            n_frames=self.n_frames,
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._on_hard_progress)
+        worker.finished.connect(self._on_hard_finished)
+        worker.error.connect(self._on_hard_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._clear_hard_thread)
+
+        self._extract_thread = thread
+        self.btn_gen_hard.setEnabled(False)
+        self.lbl_hard_status.setText("Extracting frames…")
+        thread.start()
+
+    def _clear_hard_thread(self) -> None:
+        self._extract_thread = None
+        if self.review_dir:
+            self.btn_gen_hard.setEnabled(True)
+        self._render()
+
+    def _on_hard_progress(self, msg: str) -> None:
+        self.lbl_hard_status.setText(msg)
+
+    def _on_hard_finished(self, result) -> None:
+        out = self.ed_hard_out.text().strip()
+        if result.error and not result.n_written:
+            self.lbl_hard_status.setText(f"Failed: {result.error}")
+            QMessageBox.critical(self, "Extraction failed", result.error)
+            return
+        msg = (
+            f"Wrote {result.n_written} image(s)"
+            + (f" ({result.n_failed} failed reads)" if result.n_failed else "")
+            + f"\n→ {out}"
+        )
+        self.lbl_hard_status.setText(msg.replace("\n", "  "))
+        QMessageBox.information(
+            self,
+            "Training images ready",
+            f"{msg}\n\n"
+            "Next: annotate with EZannot (or similar), export COCO JSON, then "
+            "Train detector with this image folder.",
+        )
+
+    def _on_hard_error(self, err: str) -> None:
+        self.lbl_hard_status.setText(f"Error: {err}")
+        QMessageBox.critical(self, "Extraction failed", err)
 
     def _push_undo(self) -> None:
         self._undo_stack.append(clone_markers(self.markers))

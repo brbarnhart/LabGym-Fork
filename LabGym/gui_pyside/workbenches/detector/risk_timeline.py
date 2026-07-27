@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
@@ -10,9 +10,12 @@ from PySide6.QtWidgets import QWidget
 
 from LabGym.id_review.types import ContactEvent, SwitchMarker
 
+# (start_frame, end_frame) inclusive analysis-frame windows for hard-case export
+TrainingRange = Tuple[int, int]
+
 
 class RiskTimeline(QWidget):
-    """Paint risk bands, switch markers, and playhead; click to seek."""
+    """Paint risk bands, switch markers, training ranges, and playhead; click to seek."""
 
     seek_requested = Signal(int)
 
@@ -24,6 +27,8 @@ class RiskTimeline(QWidget):
         self.frame = 0
         self.events: List[ContactEvent] = []
         self.markers: List[SwitchMarker] = []
+        self.training_ranges: List[TrainingRange] = []
+        self.pending_start: Optional[int] = None
         self.min_risk = 0.0
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -34,12 +39,18 @@ class RiskTimeline(QWidget):
         events: Sequence[ContactEvent],
         markers: Sequence[SwitchMarker],
         min_risk: float = 0.0,
+        training_ranges: Optional[Sequence[TrainingRange]] = None,
+        pending_start: Optional[int] = None,
     ) -> None:
         self.n_frames = max(1, int(n_frames))
         self.frame = int(max(0, min(frame, self.n_frames - 1)))
         self.events = list(events)
         self.markers = list(markers)
         self.min_risk = float(min_risk)
+        self.training_ranges = list(training_ranges or [])
+        self.pending_start = (
+            int(pending_start) if pending_start is not None else None
+        )
         self.update()
 
     def _x_to_frame(self, x: int) -> int:
@@ -79,6 +90,19 @@ class RiskTimeline(QWidget):
                 r = 255
             p.fillRect(x0, 8, max(2, x1 - x0), h - 16, QColor(r, g, b, 180))
 
+        # Hard-case training ranges (cyan) — under markers / playhead
+        for s, e in self.training_ranges:
+            x0 = self._frame_to_x(int(s))
+            x1 = max(x0 + 3, self._frame_to_x(int(e)))
+            p.fillRect(x0, 4, max(3, x1 - x0), h - 8, QColor(40, 180, 220, 90))
+            p.setPen(QPen(QColor(40, 200, 240, 220), 1))
+            p.drawRect(x0, 4, max(3, x1 - x0), h - 8)
+
+        if self.pending_start is not None:
+            px0 = self._frame_to_x(int(self.pending_start))
+            p.setPen(QPen(QColor(40, 220, 255), 2, Qt.PenStyle.DashLine))
+            p.drawLine(px0, 0, px0, h)
+
         p.setPen(QPen(QColor(80, 255, 120), 2))
         for m in self.markers:
             x = self._frame_to_x(m.frame)
@@ -93,5 +117,5 @@ class RiskTimeline(QWidget):
         p.drawText(
             4,
             h - 4,
-            "risk bands  |  green = switches  |  yellow = playhead",
+            "risk  |  cyan = training  |  green = switches  |  yellow = playhead",
         )
