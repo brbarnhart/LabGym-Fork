@@ -285,7 +285,7 @@ class DrawMarkersTab(QWidget):
         self.log.setWordWrap(True)
         layout.addWidget(self.log)
 
-        self.project.changed.connect(self._refresh_videos)
+        # Combo rebuild only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self._refresh_videos)
         self._refresh_videos()
         self._set_default_out()

@@ -68,20 +68,13 @@ def test_smoke_project_save_reload_drives_detect_table(
 
     tab = DetectTrackTab(ctrl2)
     assert tab.table.rowCount() == 2
-    # mark_dirty → refresh preserves sticky status after batch-active ends
+    # mark_dirty / save must not thrash video tables (only project_replaced does)
     path0 = str(tab.table.item(0, 0).data(Qt.ItemDataRole.UserRole))
     tab._set_status(0, path0, "done", "pkg")
-    tab._batch_active = True
     ctrl2.mark_dirty()
     assert tab.table.item(0, 2).text() == "done"
-    tab._batch_active = False
-    tab.refresh_videos()
-    statuses = [
-        tab.table.item(r, 2).text()
-        for r in range(tab.table.rowCount())
-        if str(tab.table.item(r, 0).data(Qt.ItemDataRole.UserRole)) == path0
-    ]
-    assert statuses == ["done"]
+    ctrl2.save()
+    assert tab.table.item(0, 2).text() == "done"
 
 
 @pytest.mark.gui

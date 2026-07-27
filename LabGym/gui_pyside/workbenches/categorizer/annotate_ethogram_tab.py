@@ -90,11 +90,12 @@ class AnnotateEthogramTab(QWidget):
         )
         layout.addWidget(self.annotator, 1)
 
-        self.project.changed.connect(self._on_project_changed)
-        self.project.project_replaced.connect(self._on_project_changed)
-        self._on_project_changed()
+        # Video list + path resolve only when the project object is replaced.
+        self.project.project_replaced.connect(self._on_project_replaced)
+        self.project.changed.connect(self._update_status_banner)
+        self._on_project_replaced()
 
-    def _on_project_changed(self) -> None:
+    def _on_project_replaced(self) -> None:
         self.refresh_video_list()
         self._update_status_banner()
 

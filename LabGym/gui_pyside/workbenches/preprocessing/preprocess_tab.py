@@ -230,7 +230,7 @@ class PreprocessTab(QWidget):
         self.log.setMaximumHeight(100)
         layout.addWidget(self.log)
 
-        self.project.changed.connect(self.refresh_videos)
+        # Full table rebuild only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self.refresh_videos)
         self._extra: List[str] = []
         self._set_default_out()

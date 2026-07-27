@@ -186,7 +186,7 @@ class GenerateImagesTab(QWidget):
         layout.addWidget(self.log)
         layout.addStretch(1)
 
-        self.project.changed.connect(self._maybe_prefills)
+        self.project.project_replaced.connect(self._maybe_prefills)
         self._maybe_prefills()
 
     def _row(self, line: QLineEdit, button: QPushButton) -> QWidget:

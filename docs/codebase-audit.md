@@ -416,7 +416,7 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 | ID | Item |
 |----|------|
 | ~~**AUD-GUI-007b**~~ | **Done** on `audit/gui-007b-path-browse` → integrate into `audit/codebase-cleanup`: remaining workbench + tools + project editor folder pickers use `path_browse`. |
-| **AUD-GUI-004b** | Optional full project `changed` signal split (dirty chrome vs data rebuild) — only if fan-out pain returns. |
+| ~~**AUD-GUI-004b**~~ | **Done** on `audit/gui-project-refresh-perf`: `project_replaced` for full list rebuilds; `changed` for chrome/light only; tracklets discovery cache + cheaper dir probes. |
 | ~~**AUD-GUI-008b**~~ | **Done** on `audit/gui-008b-progress-unify`: richer `JobProgressDialogBase` (content layout, phase/status/log/bars, action bar, close-while-running policy); Detect+track & Train dialogs use it. |
 
 ### Next Now
@@ -494,3 +494,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Audit git workflow: umbrella `audit/codebase-cleanup` + sub-branches; **AUD-GUI-007b** path-browse migration. |
 | 2026-07-27 | **AUD-TEST-002**: integration smoke suite under `tests/integration/`. |
 | 2026-07-27 | **AUD-GUI-008b**: unify progress dialog chrome in `JobProgressDialogBase`. |
+| 2026-07-27 | **AUD-GUI-004b / project refresh perf**: single emit on load/replace; tabs skip heavy refresh on dirty/save; tracklets discovery cache. |

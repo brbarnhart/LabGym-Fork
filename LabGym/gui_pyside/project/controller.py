@@ -10,6 +10,7 @@ from PySide6.QtCore import QObject, QSettings, Signal
 from .model import Project
 from .paths import (
     ResolvedVideoContext,
+    clear_tracklets_discovery_cache,
     current_video_path,
     resolve_video_context,
     set_current_video,
@@ -19,10 +20,20 @@ _MAX_RECENT = 12
 
 
 class ProjectController(QObject):
-    """Owns the open Project and notifies the shell when it changes."""
+    """Owns the open Project and notifies the shell when it changes.
 
-    changed = Signal()  # any field / dirty / path change
-    project_replaced = Signal()  # new/open replaced whole project
+    Signals
+    -------
+    project_replaced
+        Whole project object replaced (new / open / edit dialog OK). Heavy UI
+        refresh (video tables, tracklet discovery) should listen **only** here.
+    changed
+        Lightweight updates (dirty flag, title/status, parameter tweaks). Do
+        **not** rebuild video tables or re-scan the filesystem here.
+    """
+
+    changed = Signal()
+    project_replaced = Signal()
 
     def __init__(self, parent: Optional[QObject] = None):
         super().__init__(parent)
@@ -52,9 +63,8 @@ class ProjectController(QObject):
         return self._dirty
 
     def mark_dirty(self) -> None:
-        # Always emit ``changed`` so chrome (window title) and listeners refresh.
-        # Workbench tabs that rebuild video tables on ``changed`` must skip
-        # rebuilds while a batch is active (see Detect+track / Process / Preprocess).
+        # Emit ``changed`` only (chrome / light listeners). Full video-list rebuilds
+        # must listen to ``project_replaced`` so save/dirty does not thrash the UI.
         self._dirty = True
         self.changed.emit()
 
@@ -71,30 +81,32 @@ class ProjectController(QObject):
     # --- lifecycle ---
 
     def new_project(self, name: str = "Untitled", root_dir: str = "") -> None:
+        clear_tracklets_discovery_cache()
         self.project = Project.new(name=name, root_dir=root_dir)
         self._dirty = True
         self.project_replaced.emit()
-        self.changed.emit()
 
     def load_from_path(self, path: str | Path) -> None:
+        clear_tracklets_discovery_cache()
         self.project = Project.load(path)
         self._dirty = False
         self.add_recent(str(self.project.file_path))
+        # Single signal: full reload. Chrome also listens to project_replaced.
         self.project_replaced.emit()
-        self.changed.emit()
 
     def save(self, path: Optional[str] = None) -> Path:
         out = self.project.save(path)
         self._dirty = False
         self.add_recent(str(out))
+        # Video list unchanged — only chrome needs to clear the dirty asterisk.
         self.changed.emit()
         return out
 
     def replace(self, project: Project, *, dirty: bool = False) -> None:
+        clear_tracklets_discovery_cache()
         self.project = project
         self._dirty = dirty
         self.project_replaced.emit()
-        self.changed.emit()
 
     # --- recent ---
 

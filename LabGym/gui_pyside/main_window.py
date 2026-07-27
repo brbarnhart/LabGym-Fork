@@ -158,7 +158,9 @@ class WorkbenchMainWindow(QMainWindow):
 
     def _wire(self) -> None:
         self.workbench_bar.workbench_changed.connect(self._on_workbench_changed)
+        # Title/status on both: load/replace emit only project_replaced; dirty/save use changed.
         self.project.changed.connect(self._update_title_and_status)
+        self.project.project_replaced.connect(self._update_title_and_status)
 
     def _on_workbench_changed(self, workbench_id: str) -> None:
         self.host.show_workbench(workbench_id)

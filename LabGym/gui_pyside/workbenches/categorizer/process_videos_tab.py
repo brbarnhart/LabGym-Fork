@@ -264,7 +264,7 @@ class ProcessVideosTab(QWidget):
         vl = QVBoxLayout(vbox)
         row = QHBoxLayout()
         btn_ref = QPushButton("Refresh from project")
-        btn_ref.clicked.connect(self.refresh_videos)
+        btn_ref.clicked.connect(self._manual_refresh_videos)
         btn_edit = QPushButton("Edit project…")
         btn_edit.clicked.connect(self.request_edit_project.emit)
         btn_all = QPushButton("Select all")
@@ -306,7 +306,7 @@ class ProcessVideosTab(QWidget):
         self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
 
-        self.project.changed.connect(self.refresh_videos)
+        # Full table rebuild only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self.refresh_videos)
         self._init_defaults()
         self.refresh_videos()
@@ -367,8 +367,14 @@ class ProcessVideosTab(QWidget):
         else:
             self.lbl_behaviors.setText("—")
 
+    def _manual_refresh_videos(self) -> None:
+        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
+
+        clear_tracklets_discovery_cache()
+        self.refresh_videos()
+
     def refresh_videos(self) -> None:
-        # Skip rebuild mid-batch so mark_dirty → project.changed cannot wipe status.
+        # Skip rebuild mid-batch so mark_dirty cannot wipe live status.
         if self._batch_active:
             return
 

@@ -86,7 +86,7 @@ class ReviewIdsTab(QWidget):
 
         self._build_ui()
         self._bind_shortcuts()
-        self.project.changed.connect(self.refresh_video_list)
+        # Tracklet discovery per video is expensive — only on replace/open/edit.
         self.project.project_replaced.connect(self.refresh_video_list)
         self.refresh_video_list()
 
@@ -289,7 +289,7 @@ class ReviewIdsTab(QWidget):
     # --- package load ---
 
     def refresh_video_list(self) -> None:
-        # mark_dirty emits project.changed — preserve the selected video.
+        # Preserve the selected video across rebuilds.
         current = self.combo_video.currentData()
         self.combo_video.blockSignals(True)
         self.combo_video.clear()

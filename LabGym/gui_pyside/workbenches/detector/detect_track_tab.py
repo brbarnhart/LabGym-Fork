@@ -269,7 +269,7 @@ class DetectTrackTab(QWidget):
         v_l = QVBoxLayout(v_box)
         row2 = QHBoxLayout()
         btn_refresh = QPushButton("Refresh from project")
-        btn_refresh.clicked.connect(self.refresh_videos)
+        btn_refresh.clicked.connect(self._manual_refresh_videos)
         btn_edit = QPushButton("Edit project…")
         btn_edit.clicked.connect(self.request_edit_project.emit)
         btn_all = QPushButton("Select all")
@@ -316,7 +316,7 @@ class DetectTrackTab(QWidget):
         self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
 
-        self.project.changed.connect(self.refresh_videos)
+        # Full table rebuild only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self.refresh_videos)
         self._init_detector_defaults()
         self.refresh_videos()
@@ -363,6 +363,12 @@ class DetectTrackTab(QWidget):
                 self.lbl_kinds.setText(f"(error: {exc})")
         else:
             self.lbl_kinds.setText("—")
+
+    def _manual_refresh_videos(self) -> None:
+        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
+
+        clear_tracklets_discovery_cache()
+        self.refresh_videos()
 
     def refresh_videos(self) -> None:
         # Mid-batch project.changed (mark_dirty after each finished video) must not

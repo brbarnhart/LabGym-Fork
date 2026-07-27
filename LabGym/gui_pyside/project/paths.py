@@ -4,11 +4,20 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .model import Project, ProjectVideo
 
 _VIDEO_EXTS = {".mp4", ".avi", ".mov", ".mkv", ".mpg", ".mpeg"}
+
+# Cache for discover_tracklets_dir (cleared on project replace/load).
+# Key: (root_dir, detection_root, video_path, entry.detection_dir)
+_tracklets_cache: Dict[Tuple[str, str, str, str], str] = {}
+
+
+def clear_tracklets_discovery_cache() -> None:
+    """Drop cached tracklet/id_review discovery results."""
+    _tracklets_cache.clear()
 
 
 @dataclass
@@ -105,46 +114,78 @@ def annotations_path_for(project: Project, video_path: str) -> str:
     return str(Path(video_path).with_suffix(".annotations.json"))
 
 
-def _looks_like_tracklets_dir(directory: Path) -> bool:
+def _dir_has_tracklet_markers(directory: Path) -> bool:
+    """True if *directory* itself looks like a tracklets / id_review folder.
+
+    Prefer cheap exact-name checks before globs (network FS friendly).
+    """
     if not directory.is_dir():
         return False
-    # Common LabGym / id_review markers
-    for pat in ("*_tracklets.npz", "*tracklets*.npz", "meta.json", "*_meta.json"):
-        if list(directory.glob(pat)):
+    # Cheap exact files first
+    for name in ("meta.json", "events.json", "switches.json", "subjects.json"):
+        if (directory / name).is_file():
             return True
-    # Nested id_review
+    # Short-circuiting globs (do not materialize full lists)
+    for pat in ("*_tracklets.npz", "*_tracklets_meta.json", "*tracklets*.npz"):
+        if next(directory.glob(pat), None) is not None:
+            return True
+    return False
+
+
+def _looks_like_tracklets_dir(directory: Path) -> bool:
+    if _dir_has_tracklet_markers(directory):
+        return True
     nested = directory / "id_review"
-    if nested.is_dir():
-        return _looks_like_tracklets_dir(nested)
+    if nested.is_dir() and _dir_has_tracklet_markers(nested):
+        return True
     return False
 
 
 def discover_tracklets_dir(project: Project, video_path: str) -> str:
-    """Best-effort tracklets / id_review folder for a video."""
+    """Best-effort tracklets / id_review folder for a video.
+
+    Results are cached until :func:`clear_tracklets_discovery_cache` (called when
+    the project is replaced/loaded). Prefer an explicit ``detection_dir`` on the
+    video entry when set — that path is not glob-searched.
+    """
     entry = find_video_entry(project, video_path)
-    if entry and entry.detection_dir.strip():
-        d = project.resolve_path(entry.detection_dir)
+    entry_det = (entry.detection_dir if entry else "") or ""
+
+    # Explicit entry: resolve once, no scan, still cache for consistency
+    cache_key = (
+        project.root_dir or "",
+        (project.paths.detection_output_root or "").strip(),
+        video_path or "",
+        entry_det.strip(),
+    )
+    if cache_key in _tracklets_cache:
+        return _tracklets_cache[cache_key]
+
+    result = ""
+    if entry and entry_det.strip():
+        d = project.resolve_path(entry_det)
         if d.is_dir():
             nested = d / "id_review"
-            if nested.is_dir():
-                return str(nested)
-            return str(d)
+            result = str(nested) if nested.is_dir() else str(d)
+            _tracklets_cache[cache_key] = result
+            return result
 
     if not video_path:
+        _tracklets_cache[cache_key] = ""
         return ""
 
     vp = Path(video_path)
     stem = vp.stem
     candidates: List[Path] = []
 
-    # Project detection root / stem
+    # Project detection root / stem (cheap is_dir checks only)
     det_root = project.paths.detection_output_root.strip()
     if det_root:
         base = project.resolve_path(det_root)
         candidates.extend(
             [
-                base / stem,
                 base / stem / "id_review",
+                base / stem,
                 base / f"{stem}_processed" / "id_review",
                 base / "id_review",
             ]
@@ -164,12 +205,18 @@ def discover_tracklets_dir(project: Project, video_path: str) -> str:
     for c in candidates:
         if _looks_like_tracklets_dir(c):
             nested = c / "id_review"
-            if nested.is_dir() and _looks_like_tracklets_dir(nested):
-                return str(nested)
-            return str(c)
+            if nested.is_dir() and _dir_has_tracklet_markers(nested):
+                result = str(nested)
+            else:
+                result = str(c)
+            break
+        # Prefer nested id_review under an existing stem folder without full markers
         if c.is_dir() and (c / "id_review").is_dir():
-            return str(c / "id_review")
-    return ""
+            result = str(c / "id_review")
+            break
+
+    _tracklets_cache[cache_key] = result
+    return result
 
 
 def examples_out_dir_for(project: Project, video_path: str) -> str:

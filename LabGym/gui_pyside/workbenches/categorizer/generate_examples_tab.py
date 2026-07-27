@@ -202,9 +202,10 @@ class GenerateExamplesTab(QWidget):
         self.chk_soft.toggled.connect(self._commit_params_to_project)
         self.chk_bg.toggled.connect(self._commit_params_to_project)
 
-        self.project.changed.connect(self._on_project_changed)
-        self.project.project_replaced.connect(self._on_project_changed)
-        self._on_project_changed()
+        # Full video-list rebuild only on replace; dirty/param commits stay light.
+        self.project.project_replaced.connect(self._on_project_replaced)
+        self.project.changed.connect(self._on_project_light)
+        self._on_project_replaced()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -212,9 +213,15 @@ class GenerateExamplesTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-    def _on_project_changed(self) -> None:
+    def _on_project_replaced(self) -> None:
         self._load_params_from_project()
         self._refresh_video_list()
+        self._refresh_summary()
+
+    def _on_project_light(self) -> None:
+        """Dirty flag / param writes — do not rebuild video combo."""
+        if self._block:
+            return
         self._refresh_summary()
 
     def _load_params_from_project(self) -> None:
