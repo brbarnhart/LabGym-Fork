@@ -6,18 +6,8 @@ from io import BytesIO
 from typing import Dict, List
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent, QPixmap
-from PySide6.QtWidgets import (
-    QFormLayout,
-    QGroupBox,
-    QHBoxLayout,
-    QLabel,
-    QMessageBox,
-    QProgressBar,
-    QPushButton,
-    QTextEdit,
-    QVBoxLayout,
-)
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QFormLayout, QGroupBox, QLabel
 
 from LabGym.gui_pyside.widgets.progress_dialog_base import JobProgressDialogBase
 
@@ -31,6 +21,19 @@ class TrainProgressDialog(JobProgressDialogBase):
             parent,
             min_width=560,
             min_height=640,
+            cancel_text="Cancel",
+            cancel_tooltip=(
+                "Cooperatively stop augmentation (between source examples) or training "
+                "(at the next epoch/batch boundary). May take a short time to finish."
+            ),
+            show_close_button=True,
+            confirm_close_while_running=True,
+            close_while_running_title="Training in progress",
+            close_while_running_message=(
+                "Training is still running.\n\n"
+                "Cancel training and close?\n"
+                "Choose No to keep the window open."
+            ),
         )
         self._hist: Dict[str, List[float]] = {
             "loss": [],
@@ -39,30 +42,24 @@ class TrainProgressDialog(JobProgressDialogBase):
             "val_accuracy": [],
         }
 
-        layout = QVBoxLayout(self)
+        self.add_phase_label("Starting…")
 
-        self.lbl_phase = QLabel("Starting…")
-        self.lbl_phase.setWordWrap(True)
-        layout.addWidget(self.lbl_phase)
-
-        self.progress_aug = QProgressBar()
-        self.progress_aug.setRange(0, 100)
-        self.progress_aug.setValue(0)
-        self.progress_aug.setFormat("Augmentation: %p%")
-        self.progress_aug.setToolTip(
-            "Progress while exporting augmented train/validation examples "
-            "(by source example count)."
+        self.progress_aug = self.add_progress_bar(
+            format_str="Augmentation: %p%",
+            tooltip=(
+                "Progress while exporting augmented train/validation examples "
+                "(by source example count)."
+            ),
         )
-        layout.addWidget(self.progress_aug)
 
-        self.progress_train = QProgressBar()
-        self.progress_train.setRange(0, 0)
-        self.progress_train.setFormat("Training: waiting…")
-        self.progress_train.setToolTip(
-            "Training runs until early stopping. Bar is indeterminate; epoch "
-            "metrics update below after each epoch."
+        self.progress_train = self.add_progress_bar(
+            format_str="Training: waiting…",
+            tooltip=(
+                "Training runs until early stopping. Bar is indeterminate; epoch "
+                "metrics update below after each epoch."
+            ),
+            determinate=False,
         )
-        layout.addWidget(self.progress_train)
 
         metrics = QGroupBox("Training metrics (live)")
         metrics.setToolTip("Updated after each training epoch.")
@@ -87,44 +84,21 @@ class TrainProgressDialog(JobProgressDialogBase):
         )
         self.lbl_curve.setText("Loss curves appear after the first epoch.")
         mform.addRow(self.lbl_curve)
-        layout.addWidget(metrics)
+        self.content_layout.addWidget(metrics)
 
-        self.log = QTextEdit()
-        self.log.setReadOnly(True)
-        layout.addWidget(self.log, 1)
-
-        btn_row = QHBoxLayout()
-        self.btn_cancel = QPushButton("Cancel")
-        self.btn_cancel.setToolTip(
-            "Cooperatively stop augmentation (between source examples) or training "
-            "(at the next epoch/batch boundary). May take a short time to finish."
-        )
-        self.btn_cancel.clicked.connect(self._on_cancel_clicked)
-        self.btn_close = QPushButton("Close")
-        self.btn_close.setEnabled(False)
-        self.btn_close.setToolTip("Close this window (enabled when the job finishes).")
-        self.btn_close.clicked.connect(self.accept)
-        btn_row.addWidget(self.btn_cancel)
-        btn_row.addStretch(1)
-        btn_row.addWidget(self.btn_close)
-        layout.addLayout(btn_row)
+        self.add_log(stretch=True)
+        self.finish_building_ui()
 
     def begin_job(self) -> None:
-        self.set_job_running(True)
-        self.btn_cancel.setEnabled(True)
-        self.btn_close.setEnabled(False)
+        super().begin_job()
+        self.progress_aug.setRange(0, 100)
         self.progress_aug.setValue(0)
         self.progress_train.setRange(0, 0)
         self.progress_train.setFormat("Training: waiting for fit…")
         self._reset_metrics()
-        self.lbl_phase.setText("Starting…")
-        self.log.clear()
-        self.show_as_window()
 
     def mark_finished(self, *, cancelled: bool = False, failed: bool = False) -> None:
-        self.set_job_running(False)
-        self.btn_cancel.setEnabled(False)
-        self.btn_close.setEnabled(True)
+        super().mark_finished(cancelled=cancelled, failed=failed)
         if failed:
             self.progress_train.setRange(0, 1)
             self.progress_train.setValue(0)
@@ -140,31 +114,14 @@ class TrainProgressDialog(JobProgressDialogBase):
             self.progress_train.setFormat("Training: done")
 
     def _on_cancel_clicked(self) -> None:
-        self.btn_cancel.setEnabled(False)
-        self.lbl_phase.setText("Cancel requested… finishing current step")
-        self.log.append(
+        if self.btn_cancel is not None:
+            self.btn_cancel.setEnabled(False)
+        self.set_phase("Cancel requested… finishing current step")
+        self.append_log(
             "Cancel requested — will stop after the current augmentation source "
             "or training epoch/batch boundary."
         )
         self.cancel_requested.emit()
-
-    def closeEvent(self, event: QCloseEvent) -> None:
-        if self.is_job_running:
-            r = QMessageBox.question(
-                self,
-                "Training in progress",
-                "Training is still running.\n\n"
-                "Cancel training and close?\n"
-                "Choose No to keep the window open.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            )
-            if r == QMessageBox.StandardButton.Yes:
-                self._on_cancel_clicked()
-                event.ignore()
-            else:
-                event.ignore()
-            return
-        event.accept()
 
     def _reset_metrics(self) -> None:
         self._hist = {"loss": [], "val_loss": [], "accuracy": [], "val_accuracy": []}
@@ -176,15 +133,9 @@ class TrainProgressDialog(JobProgressDialogBase):
         self.lbl_curve.clear()
         self.lbl_curve.setText("Loss curves appear after the first epoch.")
 
-    def append_log(self, msg: str) -> None:
-        self.log.append(msg)
-
-    def set_phase(self, msg: str) -> None:
-        self.lbl_phase.setText(msg)
-
     def on_status(self, msg: str) -> None:
-        self.log.append(msg)
-        self.lbl_phase.setText(msg)
+        self.append_log(msg)
+        self.set_phase(msg)
         if "train" in msg.lower() and "augment" not in msg.lower():
             self.progress_train.setRange(0, 0)
             self.progress_train.setFormat("Training…")
@@ -192,13 +143,13 @@ class TrainProgressDialog(JobProgressDialogBase):
     def on_aug_progress(self, done: int, total: int, msg: str) -> None:
         if total > 0:
             self.progress_aug.setValue(int(100 * done / total))
-        self.lbl_phase.setText(msg)
+        self.set_phase(msg)
         if total > 0 and (done == total or done % max(1, total // 20) == 0):
-            self.log.append(msg)
+            self.append_log(msg)
         if total > 0 and done >= total:
             self.progress_train.setRange(0, 0)
             self.progress_train.setFormat("Training: fitting…")
-            self.lbl_phase.setText("Training (epochs until early stop)…")
+            self.set_phase("Training (epochs until early stop)…")
 
     def on_train_progress(self, epoch: int, logs: dict) -> None:
         self.progress_train.setRange(0, 0)
@@ -223,10 +174,10 @@ class TrainProgressDialog(JobProgressDialogBase):
                     self._hist[k].append(float(logs[k]))
                 except (TypeError, ValueError):
                     pass
-        self.lbl_phase.setText(
+        self.set_phase(
             f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')}"
         )
-        self.log.append(
+        self.append_log(
             f"Epoch {epoch}: loss={_fmt('loss')} val_loss={_fmt('val_loss')} "
             f"acc={_fmt('accuracy')} val_acc={_fmt('val_accuracy')}"
         )

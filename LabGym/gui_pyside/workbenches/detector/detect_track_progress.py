@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from PySide6.QtWidgets import QLabel, QProgressBar, QPushButton, QVBoxLayout
+from PySide6.QtWidgets import QLabel
 
 from LabGym.gui_pyside.widgets.progress_dialog_base import JobProgressDialogBase
 
@@ -11,41 +11,36 @@ class DetectTrackProgressDialog(JobProgressDialogBase):
     """Pop-out progress for batch detect+track (files + frames in current file)."""
 
     def __init__(self, parent=None):
-        super().__init__("Detect + track progress", parent, min_width=480)
+        super().__init__(
+            "Detect + track progress",
+            parent,
+            min_width=480,
+            cancel_text="Cancel queue",
+            cancel_tooltip="Stop the remaining queue after the current video finishes cooperatively.",
+        )
 
-        layout = QVBoxLayout(self)
-        self.lbl_overall = QLabel("Starting batch…")
-        self.lbl_overall.setWordWrap(True)
-        layout.addWidget(self.lbl_overall)
+        self.lbl_overall = self.add_phase_label("Starting batch…")
 
-        self.bar_files = QProgressBar()
+        self.bar_files = self.add_progress_bar(
+            format_str="Videos: %v / %m",
+            tooltip="How many videos in this batch have finished.",
+        )
         self.bar_files.setRange(0, 1)
         self.bar_files.setValue(0)
-        self.bar_files.setFormat("Videos: %v / %m")
-        self.bar_files.setToolTip("How many videos in this batch have finished.")
-        layout.addWidget(self.bar_files)
 
         self.lbl_current = QLabel("Current video: —")
         self.lbl_current.setWordWrap(True)
-        layout.addWidget(self.lbl_current)
+        self.content_layout.addWidget(self.lbl_current)
 
-        self.bar_frames = QProgressBar()
-        self.bar_frames.setRange(0, 0)  # indeterminate until first frame report
-        self.bar_frames.setFormat("Frames: waiting…")
-        self.bar_frames.setToolTip(
-            "Frames processed in the video currently being tracked."
+        self.bar_frames = self.add_progress_bar(
+            format_str="Frames: waiting…",
+            tooltip="Frames processed in the video currently being tracked.",
+            determinate=False,
         )
-        layout.addWidget(self.bar_frames)
 
-        self.lbl_status = QLabel("")
-        self.lbl_status.setWordWrap(True)
-        self.lbl_status.setStyleSheet("color: #9ab;")
-        layout.addWidget(self.lbl_status)
-
-        self.btn_cancel = QPushButton("Cancel queue")
-        self.btn_cancel.clicked.connect(self.cancel_requested.emit)
-        layout.addWidget(self.btn_cancel)
-        layout.addStretch(1)
+        self.add_status_label("")
+        self.content_layout.addStretch(1)
+        self.finish_building_ui()
 
         self._n_files = 0
         self._done_files = 0
@@ -58,12 +53,13 @@ class DetectTrackProgressDialog(JobProgressDialogBase):
         self.bar_files.setRange(0, bar_max)
         self.bar_files.setValue(0)
         self.bar_files.setFormat(f"Videos: 0 / {self._n_files}")
-        self.lbl_overall.setText(f"Processing {self._n_files} video(s)…")
+        self.set_phase(f"Processing {self._n_files} video(s)…")
         self.bar_frames.setRange(0, 0)
         self.bar_frames.setFormat("Frames: waiting…")
         self.lbl_current.setText("Current video: —")
-        self.lbl_status.setText("")
-        self.btn_cancel.setEnabled(True)
+        self.set_status_message("")
+        if self.btn_cancel is not None:
+            self.btn_cancel.setEnabled(True)
         self.show_as_window()
 
     def set_current_video(self, label: str, index: int) -> None:
@@ -71,7 +67,7 @@ class DetectTrackProgressDialog(JobProgressDialogBase):
         self.lbl_current.setText(f"Current video ({index + 1} of {n}): {label}")
         self.bar_frames.setRange(0, 0)
         self.bar_frames.setFormat("Frames: preparing…")
-        self.lbl_status.setText("Starting…")
+        self.set_status_message("Starting…")
 
     def set_frame_progress(self, current: int, total: int) -> None:
         current = max(0, int(current))
@@ -84,20 +80,15 @@ class DetectTrackProgressDialog(JobProgressDialogBase):
             self.bar_frames.setValue(min(current, total))
             self.bar_frames.setFormat(f"Frames: {current} / {total} (%p%)")
 
-    def set_status_message(self, msg: str) -> None:
-        self.lbl_status.setText(msg)
-
     def mark_file_finished(self) -> None:
         self._done_files = min(self._n_files, self._done_files + 1)
         self.bar_files.setValue(self._done_files)
         self.bar_files.setFormat(f"Videos: {self._done_files} / {self._n_files}")
-        self.lbl_overall.setText(
+        self.set_phase(
             f"Completed {self._done_files} of {self._n_files} video(s)."
         )
 
     def finish_batch(self) -> None:
-        self.set_job_running(False)
-        self.btn_cancel.setEnabled(False)
-        self.lbl_status.setText("Batch finished.")
+        self.mark_finished(status="Batch finished.")
         if self.bar_frames.maximum() > 0:
             self.bar_frames.setValue(self.bar_frames.maximum())
