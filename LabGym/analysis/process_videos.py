@@ -113,7 +113,7 @@ def load_categorizer_metadata(categorizer_path: str | Path) -> Dict[str, Any]:
 
 
 def _behavior_colors(classnames: Sequence[str]) -> Dict[str, List[str]]:
-    """Match gui_analyzer style: {name: ['#ffffff', '#hex']}."""
+    """Behavior display colors: {name: ['#ffffff', '#hex']} (LabGym annotate legend)."""
     palette = [
         "#e6194b",
         "#3cb44b",
@@ -284,6 +284,9 @@ def process_video(
                 social_distance=social_distance,
             )
             results_path = aad.results_path
+            # JobProgress (and similar) expose .frame(current, total); plain callables do not.
+            _frame = getattr(progress, "frame", None) if progress is not None else None
+            frame_progress = _frame if callable(_frame) else None
 
             _prog("Detect + track…")
             if behavior_mode == 1:
@@ -291,6 +294,7 @@ def process_video(
                     batch_size=int(config.detector_batch),
                     background_free=background_free,
                     black_background=black_background,
+                    frame_progress=frame_progress,
                 )
             else:
                 aad.acquire_information(
@@ -298,6 +302,7 @@ def process_video(
                     background_free=background_free,
                     black_background=black_background,
                     color_costar=color_costar,
+                    frame_progress=frame_progress,
                 )
             if behavior_mode != 1:
                 _prog("Crafting track data…")

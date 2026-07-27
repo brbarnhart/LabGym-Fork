@@ -49,7 +49,7 @@ def run_dense_generate(
     cfg: DenseGenerateConfig,
     progress: Optional[ProgressCb] = None,
 ) -> None:
-    """Run classic LabGym unsorted example generation (mirrors gui_categorizer)."""
+    """Run classic LabGym unsorted example generation (dense Tools path)."""
     log = progress or (lambda _m: None)
 
     if cfg.behavior_mode >= 3:

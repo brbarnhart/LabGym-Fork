@@ -1,7 +1,6 @@
 """Headless detect + track → identity package (id_review tracklets + events).
 
-Does not open the wx ID review UI. Users review IDs later in the PySide
-Detector → Review IDs tab.
+Does not open a review UI. Users review IDs later in Detector → Review IDs.
 """
 
 from __future__ import annotations
@@ -13,17 +12,6 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 ProgressCb = Optional[Callable[[str], None]]
-FrameProgressCb = Optional[Callable[[int, int], None]]
-
-
-def _frame_progress_from(progress: ProgressCb) -> FrameProgressCb:
-    """Use progress.frame if the reporter supports structured frame updates."""
-    if progress is None:
-        return None
-    frame_fn = getattr(progress, "frame", None)
-    if callable(frame_fn):
-        return frame_fn  # type: ignore[return-value]
-    return None
 
 
 @dataclass
@@ -212,7 +200,9 @@ def detect_and_track_video(
             social_distance=float(config.social_distance),
         )
         results_path = aad.results_path
-        frame_progress = _frame_progress_from(progress)
+        # JobProgress (and similar) expose .frame(current, total); plain callables do not.
+        _frame = getattr(progress, "frame", None) if progress is not None else None
+        frame_progress = _frame if callable(_frame) else None
 
         _prog("Running detector tracking (acquire_information)…")
         if int(config.behavior_mode) == 1:

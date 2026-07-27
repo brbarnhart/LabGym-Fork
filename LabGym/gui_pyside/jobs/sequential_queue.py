@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, List, Optional, Protocol, runtime_checkable
+from typing import Any, Callable, List, Optional, Protocol, Sequence, Tuple, runtime_checkable
 
 from PySide6.QtCore import QObject, QThread, Signal
 
@@ -18,6 +18,48 @@ class JobItem:
     status: str = "pending"  # pending | running | done | error | cancelled
     error: str = ""
     result: Any = None
+
+
+def soft_error_from_result(result: Any) -> Optional[str]:
+    """If *result* is a structured failure (``ok is False``), return its error text.
+
+    Used so runners can return dataclasses like DetectTrackResult / ProcessVideoResult
+    without the queue treating them as successes.
+    """
+    if result is None:
+        return None
+    ok = getattr(result, "ok", None)
+    if ok is False:
+        err = getattr(result, "error", "") or "failed"
+        return str(err)
+    if isinstance(result, dict) and result.get("ok") is False:
+        return str(result.get("error") or "failed")
+    return None
+
+
+def summarize_job_statuses(items: Sequence[JobItem]) -> Tuple[int, int, int]:
+    """Return ``(succeeded, failed, cancelled)`` counts from item.status."""
+    n_ok = n_err = n_cancel = 0
+    for it in items:
+        if it.status == "done":
+            n_ok += 1
+        elif it.status == "error":
+            n_err += 1
+        elif it.status == "cancelled":
+            n_cancel += 1
+    return n_ok, n_err, n_cancel
+
+
+def as_frame_callback(
+    progress: Any,
+) -> Optional[Callable[[int, int], None]]:
+    """Return ``progress.frame`` if the reporter supports structured frame updates."""
+    if progress is None:
+        return None
+    frame_fn = getattr(progress, "frame", None)
+    if callable(frame_fn):
+        return frame_fn  # type: ignore[return-value]
+    return None
 
 
 @runtime_checkable
@@ -98,8 +140,14 @@ class _Worker(QObject):
             try:
                 result = self.runner(item, prog)
                 item.result = result
-                item.status = "done"
-                self.finished_one.emit(item.job_id, result)
+                soft_err = soft_error_from_result(result)
+                if soft_err is not None:
+                    item.status = "error"
+                    item.error = soft_err
+                    self.failed_one.emit(item.job_id, soft_err)
+                else:
+                    item.status = "done"
+                    self.finished_one.emit(item.job_id, result)
             except Exception as exc:
                 item.status = "error"
                 item.error = str(exc)

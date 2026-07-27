@@ -40,6 +40,7 @@ from LabGym.gui_pyside.jobs.sequential_queue import (
     JobItem,
     JobProgress,
     SequentialJobQueue,
+    summarize_job_statuses,
 )
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
@@ -683,6 +684,7 @@ class DetectTrackTab(QWidget):
             self._progress_dlg.set_status_message(note)
 
     def _on_job_done(self, job_id: str, result: object) -> None:
+        # Queue only emits finished for non-soft-failures (ok is not False).
         row = self._job_rows.get(job_id)
         if self._progress_dlg is not None:
             self._progress_dlg.mark_file_finished()
@@ -692,21 +694,14 @@ class DetectTrackTab(QWidget):
                 self._set_status(row, job_id, "done", "finished")
             return
         path = job_id or result.video_path
+        note = result.id_review_dir or result.results_path or "finished"
         if row is not None:
-            if result.ok:
-                note = result.id_review_dir or result.results_path
-                self._set_status(row, path, "done", note)
-                self._register_detection_dir(result)
-            else:
-                self._set_status(row, path, "error", result.error[:200])
-        name = Path(job_id).name
+            self._set_status(row, path, "done", note)
+        if result.ok:
+            self._register_detection_dir(result)
         self.log.append(
-            f"[{name}] "
-            + (
-                f"OK → {result.id_review_dir} ({result.n_events} risk events)"
-                if result.ok
-                else f"FAIL: {result.error}"
-            )
+            f"[{Path(job_id).name}] OK → {result.id_review_dir} "
+            f"({result.n_events} risk events)"
         )
 
     def _on_job_fail(self, job_id: str, error: str) -> None:
@@ -750,26 +745,15 @@ class DetectTrackTab(QWidget):
         if self._progress_dlg is not None:
             self._progress_dlg.finish_batch()
 
-        n_ok = 0
-        n_err = 0
         for it in self.queue.items:
             if it.status == "cancelled":
                 row = self._job_rows.get(it.job_id)
                 if row is not None:
                     self._set_status(row, it.job_id, "cancelled", "")
-                continue
-            if it.status == "error":
-                n_err += 1
-                continue
-            if it.status == "done":
-                res = it.result
-                if isinstance(res, DetectTrackResult) and not res.ok:
-                    n_err += 1
-                else:
-                    n_ok += 1
 
         # Sync table with any project video-list changes deferred during the batch.
         self.refresh_videos()
+        n_ok, n_err, _n_cancel = summarize_job_statuses(self.queue.items)
 
         QMessageBox.information(
             self,
