@@ -298,13 +298,21 @@ class ReviewIdsTab(QWidget):
     # --- package load ---
 
     def refresh_video_list(self) -> None:
+        # mark_dirty (e.g. after saving detection_dir) emits project.changed —
+        # preserve the selected video so the combo does not jump to the first row.
+        current = self.combo_video.currentData()
         self.combo_video.blockSignals(True)
         self.combo_video.clear()
         self.combo_video.addItem("(open package folder…)", "")
         for label, resolved in list_project_video_choices(self.project.project):
             tracks = discover_tracklets_dir(self.project.project, resolved)
             flag = "✓" if tracks else "·"
-            self.combo_video.addItem(f"{flag}  {label}", resolved)
+            self.combo_video.addItem(f"{flag}  {label}", str(resolved))
+        if current:
+            for i in range(self.combo_video.count()):
+                if self.combo_video.itemData(i) == current:
+                    self.combo_video.setCurrentIndex(i)
+                    break
         self.combo_video.blockSignals(False)
 
     def _on_video_combo(self, _i: int) -> None:

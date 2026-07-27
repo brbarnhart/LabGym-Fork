@@ -292,9 +292,21 @@ class DrawMarkersTab(QWidget):
             self.ed_out.setText(str(p.resolve_path(rel)))
 
     def _refresh_videos(self) -> None:
+        # Avoid wiping the reference selection while a burn job is running
+        # (other tabs may mark the project dirty and emit project.changed).
+        if self._thread is not None:
+            return
+        current = self.combo_video.currentData()
+        self.combo_video.blockSignals(True)
         self.combo_video.clear()
         for label, path in list_project_video_choices(self.project.project):
             self.combo_video.addItem(label, path)
+        if current is not None:
+            for i in range(self.combo_video.count()):
+                if self.combo_video.itemData(i) == current:
+                    self.combo_video.setCurrentIndex(i)
+                    break
+        self.combo_video.blockSignals(False)
 
     def _on_shape(self) -> None:
         self.canvas.draw_lines = bool(self.combo_shape.currentData())

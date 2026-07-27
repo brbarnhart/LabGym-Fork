@@ -52,11 +52,11 @@ class ProjectController(QObject):
         return self._dirty
 
     def mark_dirty(self) -> None:
-        if not self._dirty:
-            self._dirty = True
-            self.changed.emit()
-        else:
-            self.changed.emit()
+        # Always emit ``changed`` so chrome (window title) and listeners refresh.
+        # Workbench tabs that rebuild video tables on ``changed`` must skip
+        # rebuilds while a batch is active (see Detect+track / Process / Preprocess).
+        self._dirty = True
+        self.changed.emit()
 
     def mark_clean(self) -> None:
         self._dirty = False

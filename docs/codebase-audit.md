@@ -383,16 +383,16 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 
 ### Now (high leverage, bounded)
 
-1. **AUD-GUI-001 + AUD-GUI-002** — Process videos sticky status + path job ids (clone Detect+track fix).  
-2. **AUD-TEST-003** — Unit tests for `JobProgress` / queue semantics.  
-3. **AUD-DOM-002 + AUD-HYG-001** — Comment/pycache hygiene.  
+1. ~~**AUD-GUI-001 + AUD-GUI-002**~~ — **Done** (wave 3b): Process videos sticky status + path job ids.  
+2. ~~**AUD-TEST-003**~~ — **Done** (wave 3b): `tests/unit/test_sequential_queue.py`.  
+3. ~~**AUD-DOM-002 + AUD-HYG**~~ — **Done** / ongoing: old-GUI comment cleanup; local `gui_*.pyc` remains gitignored.  
 
 ### Next
 
-4. **AUD-GUI-004** — Project signal / batch-active convention across video tables.  
-5. **AUD-GUI-003** — Process videos progress depth.  
-6. **AUD-GUI-005** — Job done vs result.ok contract.  
-7. **AUD-GUI-006** — Extract dialogs/helpers from largest tabs (train, review IDs).  
+4. ~~**AUD-GUI-004**~~ — **Partial (wave 3b follow-up):** batch-active / preserve selection on Preprocess, Draw markers, Review IDs; controller docs. Full signal split still optional later.  
+5. ~~**AUD-GUI-003**~~ — **Done** (wave 3b): process_video frame progress + status note.  
+6. ~~**AUD-GUI-005**~~ — **Done** (wave 3b): soft-fail `ok=False` on queue.  
+7. **AUD-GUI-006** — Extract dialogs/helpers from largest tabs (train, review IDs). ← **next wave 3c**  
 8. **AUD-TEST-001** — Expand workbench behavioral tests.  
 
 ### Later
@@ -444,8 +444,8 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 |-------|--------|
 | 0 Inventory | **Done** (this doc §1) |
 | 1 Findings draft | **Done** (this doc §3; may grow) |
-| 2 Prioritization with owner | **Pending** |
-| 3 Implementation waves | **Not started** (await §4 approval) |
+| 2 Prioritization with owner | Wave 3b + follow-up accepted |
+| 3 Implementation waves | **3b done**; **3a/3b follow-up done**; next **3c** tab split |
 
 ---
 
@@ -454,3 +454,5 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | Date | Note |
 |------|------|
 | 2026-07-27 | Initial Phase 0–1 audit on `docs/codebase-audit` after Detect+track progress cleanup on `main`. |
+| 2026-07-27 | Wave 3b: process videos sticky status, queue soft-fail, frame progress, job unit tests. |
+| 2026-07-27 | Wave 3a/3b follow-up: Preprocess status+batch-active; Draw markers / Review IDs selection preserve; survey/controller hygiene; audit status update. |

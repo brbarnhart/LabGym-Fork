@@ -31,16 +31,15 @@ Design issues
 
 *   Why sometimes use a webbrowser instead of only dialog text?
 	Because
-	+   The user can't select and copy the wx.Dialog text into a
-		clipboard (observed on MacOS).
-	+   A wx.Dialog disappears when LabGym is quit.  By displaying
+	+   Long modal dialog text is harder to select/copy on some platforms
+		(historically observed on macOS).
+	+   An in-app dialog disappears when LabGym is quit.  By displaying
 		instructions in a separate app, they can still be referenced
 		after LabGym is quit, until the user dismisses them.
-	+   Formatting... It's more efficient to write content in html
-		instead of hand-formatting text for a wx.Dialog.
+	+   Formatting... It's more efficient to write content in HTML
+		than hand-formatting multi-paragraph dialog text.
 	There are other possible approaches... prepare the instructions in
-	html, then use html2text library to get formatted text from the
-	html, and display that in a wx.Dialog.
+	HTML, convert to plain text if needed, and show that in a Qt dialog.
 
 The path args for the functions in this module should be absolute
 (full) paths, not relative (partial) paths.  That's the assumption
