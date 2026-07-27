@@ -1,5 +1,5 @@
 """Background job helpers for the workbench shell."""
 
-from .sequential_queue import SequentialJobQueue, JobItem
+from .sequential_queue import JobItem, JobProgress, SequentialJobQueue
 
-__all__ = ["SequentialJobQueue", "JobItem"]
+__all__ = ["JobItem", "JobProgress", "SequentialJobQueue"]

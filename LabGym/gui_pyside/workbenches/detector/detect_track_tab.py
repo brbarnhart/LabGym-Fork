@@ -36,7 +36,11 @@ from LabGym.detection.batch_detect import (
     list_detectors,
     load_detector_animal_kinds,
 )
-from LabGym.gui_pyside.jobs.sequential_queue import JobItem, SequentialJobQueue
+from LabGym.gui_pyside.jobs.sequential_queue import (
+    JobItem,
+    JobProgress,
+    SequentialJobQueue,
+)
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
 from LabGym.mypkg_resources import resource_filename
@@ -91,9 +95,10 @@ class DetectTrackProgressDialog(QDialog):
         self._done_files = 0
 
     def begin_batch(self, n_files: int) -> None:
-        self._n_files = max(1, int(n_files))
+        self._n_files = max(0, int(n_files))
         self._done_files = 0
-        self.bar_files.setRange(0, self._n_files)
+        bar_max = max(1, self._n_files)
+        self.bar_files.setRange(0, bar_max)
         self.bar_files.setValue(0)
         self.bar_files.setFormat(f"Videos: 0 / {self._n_files}")
         self.lbl_overall.setText(f"Processing {self._n_files} video(s)…")
@@ -108,9 +113,8 @@ class DetectTrackProgressDialog(QDialog):
 
     def set_current_video(self, label: str, index: int) -> None:
         # index is 0-based among jobs; show 1-based position
-        self.lbl_current.setText(
-            f"Current video ({index + 1} of {self._n_files}): {label}"
-        )
+        n = max(1, self._n_files)
+        self.lbl_current.setText(f"Current video ({index + 1} of {n}): {label}")
         self.bar_frames.setRange(0, 0)
         self.bar_frames.setFormat("Frames: preparing…")
         self.lbl_status.setText("Starting…")
@@ -157,14 +161,15 @@ class DetectTrackTab(QWidget):
         self.queue = SequentialJobQueue(self)
         self.queue.job_started.connect(self._on_job_started)
         self.queue.job_progress.connect(self._on_progress)
+        self.queue.job_frame_progress.connect(self._on_frame_progress)
         self.queue.job_finished.connect(self._on_job_done)
         self.queue.job_failed.connect(self._on_job_fail)
         self.queue.queue_finished.connect(self._on_queue_done)
+        # job_id is the video path; maps to table row for the current batch
         self._job_rows: Dict[str, int] = {}
-        # path -> (status, note) so project.changed refreshes do not wipe progress
+        # path -> (status, note) so post-batch project.changed refreshes keep results
         self._status_by_path: Dict[str, Tuple[str, str]] = {}
-        self._job_labels: Dict[str, str] = {}
-        self._job_order: List[str] = []
+        self._batch_active = False
         self._progress_dlg: Optional[DetectTrackProgressDialog] = None
 
         layout = QVBoxLayout(self)
@@ -486,9 +491,12 @@ class DetectTrackTab(QWidget):
             self.lbl_kinds.setText("—")
 
     def refresh_videos(self) -> None:
-        # Preserve check-state and status across project.changed rebuilds
-        # (completing a job marks the project dirty → this would otherwise
-        # reset every row back to "pending").
+        # Mid-batch project.changed (mark_dirty after each finished video) must not
+        # rebuild the table — that was wiping live status. Keep sticky statuses for
+        # post-batch rebuilds via _status_by_path.
+        if self._batch_active:
+            return
+
         prev_checked: Dict[str, bool] = {}
         for r in range(self.table.rowCount()):
             item0 = self.table.item(r, 0)
@@ -501,7 +509,6 @@ class DetectTrackTab(QWidget):
         choices = list_project_video_choices(self.project.project)
         self.table.setRowCount(0)
         self.table.setRowCount(len(choices))
-        self._job_rows.clear()
         for r, (label, resolved) in enumerate(choices):
             path = str(resolved)
             chk = QTableWidgetItem()
@@ -524,44 +531,9 @@ class DetectTrackTab(QWidget):
             status, note = self._status_by_path.get(path, ("pending", ""))
             self.table.setItem(r, 2, QTableWidgetItem(status))
             self.table.setItem(r, 3, QTableWidgetItem(note))
-            # Rebuild job_id → row for an active queue (same v{r} scheme as start)
-            if self.queue.is_running:
-                jid = f"v{r}"
-                if jid in self._job_labels or path in {
-                    self._path_for_job(j) for j in self._job_order
-                }:
-                    # Prefer mapping by path for stability
-                    pass
-        if self.queue.is_running:
-            self._rebind_job_rows()
 
-    def _path_for_job(self, job_id: str) -> str:
-        for it in self.queue.items:
-            if it.job_id == job_id:
-                return str(it.payload or "")
-        return ""
-
-    def _rebind_job_rows(self) -> None:
-        """Map job_id → table row after a refresh during a running batch."""
-        path_to_row: Dict[str, int] = {}
-        for r in range(self.table.rowCount()):
-            item0 = self.table.item(r, 0)
-            if item0:
-                path_to_row[str(item0.data(Qt.ItemDataRole.UserRole) or "")] = r
-        new_map: Dict[str, int] = {}
-        for jid in self._job_order:
-            path = self._path_for_job(jid)
-            if path in path_to_row:
-                new_map[jid] = path_to_row[path]
-        self._job_rows = new_map
-
-    def _set_status(
-        self, row: int, status: str, note: str = "", *, path: Optional[str] = None
-    ) -> None:
-        if path is None and self.table.item(row, 0):
-            path = str(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) or "")
-        if path:
-            self._status_by_path[path] = (status, note)
+    def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:
+        self._status_by_path[path] = (status, note)
         if self.table.item(row, 2):
             self.table.item(row, 2).setText(status)
         else:
@@ -614,6 +586,9 @@ class DetectTrackTab(QWidget):
             )
             return
 
+        # Block table rebuilds for the whole batch (including mark_dirty below).
+        self._batch_active = True
+
         # Persist detector choice on project
         self.project.project.defaults.detector_name = detector
         self.project.mark_dirty()
@@ -623,26 +598,22 @@ class DetectTrackTab(QWidget):
 
         items: List[JobItem] = []
         self._job_rows.clear()
-        self._job_labels.clear()
-        self._job_order = []
         for r in range(self.table.rowCount()):
             item0 = self.table.item(r, 0)
             if not item0 or item0.checkState() != Qt.CheckState.Checked:
                 continue
             path = str(item0.data(Qt.ItemDataRole.UserRole))
-            jid = f"v{r}"
-            self._job_rows[jid] = r
+            # Stable id = path (not row index).
             label = Path(path).name
-            self._job_labels[jid] = label
-            self._job_order.append(jid)
-            self._set_status(r, "queued", "", path=path)
-            items.append(JobItem(job_id=jid, label=label, payload=path))
+            self._job_rows[path] = r
+            self._set_status(r, path, "queued", "")
+            items.append(JobItem(job_id=path, label=label, payload=path))
 
         mode = int(self.combo_mode.currentData())
         n_per = int(self.spin_animals.value())
         fw = int(self.spin_fw.value()) or None
 
-        def runner(job: JobItem, prog) -> DetectTrackResult:
+        def runner(job: JobItem, prog: JobProgress) -> DetectTrackResult:
             cfg = DetectTrackConfig(
                 video_path=str(job.payload),
                 detector_path=detector,
@@ -669,9 +640,8 @@ class DetectTrackTab(QWidget):
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.log.append(f"Starting batch: {len(items)} video(s) → {results_root}")
-        self._ensure_progress_dialog()
-        assert self._progress_dlg is not None
-        self._progress_dlg.begin_batch(len(items))
+        dlg = self._ensure_progress_dialog()
+        dlg.begin_batch(len(items))
         self.queue.start(items, runner)
 
     def _ensure_progress_dialog(self) -> DetectTrackProgressDialog:
@@ -680,67 +650,58 @@ class DetectTrackTab(QWidget):
             self._progress_dlg.cancel_requested.connect(self.queue.cancel)
         return self._progress_dlg
 
+    def _job_index(self, job_id: str) -> int:
+        for i, it in enumerate(self.queue.items):
+            if it.job_id == job_id:
+                return i
+        return 0
+
     def _on_job_started(self, job_id: str) -> None:
         row = self._job_rows.get(job_id)
-        path = self._path_for_job(job_id)
-        label = self._job_labels.get(job_id, path or job_id)
+        label = Path(job_id).name
         if row is not None:
-            self._set_status(row, "running", "Starting…", path=path or None)
+            self._set_status(row, job_id, "running", "Starting…")
         dlg = self._progress_dlg
         if dlg is not None:
-            try:
-                idx = self._job_order.index(job_id)
-            except ValueError:
-                idx = 0
-            dlg.set_current_video(label, idx)
+            dlg.set_current_video(label, self._job_index(job_id))
 
     def _on_progress(self, job_id: str, msg: str) -> None:
         row = self._job_rows.get(job_id)
-        path = self._path_for_job(job_id) or None
-        dlg = self._progress_dlg
-
-        if msg.startswith("__frame__:"):
-            parts = msg.split(":")
-            try:
-                current = int(parts[1])
-                total = int(parts[2]) if len(parts) > 2 else 0
-            except (IndexError, ValueError):
-                return
-            note = f"frames {current}/{total}" if total else f"frames {current}"
-            if row is not None:
-                self._set_status(row, "running", note, path=path)
-            if dlg is not None:
-                dlg.set_frame_progress(current, total)
-                dlg.set_status_message(note)
-            return
-
         if row is not None:
-            self._set_status(row, "running", msg[:200], path=path)
-        if dlg is not None:
-            dlg.set_status_message(msg[:300])
-        self.log.append(f"[{job_id}] {msg}")
+            self._set_status(row, job_id, "running", msg[:200])
+        if self._progress_dlg is not None:
+            self._progress_dlg.set_status_message(msg[:300])
+        self.log.append(f"[{Path(job_id).name}] {msg}")
+
+    def _on_frame_progress(self, job_id: str, current: int, total: int) -> None:
+        row = self._job_rows.get(job_id)
+        note = f"frames {current}/{total}" if total else f"frames {current}"
+        if row is not None:
+            self._set_status(row, job_id, "running", note)
+        if self._progress_dlg is not None:
+            self._progress_dlg.set_frame_progress(current, total)
+            self._progress_dlg.set_status_message(note)
 
     def _on_job_done(self, job_id: str, result: object) -> None:
         row = self._job_rows.get(job_id)
-        path = self._path_for_job(job_id) or None
         if self._progress_dlg is not None:
             self._progress_dlg.mark_file_finished()
 
         if not isinstance(result, DetectTrackResult):
             if row is not None:
-                self._set_status(row, "done", "finished", path=path)
+                self._set_status(row, job_id, "done", "finished")
             return
+        path = job_id or result.video_path
         if row is not None:
             if result.ok:
                 note = result.id_review_dir or result.results_path
-                self._set_status(row, "done", note, path=path or result.video_path)
+                self._set_status(row, path, "done", note)
                 self._register_detection_dir(result)
             else:
-                self._set_status(
-                    row, "error", result.error[:200], path=path or result.video_path
-                )
+                self._set_status(row, path, "error", result.error[:200])
+        name = Path(job_id).name
         self.log.append(
-            f"[{job_id}] "
+            f"[{name}] "
             + (
                 f"OK → {result.id_review_dir} ({result.n_events} risk events)"
                 if result.ok
@@ -750,12 +711,11 @@ class DetectTrackTab(QWidget):
 
     def _on_job_fail(self, job_id: str, error: str) -> None:
         row = self._job_rows.get(job_id)
-        path = self._path_for_job(job_id) or None
         if self._progress_dlg is not None:
             self._progress_dlg.mark_file_finished()
         if row is not None:
-            self._set_status(row, "error", error[:200], path=path)
-        self.log.append(f"[{job_id}] FAIL: {error}")
+            self._set_status(row, job_id, "error", error[:200])
+        self.log.append(f"[{Path(job_id).name}] FAIL: {error}")
 
     def _register_detection_dir(self, result: DetectTrackResult) -> None:
         """Store detection_dir on the matching project video entry."""
@@ -784,31 +744,33 @@ class DetectTrackTab(QWidget):
     def _on_queue_done(self) -> None:
         self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
+        self._batch_active = False
         self.log.append("Batch finished.")
         self.batch_finished.emit()
         if self._progress_dlg is not None:
             self._progress_dlg.finish_batch()
+
         n_ok = 0
         n_err = 0
         for it in self.queue.items:
+            if it.status == "cancelled":
+                row = self._job_rows.get(it.job_id)
+                if row is not None:
+                    self._set_status(row, it.job_id, "cancelled", "")
+                continue
             if it.status == "error":
                 n_err += 1
-            elif it.status == "done":
+                continue
+            if it.status == "done":
                 res = it.result
                 if isinstance(res, DetectTrackResult) and not res.ok:
                     n_err += 1
                 else:
                     n_ok += 1
-            elif it.status == "cancelled":
-                pass
-        # Reflect cancelled leftovers in the table
-        for it in self.queue.items:
-            if it.status == "cancelled":
-                row = self._job_rows.get(it.job_id)
-                if row is not None:
-                    self._set_status(
-                        row, "cancelled", "", path=str(it.payload or "") or None
-                    )
+
+        # Sync table with any project video-list changes deferred during the batch.
+        self.refresh_videos()
+
         QMessageBox.information(
             self,
             "Detect + track",

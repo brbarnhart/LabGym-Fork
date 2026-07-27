@@ -13,6 +13,17 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Union
 
 ProgressCb = Optional[Callable[[str], None]]
+FrameProgressCb = Optional[Callable[[int, int], None]]
+
+
+def _frame_progress_from(progress: ProgressCb) -> FrameProgressCb:
+    """Use progress.frame if the reporter supports structured frame updates."""
+    if progress is None:
+        return None
+    frame_fn = getattr(progress, "frame", None)
+    if callable(frame_fn):
+        return frame_fn  # type: ignore[return-value]
+    return None
 
 
 @dataclass
@@ -201,9 +212,7 @@ def detect_and_track_video(
             social_distance=float(config.social_distance),
         )
         results_path = aad.results_path
-        def _frame_progress(current: int, total: int) -> None:
-            # Structured token parsed by Detect + track UI for the frame bar.
-            _prog(f"__frame__:{int(current)}:{int(total)}")
+        frame_progress = _frame_progress_from(progress)
 
         _prog("Running detector tracking (acquire_information)…")
         if int(config.behavior_mode) == 1:
@@ -211,7 +220,7 @@ def detect_and_track_video(
                 batch_size=int(config.detector_batch),
                 background_free=bool(config.background_free),
                 black_background=bool(config.black_background),
-                frame_progress=_frame_progress,
+                frame_progress=frame_progress,
             )
         else:
             aad.acquire_information(
@@ -219,7 +228,7 @@ def detect_and_track_video(
                 background_free=bool(config.background_free),
                 black_background=bool(config.black_background),
                 color_costar=bool(config.color_costar),
-                frame_progress=_frame_progress,
+                frame_progress=frame_progress,
             )
         if int(config.behavior_mode) != 1:
             _prog("Crafting track data…")

@@ -38,6 +38,23 @@ from keras.models import load_model
 from keras.utils import img_to_array
 import torch
 
+
+def _frame_progress_stride(total_frames):
+	"""How often to report frame progress (smooth bar, limited UI chatter)."""
+	total = int(total_frames or 0)
+	return max(1, min(30, total // 100 or 1))
+
+
+def _emit_frame_progress(callback, current, total, stride=1, force=False):
+	"""Call optional frame_progress(current, total) on a throttle schedule."""
+	if callback is None:
+		return
+	current = int(current)
+	total = int(total or 0)
+	if not force and current != 1 and stride > 0 and current % stride != 0:
+		return
+	callback(current, total)
+
 # Local application/library specific imports.
 from .detector import Detector
 from .tools import (
@@ -699,8 +716,7 @@ class AnalyzeAnimalDetector():
 		batch_count=frame_count=frame_count_analyze=0
 		animation=deque([np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8')],maxlen=self.length)*self.length
 		total_frames=int(self.total_analysis_framecount or 0)
-		# Report often enough for a smooth bar without flooding the UI thread.
-		progress_every=max(1, min(30, total_frames//100 or 1))
+		progress_every=_frame_progress_stride(total_frames)
 
 		start_t=round((self.t-self.length/self.fps),2)
 		if start_t<0:
@@ -743,22 +759,17 @@ class AnalyzeAnimalDetector():
 					batch=[]
 
 				frame_count_analyze+=1
-				if frame_progress is not None and (
-					frame_count_analyze==1
-					or frame_count_analyze%progress_every==0
-				):
-					try:
-						frame_progress(frame_count_analyze,total_frames)
-					except Exception:
-						pass
+				_emit_frame_progress(frame_progress,frame_count_analyze,total_frames,progress_every)
 
 			frame_count+=1
 
-		if frame_progress is not None and frame_count_analyze>0:
-			try:
-				frame_progress(frame_count_analyze,total_frames or frame_count_analyze)
-			except Exception:
-				pass
+		if frame_count_analyze>0:
+			_emit_frame_progress(
+				frame_progress,
+				frame_count_analyze,
+				total_frames or frame_count_analyze,
+				force=True,
+			)
 
 		capture.release()
 
@@ -806,7 +817,7 @@ class AnalyzeAnimalDetector():
 		temp_inners=deque(maxlen=self.length)
 		animation=deque([np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8')],maxlen=self.length)*self.length
 		total_frames=int(self.total_analysis_framecount or 0)
-		progress_every=max(1, min(30, total_frames//100 or 1))
+		progress_every=_frame_progress_stride(total_frames)
 
 		start_t=round((self.t-self.length/self.fps),2)
 		if start_t<0:
@@ -932,22 +943,17 @@ class AnalyzeAnimalDetector():
 					batch_count=0
 
 				frame_count_analyze+=1
-				if frame_progress is not None and (
-					frame_count_analyze==1
-					or frame_count_analyze%progress_every==0
-				):
-					try:
-						frame_progress(frame_count_analyze,total_frames)
-					except Exception:
-						pass
+				_emit_frame_progress(frame_progress,frame_count_analyze,total_frames,progress_every)
 
 			frame_count+=1
 
-		if frame_progress is not None and frame_count_analyze>0:
-			try:
-				frame_progress(frame_count_analyze,total_frames or frame_count_analyze)
-			except Exception:
-				pass
+		if frame_count_analyze>0:
+			_emit_frame_progress(
+				frame_progress,
+				frame_count_analyze,
+				total_frames or frame_count_analyze,
+				force=True,
+			)
 
 		capture.release()
 
