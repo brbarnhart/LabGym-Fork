@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import path_edit_row, set_line_edit_directory
 
 
 class _TestWorker(QObject):
@@ -64,22 +65,22 @@ class TestCategorizerTab(QWidget):
             "training examples). Used as ground truth for accuracy metrics."
         )
         b1 = QPushButton("Browse…")
-        b1.clicked.connect(lambda: self._browse_dir(self.ed_gt))
+        b1.clicked.connect(lambda: set_line_edit_directory(self, self.ed_gt))
         form.addRow(
             self._lab(
                 "Ground-truth examples:",
                 "Labeled examples not used for this test run’s training.",
             ),
-            self._row(self.ed_gt, b1),
+            path_edit_row(self.ed_gt, b1),
         )
 
         self.ed_model = QLineEdit()
         self.ed_model.setToolTip("Trained categorizer folder to evaluate.")
         b2 = QPushButton("Browse…")
-        b2.clicked.connect(lambda: self._browse_dir(self.ed_model))
+        b2.clicked.connect(lambda: set_line_edit_directory(self, self.ed_model))
         form.addRow(
             self._lab("Categorizer folder:", "Must include model_parameters.txt."),
-            self._row(self.ed_model, b2),
+            path_edit_row(self.ed_model, b2),
         )
 
         self.ed_out = QLineEdit()
@@ -87,10 +88,10 @@ class TestCategorizerTab(QWidget):
             "Optional folder for written test reports. Leave empty to use LabGym defaults."
         )
         b3 = QPushButton("Browse…")
-        b3.clicked.connect(lambda: self._browse_dir(self.ed_out))
+        b3.clicked.connect(lambda: set_line_edit_directory(self, self.ed_out))
         form.addRow(
             self._lab("Results folder (optional):", "Where to save test output."),
-            self._row(self.ed_out, b3),
+            path_edit_row(self.ed_out, b3),
         )
         layout.addLayout(form)
 
@@ -110,19 +111,7 @@ class TestCategorizerTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-    @staticmethod
-    def _row(edit, btn):
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(edit, 1)
-        h.addWidget(btn)
-        return w
 
-    def _browse_dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
-        if d:
-            edit.setText(d)
 
     def _run(self) -> None:
         if self._thread is not None:

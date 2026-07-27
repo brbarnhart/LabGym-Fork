@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import path_edit_row, set_line_edit_directory
 
 
 class _TestWorker(QObject):
@@ -59,19 +60,19 @@ class TestDetectorTab(QWidget):
         self.ed_det = QLineEdit()
         self.ed_det.setToolTip("Trained detector folder to evaluate.")
         b0 = QPushButton("Browse…")
-        b0.clicked.connect(lambda: self._browse_dir(self.ed_det))
+        b0.clicked.connect(lambda: set_line_edit_directory(self, self.ed_det))
         form.addRow(
             self._lab("Detector folder:", "Contains model_final.pth and config."),
-            self._row(self.ed_det, b0),
+            path_edit_row(self.ed_det, b0),
         )
 
         self.ed_images = QLineEdit()
         self.ed_images.setToolTip("Ground-truth test images (held-out from training).")
         b1 = QPushButton("Browse…")
-        b1.clicked.connect(lambda: self._browse_dir(self.ed_images))
+        b1.clicked.connect(lambda: set_line_edit_directory(self, self.ed_images))
         form.addRow(
             self._lab("Test images folder:", "Images for COCO evaluation."),
-            self._row(self.ed_images, b1),
+            path_edit_row(self.ed_images, b1),
         )
 
         self.ed_ann = QLineEdit()
@@ -80,7 +81,7 @@ class TestDetectorTab(QWidget):
         b2.clicked.connect(lambda: self._browse_file(self.ed_ann))
         form.addRow(
             self._lab("Annotation JSON:", "Must match the test images."),
-            self._row(self.ed_ann, b2),
+            path_edit_row(self.ed_ann, b2),
         )
 
         self.ed_out = QLineEdit()
@@ -88,10 +89,10 @@ class TestDetectorTab(QWidget):
             "Where to write annotated previews and COCO evaluation metrics."
         )
         b3 = QPushButton("Browse…")
-        b3.clicked.connect(lambda: self._browse_dir(self.ed_out))
+        b3.clicked.connect(lambda: set_line_edit_directory(self, self.ed_out))
         form.addRow(
             self._lab("Output folder:", "Evaluation outputs and mAP reports."),
-            self._row(self.ed_out, b3),
+            path_edit_row(self.ed_out, b3),
         )
         layout.addLayout(form)
 
@@ -111,19 +112,7 @@ class TestDetectorTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-    @staticmethod
-    def _row(edit, btn):
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(edit, 1)
-        h.addWidget(btn)
-        return w
 
-    def _browse_dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
-        if d:
-            edit.setText(d)
 
     def _browse_file(self, edit: QLineEdit) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "JSON", edit.text(), "JSON (*.json)")

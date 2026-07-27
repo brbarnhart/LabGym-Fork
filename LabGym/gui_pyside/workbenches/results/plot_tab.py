@@ -25,6 +25,11 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 
 
 class _PlotWorker(QObject):
@@ -89,13 +94,13 @@ class PlotBehaviorsTab(QWidget):
         self.ed_file.setToolTip("LabGym all_events.xlsx from an analysis batch.")
         b_file = QPushButton("Browse…")
         b_file.clicked.connect(self._browse_file)
-        form.addRow("all_events.xlsx:", self._row(self.ed_file, b_file))
+        form.addRow("all_events.xlsx:", path_edit_row(self.ed_file, b_file))
 
         self.ed_out = QLineEdit()
         self.ed_out.setToolTip("Folder for behaviors_plot.png and colorbar images.")
         b_out = QPushButton("Browse…")
         b_out.clicked.connect(self._browse_out)
-        form.addRow("Output folder:", self._row(self.ed_out, b_out))
+        form.addRow("Output folder:", path_edit_row(self.ed_out, b_out))
         layout.addLayout(form)
 
         layout.addWidget(QLabel("Behavior colors (double-click to change):"))
@@ -115,13 +120,6 @@ class PlotBehaviorsTab(QWidget):
         self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
 
-    def _row(self, line: QLineEdit, button: QPushButton) -> QWidget:
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(line, 1)
-        h.addWidget(button)
-        return w
 
     def _browse_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -160,9 +158,9 @@ class PlotBehaviorsTab(QWidget):
         self.log.append(f"Loaded {len(behaviors)} behavior(s) from {path}")
 
     def _browse_out(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder for behavior plot")
-        if d:
-            self.ed_out.setText(d)
+        set_line_edit_directory(
+            self, self.ed_out, caption="Select folder for behavior plot"
+        )
 
     def _pick_color(self, item: QListWidgetItem) -> None:
         behavior = item.data(Qt.ItemDataRole.UserRole)

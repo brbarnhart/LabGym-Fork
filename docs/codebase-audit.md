@@ -5,6 +5,26 @@
 **Against:** `main` at audit start (`f2174f6` Detect+track cleanup and later)  
 **Companion:** root `implementation-plan.md` / `specifications.md` (migration complete)
 
+### Git workflow (going forward)
+
+Integrate audit work on a long-lived branch, then merge once to `main` when ready:
+
+```text
+main
+  └── audit/codebase-cleanup          # integration branch (merge of all audit slices)
+        ├── audit/gui-007b-path-browse
+        ├── audit/<next-slice>…
+        └── …
+```
+
+| Rule | Detail |
+|------|--------|
+| **Umbrella** | `audit/codebase-cleanup` — only audit-related commits; do not land unrelated product work here |
+| **Sub-branches** | One concern per branch (`audit/<area>-<short-name>`), cut from `audit/codebase-cleanup` |
+| **Merge path** | Sub-branch → `audit/codebase-cleanup` (when slice is done) |
+| **Ship to main** | When the audit phase is finalized: `audit/codebase-cleanup` → `main` (single integration merge) |
+| **Already on main** | Waves 3a–3e unit work landed on `main` before this workflow; new slices use the umbrella |
+
 ---
 
 ## 0. Scope and exclusions
@@ -395,7 +415,7 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 
 | ID | Item |
 |----|------|
-| **AUD-GUI-007b** | Migrate remaining workbench local `_browse_dir` / folder-pick rows to `gui_pyside.widgets.path_browse` (train/test detector, results tabs, preprocess, etc.). Drive-by when editing those tabs, or a small `chore/path-browse-migrate` PR. **Not** owned by 3d/3e/3f. |
+| ~~**AUD-GUI-007b**~~ | **Done** on `audit/gui-007b-path-browse` → integrate into `audit/codebase-cleanup`: remaining workbench + tools + project editor folder pickers use `path_browse`. |
 | **AUD-GUI-004b** | Optional full project `changed` signal split (dirty chrome vs data rebuild) — only if fan-out pain returns. |
 | **AUD-GUI-008b** | Optional further progress-dialog unification beyond `JobProgressDialogBase`. |
 
@@ -403,7 +423,6 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 
 7. **AUD-TEST-002** — Optional integration/smoke suite (still light; unit layer is the main 3e investment).  
 8. **AUD-ANN-002** — Annotator export/schema regressions when bugs appear.  
-9. **AUD-GUI-007b** — Path-browse migrate remaining tabs (backlog, opportunistic).  
 
 ### Later
 
@@ -472,3 +491,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Backlog **AUD-GUI-007b** (remaining path-browse migrations); next Now = **AUD-TEST-001** (wave 3e). |
 | 2026-07-27 | Wave 3c merged to main; AUD-TEST-001: `test_workbench_behavioral.py`. |
 | 2026-07-27 | Wave 3e continue: path_browse, review render/package load, queue cancel/frame signals, expanded behavioral tests. |
+| 2026-07-27 | Audit git workflow: umbrella `audit/codebase-cleanup` + sub-branches; **AUD-GUI-007b** path-browse migration. |

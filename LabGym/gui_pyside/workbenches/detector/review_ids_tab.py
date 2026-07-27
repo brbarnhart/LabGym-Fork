@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
@@ -305,8 +310,8 @@ class ReviewIdsTab(QWidget):
 
     def _browse_package(self) -> None:
         start = self.review_dir or self.project.project.root_dir or ""
-        d = QFileDialog.getExistingDirectory(
-            self, "Select id_review / tracklets folder", start
+        d = browse_existing_directory(
+            self, start, "Select id_review / tracklets folder"
         )
         if d:
             self.load_package(d)

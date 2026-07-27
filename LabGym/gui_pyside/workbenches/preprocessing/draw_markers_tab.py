@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 from LabGym.gui_pyside.project.paths import list_project_video_choices
 
 
@@ -330,9 +335,7 @@ class DrawMarkersTab(QWidget):
             self._load_frame()
 
     def _browse_out(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Output folder", self.ed_out.text())
-        if d:
-            self.ed_out.setText(d)
+        set_line_edit_directory(self, self.ed_out, caption="Output folder")
 
     def _load_frame(self) -> None:
         path = self.combo_video.currentData()

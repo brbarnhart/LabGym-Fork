@@ -22,6 +22,11 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 
 
 def _discover_behaviors(analysis_root: str) -> List[str]:
@@ -115,13 +120,13 @@ class CalculateDistancesTab(QWidget):
         )
         b_in = QPushButton("Browse…")
         b_in.clicked.connect(self._browse_in)
-        form.addRow("Analysis results folder:", self._row(self.ed_in, b_in))
+        form.addRow("Analysis results folder:", path_edit_row(self.ed_in, b_in))
 
         self.ed_out = QLineEdit()
         self.ed_out.setToolTip("Folder for per-video distance spreadsheets and all_summary.xlsx.")
         b_out = QPushButton("Browse…")
         b_out.clicked.connect(self._browse_out)
-        form.addRow("Output folder:", self._row(self.ed_out, b_out))
+        form.addRow("Output folder:", path_edit_row(self.ed_out, b_out))
         layout.addLayout(form)
 
         layout.addWidget(QLabel("Behaviors to include (multi-select):"))
@@ -144,24 +149,15 @@ class CalculateDistancesTab(QWidget):
         self.log.setMaximumHeight(120)
         layout.addWidget(self.log)
 
-    def _row(self, line: QLineEdit, button: QPushButton) -> QWidget:
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(line, 1)
-        h.addWidget(button)
-        return w
 
     def _browse_in(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select analysis results folder")
-        if d:
-            self.ed_in.setText(d)
+        if set_line_edit_directory(
+            self, self.ed_in, caption="Select analysis results folder"
+        ):
             self._refresh_behaviors()
 
     def _browse_out(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select output folder")
-        if d:
-            self.ed_out.setText(d)
+        set_line_edit_directory(self, self.ed_out, caption="Select output folder")
 
     def _refresh_behaviors(self) -> None:
         root = self.ed_in.text().strip()

@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import path_edit_row, set_line_edit_directory
 
 
 class _TrainWorker(QObject):
@@ -64,13 +65,13 @@ class TrainDetectorTab(QWidget):
             "Folder of all training images referenced by the COCO annotation file."
         )
         b1 = QPushButton("Browse…")
-        b1.clicked.connect(lambda: self._browse_dir(self.ed_images))
+        b1.clicked.connect(lambda: set_line_edit_directory(self, self.ed_images))
         form.addRow(
             self._lab(
                 "Training images folder:",
                 "Directory containing the still frames used for detector training.",
             ),
-            self._row(self.ed_images, b1),
+            path_edit_row(self.ed_images, b1),
         )
 
         self.ed_ann = QLineEdit()
@@ -82,7 +83,7 @@ class TrainDetectorTab(QWidget):
         b2.clicked.connect(lambda: self._browse_file(self.ed_ann, "JSON (*.json)"))
         form.addRow(
             self._lab("COCO annotation JSON:", "Must list the same images as above."),
-            self._row(self.ed_ann, b2),
+            path_edit_row(self.ed_ann, b2),
         )
 
         self.ed_out = QLineEdit()
@@ -91,10 +92,10 @@ class TrainDetectorTab(QWidget):
             "trained detector (weights + config + model_parameters.txt)."
         )
         b3 = QPushButton("Browse…")
-        b3.clicked.connect(lambda: self._browse_dir(self.ed_out))
+        b3.clicked.connect(lambda: set_line_edit_directory(self, self.ed_out))
         form.addRow(
             self._lab("Parent folder for detector:", "Usually the project models/ folder."),
-            self._row(self.ed_out, b3),
+            path_edit_row(self.ed_out, b3),
         )
 
         self.ed_name = QLineEdit("New_detector")
@@ -159,19 +160,7 @@ class TrainDetectorTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-    @staticmethod
-    def _row(edit, btn):
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(edit, 1)
-        h.addWidget(btn)
-        return w
 
-    def _browse_dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder", edit.text())
-        if d:
-            edit.setText(d)
 
     def _browse_file(self, edit: QLineEdit, filt: str) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "Select file", edit.text(), filt)

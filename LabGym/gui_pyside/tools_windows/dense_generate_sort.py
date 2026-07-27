@@ -32,6 +32,10 @@ from LabGym.gui_pyside.tools_windows.dense_backend import (
     run_dense_generate,
     run_manual_sort,
 )
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    set_line_edit_directory,
+)
 
 _VIDEO_FILTER = (
     "Video files (*.avi *.mpg *.mpeg *.mp4 *.mkv *.m4v *.mov *.wmv);;All files (*.*)"
@@ -197,12 +201,12 @@ class DenseGenerateTab(QWidget):
             self.ed_videos.setText(f"{len(paths)} file(s)")
 
     def _browse_dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder")
-        if d:
-            edit.setText(d)
+        set_line_edit_directory(self, edit, caption="Select folder")
 
     def _browse_detector(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select detector folder")
+        d = browse_existing_directory(
+            self, self.ed_detector.text(), "Select detector folder"
+        )
         if not d:
             return
         self.ed_detector.setText(d)
@@ -335,9 +339,7 @@ class DenseSortManualTab(QWidget):
         layout.addWidget(self.log, 1)
 
     def _dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder")
-        if d:
-            edit.setText(d)
+        set_line_edit_directory(self, edit, caption="Select folder")
 
     def _parse_keys(self) -> Dict[str, str]:
         text = self.ed_keys.text().strip()
@@ -445,9 +447,7 @@ class DenseSortFileTab(QWidget):
         layout.addWidget(self.log, 1)
 
     def _dir(self, edit: QLineEdit) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder")
-        if d:
-            edit.setText(d)
+        set_line_edit_directory(self, edit, caption="Select folder")
 
     def _browse_ann(self) -> None:
         p, _ = QFileDialog.getOpenFileName(

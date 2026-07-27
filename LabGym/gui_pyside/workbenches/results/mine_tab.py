@@ -24,6 +24,11 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 
 
 def _read_summary_folder(folder: str) -> Dict[str, Any]:
@@ -142,7 +147,7 @@ class MineResultsTab(QWidget):
         )
         b_in = QPushButton("Browse…")
         b_in.clicked.connect(self._browse_in)
-        form.addRow("Groups parent folder:", self._row(self.ed_in, b_in))
+        form.addRow("Groups parent folder:", path_edit_row(self.ed_in, b_in))
 
         self.chk_paired = QCheckBox("Paired data")
         self.chk_paired.setToolTip(
@@ -161,7 +166,7 @@ class MineResultsTab(QWidget):
         self.ed_out.setToolTip("Folder for data_mining_results.xlsx.")
         b_out = QPushButton("Browse…")
         b_out.clicked.connect(self._browse_out)
-        form.addRow("Output folder:", self._row(self.ed_out, b_out))
+        form.addRow("Output folder:", path_edit_row(self.ed_out, b_out))
 
         self.spin_p = QDoubleSpinBox()
         self.spin_p.setRange(1e-6, 1.0)
@@ -186,16 +191,11 @@ class MineResultsTab(QWidget):
         layout.addWidget(self.log)
         layout.addStretch(1)
 
-    def _row(self, line: QLineEdit, button: QPushButton) -> QWidget:
-        w = QWidget()
-        h = QHBoxLayout(w)
-        h.setContentsMargins(0, 0, 0, 0)
-        h.addWidget(line, 1)
-        h.addWidget(button)
-        return w
 
     def _browse_in(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select parent folder of analysis groups")
+        d = browse_existing_directory(
+            self, self.ed_in.text(), "Select parent folder of analysis groups"
+        )
         if not d:
             return
         self.ed_in.setText(d)
@@ -216,9 +216,9 @@ class MineResultsTab(QWidget):
             self.cmb_control.addItem(n, n)
 
     def _browse_out(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select folder for mining results")
-        if d:
-            self.ed_out.setText(d)
+        set_line_edit_directory(
+            self, self.ed_out, caption="Select folder for mining results"
+        )
 
     def _run(self) -> None:
         if self._thread is not None:

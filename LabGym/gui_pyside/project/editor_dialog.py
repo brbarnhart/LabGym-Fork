@@ -27,6 +27,7 @@ from PySide6.QtWidgets import (
 
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.model import Project, ProjectDefaults, ProjectPaths, ProjectVideo
+from LabGym.gui_pyside.widgets.path_browse import browse_existing_directory
 
 MODE_LABELS = [
     (0, "0 — Non-interactive"),
@@ -173,8 +174,8 @@ class ProjectEditorDialog(QDialog):
         self.list_videos.addItem(item)
 
     def _browse_root(self) -> None:
-        d = QFileDialog.getExistingDirectory(
-            self, "Project root folder", self.ed_root.text() or ""
+        d = browse_existing_directory(
+            self, self.ed_root.text() or "", "Project root folder"
         )
         if d:
             self.ed_root.setText(d)
@@ -206,7 +207,7 @@ class ProjectEditorDialog(QDialog):
 
     def _add_folder(self) -> None:
         start = self.ed_root.text() or ""
-        d = QFileDialog.getExistingDirectory(self, "Folder of videos", start)
+        d = browse_existing_directory(self, start, "Folder of videos")
         if not d:
             return
         exts = {".mp4", ".avi", ".mov", ".mkv", ".mpg", ".mpeg"}

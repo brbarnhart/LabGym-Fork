@@ -23,6 +23,11 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 
 _VIDEO_FILTER = (
     "Video files (*.avi *.mpg *.mpeg *.mp4 *.mkv *.m4v *.mov *.wmv);;All files (*.*)"
@@ -227,9 +232,9 @@ class GenerateImagesTab(QWidget):
         self.ed_videos.setText(f"{n} video(s)" + (f" in {parent}" if parent else ""))
 
     def _browse_out(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select output folder for images")
-        if d:
-            self.ed_out.setText(d)
+        set_line_edit_directory(
+            self, self.ed_out, caption="Select output folder for images"
+        )
 
     def _run(self) -> None:
         if self._thread is not None:
