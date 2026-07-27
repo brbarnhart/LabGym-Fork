@@ -133,3 +133,51 @@ def test_extract_empty_ranges(tmp_path: Path):
     )
     assert result.n_written == 0
     assert "No frames" in result.error
+
+
+def test_extract_cancel_cooperative(tmp_path: Path):
+    video = tmp_path / "clip.mp4"
+    _write_tiny_video(video, n=40, fps=10.0)
+    out = tmp_path / "imgs"
+    calls = {"n": 0}
+
+    def cancel_after_two() -> bool:
+        # Allow two progress ticks then cancel before third frame write completes.
+        return calls["n"] >= 2
+
+    def progress(current, total, msg):
+        calls["n"] = current
+
+    result = extract_hard_case_frames(
+        str(video),
+        str(out),
+        [AnalysisFrameRange(0, 30)],
+        store_meta={"fps": 10.0, "start_t": 0.0},
+        fps=10.0,
+        skip=1,
+        progress_callback=progress,
+        cancel_check=cancel_after_two,
+    )
+    assert result.cancelled
+    assert result.n_written >= 1
+    assert result.n_written < 30
+
+
+def test_hard_case_progress_dialog_constructs():
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    from LabGym.gui_pyside.workbenches.detector.hard_case_progress import (
+        HardCaseProgressDialog,
+    )
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    dlg = HardCaseProgressDialog()
+    dlg.begin_export(10, out_path="/tmp/out", video_label="clip.mp4")
+    dlg.set_frame_progress(3, 10, "[3/10] analysis frame 12")
+    dlg.finish_export(status="Wrote 10 image(s)")
+    assert dlg.bar_frames.value() == 10
+    assert not dlg.is_job_running
+    dlg.close()
+    del app

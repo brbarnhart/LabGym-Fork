@@ -120,6 +120,7 @@ class ExtractHardCaseResult:
     n_failed: int
     paths: List[str]
     error: str = ""
+    cancelled: bool = False
 
 
 def default_output_dir(project_root: Optional[str]) -> str:
@@ -145,11 +146,16 @@ def extract_hard_case_frames(
     framewidth: Optional[int] = None,
     n_frames: Optional[int] = None,
     progress_callback=None,
+    cancel_check=None,
 ) -> ExtractHardCaseResult:
     """Write JPG frames for the given analysis-frame ranges.
 
     Files are written as ``{video_stem}_af{analysis:06d}.jpg`` into *out_path*.
     Existing files with the same name are overwritten.
+
+    *progress_callback*, if set, is called as ``(current, total, message)``.
+    *cancel_check*, if set, is a zero-arg callable returning True to stop early
+    (cooperative; already-written images are kept).
     """
     video_path = str(video_path or "").strip()
     if not video_path or not Path(video_path).is_file():
@@ -172,11 +178,16 @@ def extract_hard_case_frames(
 
     written: List[str] = []
     failed = 0
+    cancelled = False
     try:
         total = len(frames)
         for i, af in enumerate(frames, start=1):
+            if cancel_check is not None and cancel_check():
+                cancelled = True
+                break
+            msg = f"[{i}/{total}] analysis frame {af}"
             if progress_callback is not None:
-                progress_callback(f"[{i}/{total}] analysis frame {af}")
+                progress_callback(i, total, msg)
             v_idx = analysis_frame_to_video_frame(meta, af, fps)
             cap.set(cv2.CAP_PROP_POS_FRAMES, int(v_idx))
             ok, frame = cap.read()
@@ -200,11 +211,28 @@ def extract_hard_case_frames(
     finally:
         cap.release()
 
+    if cancelled:
+        err = ""
+        if not written:
+            err = "Cancelled before any frames were written."
+        return ExtractHardCaseResult(
+            n_written=len(written),
+            n_failed=failed,
+            paths=written,
+            error=err,
+            cancelled=True,
+        )
+
     return ExtractHardCaseResult(
         n_written=len(written),
         n_failed=failed,
         paths=written,
-        error="" if written else (f"Wrote 0 images ({failed} read/write failures)." if failed else ""),
+        error=""
+        if written
+        else (
+            f"Wrote 0 images ({failed} read/write failures)." if failed else ""
+        ),
+        cancelled=False,
     )
 
 

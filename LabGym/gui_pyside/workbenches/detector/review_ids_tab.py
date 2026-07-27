@@ -34,10 +34,14 @@ from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
 )
+from LabGym.gui_pyside.workbenches.detector.hard_case_progress import (
+    HardCaseProgressDialog,
+)
 from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
     AnalysisFrameRange,
     default_output_dir,
     extract_hard_case_frames,
+    frames_to_extract,
 )
 from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
@@ -63,7 +67,7 @@ from LabGym.id_review.types import ContactEvent, SwitchMarker
 class _HardCaseExtractWorker(QObject):
     finished = Signal(object)  # ExtractHardCaseResult
     error = Signal(str)
-    progress = Signal(str)
+    progress = Signal(int, int, str)  # current, total, message
 
     def __init__(
         self,
@@ -85,6 +89,10 @@ class _HardCaseExtractWorker(QObject):
         self.skip = skip
         self.framewidth = framewidth
         self.n_frames = n_frames
+        self._cancel = False
+
+    def request_cancel(self) -> None:
+        self._cancel = True
 
     def run(self) -> None:
         try:
@@ -97,7 +105,8 @@ class _HardCaseExtractWorker(QObject):
                 skip=self.skip,
                 framewidth=self.framewidth,
                 n_frames=self.n_frames,
-                progress_callback=self.progress.emit,
+                progress_callback=lambda c, t, m: self.progress.emit(c, t, m),
+                cancel_check=lambda: self._cancel,
             )
             self.finished.emit(result)
         except Exception as exc:
@@ -134,6 +143,8 @@ class ReviewIdsTab(QWidget):
         self._training_ranges: List[AnalysisFrameRange] = []
         self._range_start: Optional[int] = None
         self._extract_thread: Optional[QThread] = None
+        self._extract_worker: Optional[_HardCaseExtractWorker] = None
+        self._progress_dlg: Optional[HardCaseProgressDialog] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -811,6 +822,17 @@ class ReviewIdsTab(QWidget):
         for r in self._training_ranges:
             self.list_ranges.addItem(r.label(self.fps))
 
+    def _ensure_hard_progress_dialog(self) -> HardCaseProgressDialog:
+        if self._progress_dlg is None:
+            self._progress_dlg = HardCaseProgressDialog(self)
+            self._progress_dlg.cancel_requested.connect(self._cancel_hard_export)
+        return self._progress_dlg
+
+    def _cancel_hard_export(self) -> None:
+        if self._extract_worker is not None:
+            self._extract_worker.request_cancel()
+        self.lbl_hard_status.setText("Cancel requested…")
+
     def _generate_hard_case_images(self) -> None:
         if self._extract_thread is not None:
             QMessageBox.warning(self, "Busy", "Image extraction is already running.")
@@ -842,11 +864,6 @@ class ReviewIdsTab(QWidget):
                 "Select the project video or ensure the package meta points at a file.",
             )
             return
-
-        n_est = 0
-        from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
-            frames_to_extract,
-        )
 
         n_est = len(
             frames_to_extract(
@@ -894,32 +911,57 @@ class ReviewIdsTab(QWidget):
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._clear_hard_thread)
 
+        self._extract_worker = worker
         self._extract_thread = thread
         self.btn_gen_hard.setEnabled(False)
         self.lbl_hard_status.setText("Extracting frames…")
+
+        dlg = self._ensure_hard_progress_dialog()
+        dlg.begin_export(n_est, out_path=out, video_label=Path(str(video)).name)
         thread.start()
 
     def _clear_hard_thread(self) -> None:
         self._extract_thread = None
+        self._extract_worker = None
         if self.review_dir:
             self.btn_gen_hard.setEnabled(True)
         self._render()
 
-    def _on_hard_progress(self, msg: str) -> None:
+    def _on_hard_progress(self, current: int, total: int, msg: str) -> None:
         self.lbl_hard_status.setText(msg)
+        if self._progress_dlg is not None:
+            self._progress_dlg.set_frame_progress(current, total, msg)
 
     def _on_hard_finished(self, result) -> None:
         out = self.ed_hard_out.text().strip()
+        dlg = self._progress_dlg
+
+        if result.cancelled:
+            status = (
+                f"Cancelled after writing {result.n_written} image(s)."
+                + (f" → {out}" if result.n_written and out else "")
+            )
+            self.lbl_hard_status.setText(status)
+            if dlg is not None:
+                dlg.finish_export(cancelled=True, status=status)
+            return
+
         if result.error and not result.n_written:
             self.lbl_hard_status.setText(f"Failed: {result.error}")
+            if dlg is not None:
+                dlg.finish_export(failed=True, status=result.error)
+                dlg.append_log(result.error)
             QMessageBox.critical(self, "Extraction failed", result.error)
             return
+
         msg = (
             f"Wrote {result.n_written} image(s)"
             + (f" ({result.n_failed} failed reads)" if result.n_failed else "")
-            + f"\n→ {out}"
+            + f" → {out}"
         )
-        self.lbl_hard_status.setText(msg.replace("\n", "  "))
+        self.lbl_hard_status.setText(msg)
+        if dlg is not None:
+            dlg.finish_export(status=msg)
         QMessageBox.information(
             self,
             "Training images ready",
@@ -930,6 +972,9 @@ class ReviewIdsTab(QWidget):
 
     def _on_hard_error(self, err: str) -> None:
         self.lbl_hard_status.setText(f"Error: {err}")
+        if self._progress_dlg is not None:
+            self._progress_dlg.finish_export(failed=True, status=err)
+            self._progress_dlg.append_log(err)
         QMessageBox.critical(self, "Extraction failed", err)
 
     def _push_undo(self) -> None:
