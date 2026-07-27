@@ -24,6 +24,7 @@ class _Worker(QObject):
     finished_one = Signal(str, object)  # job_id, result
     failed_one = Signal(str, str)  # job_id, error
     progress = Signal(str, str)  # job_id, message
+    started_one = Signal(str)  # job_id
     queue_finished = Signal()
 
     def __init__(
@@ -45,6 +46,7 @@ class _Worker(QObject):
                 item.status = "cancelled"
                 continue
             item.status = "running"
+            self.started_one.emit(item.job_id)
 
             def _prog(msg: str, jid=item.job_id) -> None:
                 self.progress.emit(jid, msg)
@@ -65,6 +67,7 @@ class SequentialJobQueue(QObject):
     """Run jobs sequentially on a worker thread."""
 
     job_progress = Signal(str, str)
+    job_started = Signal(str)
     job_finished = Signal(str, object)
     job_failed = Signal(str, str)
     queue_finished = Signal()
@@ -92,6 +95,7 @@ class SequentialJobQueue(QObject):
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self.job_progress.emit)
+        self._worker.started_one.connect(self.job_started.emit)
         self._worker.finished_one.connect(self.job_finished.emit)
         self._worker.failed_one.connect(self.job_failed.emit)
         self._worker.queue_finished.connect(self._on_queue_finished)

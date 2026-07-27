@@ -681,12 +681,13 @@ class AnalyzeAnimalDetector():
 						self.track_animal_interact(frame_count_analyze+1-batch_size+batch_count,all_contours,other_contours,all_centers,all_heights,inners=all_inners,other_inners=other_inners,blobs=all_blobs)
 
 
-	def acquire_information(self,batch_size=1,background_free=True,black_background=True,color_costar=False):
+	def acquire_information(self,batch_size=1,background_free=True,black_background=True,color_costar=False,frame_progress=None):
 
 		# batch_size: for batch inferencing by the Detector
 		# background_free: whether to include background in animations
 		# black_background: whether to set background black
 		# color_costar: in 'interactive advanced' mode, whether to make the supporting roles RGB scale in animations
+		# frame_progress: optional callback(current_frame, total_frames) for UI progress
 
 		print('Acquiring information in each frame...')
 		self.log.append('Acquiring information in each frame...')
@@ -697,6 +698,9 @@ class AnalyzeAnimalDetector():
 		batch=[]
 		batch_count=frame_count=frame_count_analyze=0
 		animation=deque([np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8')],maxlen=self.length)*self.length
+		total_frames=int(self.total_analysis_framecount or 0)
+		# Report often enough for a smooth bar without flooding the UI thread.
+		progress_every=max(1, min(30, total_frames//100 or 1))
 
 		start_t=round((self.t-self.length/self.fps),2)
 		if start_t<0:
@@ -739,8 +743,22 @@ class AnalyzeAnimalDetector():
 					batch=[]
 
 				frame_count_analyze+=1
+				if frame_progress is not None and (
+					frame_count_analyze==1
+					or frame_count_analyze%progress_every==0
+				):
+					try:
+						frame_progress(frame_count_analyze,total_frames)
+					except Exception:
+						pass
 
 			frame_count+=1
+
+		if frame_progress is not None and frame_count_analyze>0:
+			try:
+				frame_progress(frame_count_analyze,total_frames or frame_count_analyze)
+			except Exception:
+				pass
 
 		capture.release()
 
@@ -752,11 +770,12 @@ class AnalyzeAnimalDetector():
 		self.log.append('Information acquisition completed!')
 
 
-	def acquire_information_interact_basic(self,batch_size=1,background_free=True,black_background=True):
+	def acquire_information_interact_basic(self,batch_size=1,background_free=True,black_background=True,frame_progress=None):
 
 		# batch_size: for batch inferencing by the Detector
 		# background_free: whether to include background in animations
 		# black_background: whether to set background black
+		# frame_progress: optional callback(current_frame, total_frames) for UI progress
 
 		print('Acquiring information in each frame...')
 		self.log.append('Acquiring information in each frame...')
@@ -786,6 +805,8 @@ class AnalyzeAnimalDetector():
 		temp_contours=deque(maxlen=self.length)
 		temp_inners=deque(maxlen=self.length)
 		animation=deque([np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8')],maxlen=self.length)*self.length
+		total_frames=int(self.total_analysis_framecount or 0)
+		progress_every=max(1, min(30, total_frames//100 or 1))
 
 		start_t=round((self.t-self.length/self.fps),2)
 		if start_t<0:
@@ -911,8 +932,22 @@ class AnalyzeAnimalDetector():
 					batch_count=0
 
 				frame_count_analyze+=1
+				if frame_progress is not None and (
+					frame_count_analyze==1
+					or frame_count_analyze%progress_every==0
+				):
+					try:
+						frame_progress(frame_count_analyze,total_frames)
+					except Exception:
+						pass
 
 			frame_count+=1
+
+		if frame_progress is not None and frame_count_analyze>0:
+			try:
+				frame_progress(frame_count_analyze,total_frames or frame_count_analyze)
+			except Exception:
+				pass
 
 		capture.release()
 

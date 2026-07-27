@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
@@ -16,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -40,6 +42,108 @@ from LabGym.gui_pyside.project.paths import list_project_video_choices
 from LabGym.mypkg_resources import resource_filename
 
 
+class DetectTrackProgressDialog(QDialog):
+    """Pop-out progress for batch detect+track (files + frames in current file)."""
+
+    cancel_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Detect + track progress")
+        self.setMinimumWidth(480)
+        self.setWindowFlag(Qt.WindowType.Window, True)
+
+        layout = QVBoxLayout(self)
+        self.lbl_overall = QLabel("Starting batch…")
+        self.lbl_overall.setWordWrap(True)
+        layout.addWidget(self.lbl_overall)
+
+        self.bar_files = QProgressBar()
+        self.bar_files.setRange(0, 1)
+        self.bar_files.setValue(0)
+        self.bar_files.setFormat("Videos: %v / %m")
+        self.bar_files.setToolTip("How many videos in this batch have finished.")
+        layout.addWidget(self.bar_files)
+
+        self.lbl_current = QLabel("Current video: —")
+        self.lbl_current.setWordWrap(True)
+        layout.addWidget(self.lbl_current)
+
+        self.bar_frames = QProgressBar()
+        self.bar_frames.setRange(0, 0)  # indeterminate until first frame report
+        self.bar_frames.setFormat("Frames: waiting…")
+        self.bar_frames.setToolTip(
+            "Frames processed in the video currently being tracked."
+        )
+        layout.addWidget(self.bar_frames)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setWordWrap(True)
+        self.lbl_status.setStyleSheet("color: #9ab;")
+        layout.addWidget(self.lbl_status)
+
+        self.btn_cancel = QPushButton("Cancel queue")
+        self.btn_cancel.clicked.connect(self.cancel_requested.emit)
+        layout.addWidget(self.btn_cancel)
+        layout.addStretch(1)
+
+        self._n_files = 0
+        self._done_files = 0
+
+    def begin_batch(self, n_files: int) -> None:
+        self._n_files = max(1, int(n_files))
+        self._done_files = 0
+        self.bar_files.setRange(0, self._n_files)
+        self.bar_files.setValue(0)
+        self.bar_files.setFormat(f"Videos: 0 / {self._n_files}")
+        self.lbl_overall.setText(f"Processing {self._n_files} video(s)…")
+        self.bar_frames.setRange(0, 0)
+        self.bar_frames.setFormat("Frames: waiting…")
+        self.lbl_current.setText("Current video: —")
+        self.lbl_status.setText("")
+        self.btn_cancel.setEnabled(True)
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+    def set_current_video(self, label: str, index: int) -> None:
+        # index is 0-based among jobs; show 1-based position
+        self.lbl_current.setText(
+            f"Current video ({index + 1} of {self._n_files}): {label}"
+        )
+        self.bar_frames.setRange(0, 0)
+        self.bar_frames.setFormat("Frames: preparing…")
+        self.lbl_status.setText("Starting…")
+
+    def set_frame_progress(self, current: int, total: int) -> None:
+        current = max(0, int(current))
+        total = max(0, int(total))
+        if total <= 0:
+            self.bar_frames.setRange(0, 0)
+            self.bar_frames.setFormat(f"Frames: {current}…")
+        else:
+            self.bar_frames.setRange(0, total)
+            self.bar_frames.setValue(min(current, total))
+            self.bar_frames.setFormat(f"Frames: {current} / {total} (%p%)")
+
+    def set_status_message(self, msg: str) -> None:
+        self.lbl_status.setText(msg)
+
+    def mark_file_finished(self) -> None:
+        self._done_files = min(self._n_files, self._done_files + 1)
+        self.bar_files.setValue(self._done_files)
+        self.bar_files.setFormat(f"Videos: {self._done_files} / {self._n_files}")
+        self.lbl_overall.setText(
+            f"Completed {self._done_files} of {self._n_files} video(s)."
+        )
+
+    def finish_batch(self) -> None:
+        self.btn_cancel.setEnabled(False)
+        self.lbl_status.setText("Batch finished.")
+        if self.bar_frames.maximum() > 0:
+            self.bar_frames.setValue(self.bar_frames.maximum())
+
+
 class DetectTrackTab(QWidget):
     """Batch detect+track project videos into identity packages."""
 
@@ -51,11 +155,17 @@ class DetectTrackTab(QWidget):
         super().__init__(parent)
         self.project = project
         self.queue = SequentialJobQueue(self)
+        self.queue.job_started.connect(self._on_job_started)
         self.queue.job_progress.connect(self._on_progress)
         self.queue.job_finished.connect(self._on_job_done)
         self.queue.job_failed.connect(self._on_job_fail)
         self.queue.queue_finished.connect(self._on_queue_done)
         self._job_rows: Dict[str, int] = {}
+        # path -> (status, note) so project.changed refreshes do not wipe progress
+        self._status_by_path: Dict[str, Tuple[str, str]] = {}
+        self._job_labels: Dict[str, str] = {}
+        self._job_order: List[str] = []
+        self._progress_dlg: Optional[DetectTrackProgressDialog] = None
 
         layout = QVBoxLayout(self)
 
@@ -376,22 +486,90 @@ class DetectTrackTab(QWidget):
             self.lbl_kinds.setText("—")
 
     def refresh_videos(self) -> None:
+        # Preserve check-state and status across project.changed rebuilds
+        # (completing a job marks the project dirty → this would otherwise
+        # reset every row back to "pending").
+        prev_checked: Dict[str, bool] = {}
+        for r in range(self.table.rowCount()):
+            item0 = self.table.item(r, 0)
+            if not item0:
+                continue
+            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
+            if path:
+                prev_checked[path] = item0.checkState() == Qt.CheckState.Checked
+
         choices = list_project_video_choices(self.project.project)
         self.table.setRowCount(0)
         self.table.setRowCount(len(choices))
+        self._job_rows.clear()
         for r, (label, resolved) in enumerate(choices):
+            path = str(resolved)
             chk = QTableWidgetItem()
             chk.setFlags(
                 Qt.ItemFlag.ItemIsUserCheckable
                 | Qt.ItemFlag.ItemIsEnabled
                 | Qt.ItemFlag.ItemIsSelectable
             )
-            chk.setCheckState(Qt.CheckState.Checked)
-            chk.setData(Qt.ItemDataRole.UserRole, resolved)
+            if path in prev_checked:
+                chk.setCheckState(
+                    Qt.CheckState.Checked
+                    if prev_checked[path]
+                    else Qt.CheckState.Unchecked
+                )
+            else:
+                chk.setCheckState(Qt.CheckState.Checked)
+            chk.setData(Qt.ItemDataRole.UserRole, path)
             self.table.setItem(r, 0, chk)
             self.table.setItem(r, 1, QTableWidgetItem(label))
-            self.table.setItem(r, 2, QTableWidgetItem("pending"))
-            self.table.setItem(r, 3, QTableWidgetItem(""))
+            status, note = self._status_by_path.get(path, ("pending", ""))
+            self.table.setItem(r, 2, QTableWidgetItem(status))
+            self.table.setItem(r, 3, QTableWidgetItem(note))
+            # Rebuild job_id → row for an active queue (same v{r} scheme as start)
+            if self.queue.is_running:
+                jid = f"v{r}"
+                if jid in self._job_labels or path in {
+                    self._path_for_job(j) for j in self._job_order
+                }:
+                    # Prefer mapping by path for stability
+                    pass
+        if self.queue.is_running:
+            self._rebind_job_rows()
+
+    def _path_for_job(self, job_id: str) -> str:
+        for it in self.queue.items:
+            if it.job_id == job_id:
+                return str(it.payload or "")
+        return ""
+
+    def _rebind_job_rows(self) -> None:
+        """Map job_id → table row after a refresh during a running batch."""
+        path_to_row: Dict[str, int] = {}
+        for r in range(self.table.rowCount()):
+            item0 = self.table.item(r, 0)
+            if item0:
+                path_to_row[str(item0.data(Qt.ItemDataRole.UserRole) or "")] = r
+        new_map: Dict[str, int] = {}
+        for jid in self._job_order:
+            path = self._path_for_job(jid)
+            if path in path_to_row:
+                new_map[jid] = path_to_row[path]
+        self._job_rows = new_map
+
+    def _set_status(
+        self, row: int, status: str, note: str = "", *, path: Optional[str] = None
+    ) -> None:
+        if path is None and self.table.item(row, 0):
+            path = str(self.table.item(row, 0).data(Qt.ItemDataRole.UserRole) or "")
+        if path:
+            self._status_by_path[path] = (status, note)
+        if self.table.item(row, 2):
+            self.table.item(row, 2).setText(status)
+        else:
+            self.table.setItem(row, 2, QTableWidgetItem(status))
+        if self.table.item(row, 3):
+            self.table.item(row, 3).setText(note)
+        else:
+            self.table.setItem(row, 3, QTableWidgetItem(note))
 
     def _set_all_checked(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -445,6 +623,8 @@ class DetectTrackTab(QWidget):
 
         items: List[JobItem] = []
         self._job_rows.clear()
+        self._job_labels.clear()
+        self._job_order = []
         for r in range(self.table.rowCount()):
             item0 = self.table.item(r, 0)
             if not item0 or item0.checkState() != Qt.CheckState.Checked:
@@ -452,9 +632,11 @@ class DetectTrackTab(QWidget):
             path = str(item0.data(Qt.ItemDataRole.UserRole))
             jid = f"v{r}"
             self._job_rows[jid] = r
-            self.table.item(r, 2).setText("queued")
-            self.table.item(r, 3).setText("")
-            items.append(JobItem(job_id=jid, label=Path(path).name, payload=path))
+            label = Path(path).name
+            self._job_labels[jid] = label
+            self._job_order.append(jid)
+            self._set_status(r, "queued", "", path=path)
+            items.append(JobItem(job_id=jid, label=label, payload=path))
 
         mode = int(self.combo_mode.currentData())
         n_per = int(self.spin_animals.value())
@@ -487,27 +669,76 @@ class DetectTrackTab(QWidget):
         self.btn_run.setEnabled(False)
         self.btn_cancel.setEnabled(True)
         self.log.append(f"Starting batch: {len(items)} video(s) → {results_root}")
+        self._ensure_progress_dialog()
+        assert self._progress_dlg is not None
+        self._progress_dlg.begin_batch(len(items))
         self.queue.start(items, runner)
+
+    def _ensure_progress_dialog(self) -> DetectTrackProgressDialog:
+        if self._progress_dlg is None:
+            self._progress_dlg = DetectTrackProgressDialog(self)
+            self._progress_dlg.cancel_requested.connect(self.queue.cancel)
+        return self._progress_dlg
+
+    def _on_job_started(self, job_id: str) -> None:
+        row = self._job_rows.get(job_id)
+        path = self._path_for_job(job_id)
+        label = self._job_labels.get(job_id, path or job_id)
+        if row is not None:
+            self._set_status(row, "running", "Starting…", path=path or None)
+        dlg = self._progress_dlg
+        if dlg is not None:
+            try:
+                idx = self._job_order.index(job_id)
+            except ValueError:
+                idx = 0
+            dlg.set_current_video(label, idx)
 
     def _on_progress(self, job_id: str, msg: str) -> None:
         row = self._job_rows.get(job_id)
-        if row is not None and self.table.item(row, 2):
-            self.table.item(row, 2).setText("running")
-            self.table.item(row, 3).setText(msg[:200])
+        path = self._path_for_job(job_id) or None
+        dlg = self._progress_dlg
+
+        if msg.startswith("__frame__:"):
+            parts = msg.split(":")
+            try:
+                current = int(parts[1])
+                total = int(parts[2]) if len(parts) > 2 else 0
+            except (IndexError, ValueError):
+                return
+            note = f"frames {current}/{total}" if total else f"frames {current}"
+            if row is not None:
+                self._set_status(row, "running", note, path=path)
+            if dlg is not None:
+                dlg.set_frame_progress(current, total)
+                dlg.set_status_message(note)
+            return
+
+        if row is not None:
+            self._set_status(row, "running", msg[:200], path=path)
+        if dlg is not None:
+            dlg.set_status_message(msg[:300])
         self.log.append(f"[{job_id}] {msg}")
 
     def _on_job_done(self, job_id: str, result: object) -> None:
         row = self._job_rows.get(job_id)
+        path = self._path_for_job(job_id) or None
+        if self._progress_dlg is not None:
+            self._progress_dlg.mark_file_finished()
+
         if not isinstance(result, DetectTrackResult):
+            if row is not None:
+                self._set_status(row, "done", "finished", path=path)
             return
         if row is not None:
             if result.ok:
-                self.table.item(row, 2).setText("done")
-                self.table.item(row, 3).setText(result.id_review_dir or result.results_path)
+                note = result.id_review_dir or result.results_path
+                self._set_status(row, "done", note, path=path or result.video_path)
                 self._register_detection_dir(result)
             else:
-                self.table.item(row, 2).setText("error")
-                self.table.item(row, 3).setText(result.error[:200])
+                self._set_status(
+                    row, "error", result.error[:200], path=path or result.video_path
+                )
         self.log.append(
             f"[{job_id}] "
             + (
@@ -519,9 +750,11 @@ class DetectTrackTab(QWidget):
 
     def _on_job_fail(self, job_id: str, error: str) -> None:
         row = self._job_rows.get(job_id)
+        path = self._path_for_job(job_id) or None
+        if self._progress_dlg is not None:
+            self._progress_dlg.mark_file_finished()
         if row is not None:
-            self.table.item(row, 2).setText("error")
-            self.table.item(row, 3).setText(error[:200])
+            self._set_status(row, "error", error[:200], path=path)
         self.log.append(f"[{job_id}] FAIL: {error}")
 
     def _register_detection_dir(self, result: DetectTrackResult) -> None:
@@ -553,8 +786,29 @@ class DetectTrackTab(QWidget):
         self.btn_cancel.setEnabled(False)
         self.log.append("Batch finished.")
         self.batch_finished.emit()
-        n_ok = sum(1 for it in self.queue.items if it.status == "done")
-        n_err = sum(1 for it in self.queue.items if it.status == "error")
+        if self._progress_dlg is not None:
+            self._progress_dlg.finish_batch()
+        n_ok = 0
+        n_err = 0
+        for it in self.queue.items:
+            if it.status == "error":
+                n_err += 1
+            elif it.status == "done":
+                res = it.result
+                if isinstance(res, DetectTrackResult) and not res.ok:
+                    n_err += 1
+                else:
+                    n_ok += 1
+            elif it.status == "cancelled":
+                pass
+        # Reflect cancelled leftovers in the table
+        for it in self.queue.items:
+            if it.status == "cancelled":
+                row = self._job_rows.get(it.job_id)
+                if row is not None:
+                    self._set_status(
+                        row, "cancelled", "", path=str(it.payload or "") or None
+                    )
         QMessageBox.information(
             self,
             "Detect + track",
