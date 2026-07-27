@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import cv2
-import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QImage, QKeySequence, QPixmap, QShortcut
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -20,8 +18,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSlider,
     QSplitter,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -31,28 +27,24 @@ from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
 )
+from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
+from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+    clone_markers,
+    events_for_kind,
+    load_review_package,
+    resolve_video_path,
+    save_review_package,
+)
+from LabGym.gui_pyside.workbenches.detector.review_ids_render import (
+    VideoCaptureCache,
+    bgr_to_qpixmap,
+    compose_preview_frame,
+    format_frame_status,
+    read_preview_frame,
+)
 from LabGym.gui_pyside.workbenches.detector.risk_timeline import RiskTimeline
 from LabGym.gui_pyside.workbenches.detector.subjects_table import SubjectsTable
-from LabGym.identity.package import (
-    SubjectRecord,
-    apply_decisions_and_save_tracklets,
-    clone_store,
-    load_subjects,
-    save_subjects,
-    subjects_from_track_ids,
-)
-from LabGym.id_review.dataset import (
-    finalize_switch_annotations,
-    load_events,
-    load_switches,
-    make_swap_marker,
-)
-from LabGym.id_review.samples import (
-    analysis_frame_to_video_frame,
-    detections_at_frame_after_markers,
-    draw_detections_overlay,
-)
-from LabGym.id_review.tracklets import load_tracklets
+from LabGym.id_review.dataset import make_swap_marker
 from LabGym.id_review.types import ContactEvent, SwitchMarker
 
 
@@ -72,8 +64,7 @@ class ReviewIdsTab(QWidget):
         self._undo_stack: List[List[SwitchMarker]] = []
         self._stores: Dict[str, object] = {}
         self._baseline_stores: Dict[str, object] = {}
-        self._cap: Optional[cv2.VideoCapture] = None
-        self._cap_path: Optional[str] = None
+        self._cap = VideoCaptureCache()
         self._playing = False
         self._updating = False
         self.frame = 0
@@ -105,7 +96,6 @@ class ReviewIdsTab(QWidget):
         help_txt.setWordWrap(True)
         root.addWidget(help_txt)
 
-        # Package / video picker
         pick = QHBoxLayout()
         pick.addWidget(QLabel("Project video:"))
         self.combo_video = QComboBox()
@@ -131,7 +121,6 @@ class ReviewIdsTab(QWidget):
 
         split = QSplitter(Qt.Orientation.Horizontal)
 
-        # --- left: video + transport ---
         left = QWidget()
         left_l = QVBoxLayout(left)
         left_l.setContentsMargins(0, 0, 0, 0)
@@ -229,19 +218,14 @@ class ReviewIdsTab(QWidget):
 
         split.addWidget(left)
 
-        # --- right: markers + subjects ---
         right = QWidget()
         right_l = QVBoxLayout(right)
         right_l.setContentsMargins(0, 0, 0, 0)
 
-        right_l.addWidget(QLabel("Switch markers"))
-        self.marker_table = QTableWidget(0, 5)
-        self.marker_table.setHorizontalHeaderLabels(
-            ["ID", "Frame", "Time (s)", "IDs", "Linked risk"]
-        )
-        self.marker_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.markers_panel = MarkersTable()
+        self.marker_table = self.markers_panel.table  # used by setEnabled_controls
         self.marker_table.cellDoubleClicked.connect(self._on_marker_activated)
-        right_l.addWidget(self.marker_table, 1)
+        right_l.addWidget(self.markers_panel, 1)
 
         subj_box = QGroupBox("Names / roles (saved as subjects.json)")
         subj_l = QVBoxLayout(subj_box)
@@ -251,7 +235,9 @@ class ReviewIdsTab(QWidget):
         right_l.addWidget(subj_box, 1)
 
         save_row = QHBoxLayout()
-        self.btn_save = QPushButton("Save package (switches + remapped tracklets + subjects)")
+        self.btn_save = QPushButton(
+            "Save package (switches + remapped tracklets + subjects)"
+        )
         self.btn_save.setToolTip(
             "Finalize switch markers, re-save corrected tracklets from original "
             "geometry, write subjects.json"
@@ -298,8 +284,7 @@ class ReviewIdsTab(QWidget):
     # --- package load ---
 
     def refresh_video_list(self) -> None:
-        # mark_dirty (e.g. after saving detection_dir) emits project.changed —
-        # preserve the selected video so the combo does not jump to the first row.
+        # mark_dirty emits project.changed — preserve the selected video.
         current = self.combo_video.currentData()
         self.combo_video.blockSignals(True)
         self.combo_video.clear()
@@ -342,16 +327,20 @@ class ReviewIdsTab(QWidget):
             )
             return
         self.project.set_current_video(str(path), dirty=True)
-        # Remember detection dir on the video entry when possible
-        entry = None
         from LabGym.gui_pyside.project.paths import find_video_entry
 
         entry = find_video_entry(self.project.project, str(path))
         if entry is not None:
             try:
-                rel = str(Path(tracks).resolve().relative_to(
-                    Path(self.project.project.root_dir).resolve()
-                )) if self.project.project.root_dir else tracks
+                rel = (
+                    str(
+                        Path(tracks)
+                        .resolve()
+                        .relative_to(Path(self.project.project.root_dir).resolve())
+                    )
+                    if self.project.project.root_dir
+                    else tracks
+                )
             except (ValueError, OSError):
                 rel = tracks
             if entry.detection_dir != rel:
@@ -360,55 +349,26 @@ class ReviewIdsTab(QWidget):
         self.load_package(tracks)
 
     def load_package(self, review_dir: str) -> bool:
-        review_dir = str(Path(review_dir).resolve())
-        if not Path(review_dir).is_dir():
-            QMessageBox.warning(self, "Review IDs", f"Not a folder:\n{review_dir}")
-            return False
-
         self._release_cap()
-        self.review_dir = review_dir
-        self.events = load_events(review_dir)
-        self.markers = load_switches(review_dir)
-        self._undo_stack.clear()
-        self._stores.clear()
-        self._baseline_stores.clear()
-
-        # Load tracklets
-        from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
-
-        kinds = discover_tracklet_kinds(review_dir)
-        if not kinds:
-            QMessageBox.warning(
-                self,
-                "Review IDs",
-                f"No *_tracklets_meta.json in:\n{review_dir}",
-            )
+        try:
+            pkg = load_review_package(review_dir)
+        except (FileNotFoundError, ValueError) as exc:
+            QMessageBox.warning(self, "Review IDs", str(exc))
             self.setEnabled_controls(False)
             return False
 
-        from LabGym.id_review.apply import read_tracklets_identity_status
-
-        status = read_tracklets_identity_status(review_dir)
-        self._already_corrected = bool(status.get("corrected"))
-
-        for kind in kinds:
-            store = load_tracklets(review_dir, kind)
-            self._stores[kind] = store
-            self._baseline_stores[kind] = clone_store(store)
-
-        # Prefer kind with most ids
-        self.animal_kind = max(
-            self._stores.keys(),
-            key=lambda k: (len(self._stores[k].ids), self._stores[k].n_frames),
-        )
+        self.review_dir = pkg.review_dir
+        self.events = pkg.events
+        self.markers = pkg.markers
+        self._undo_stack.clear()
+        self._stores = pkg.stores
+        self._baseline_stores = pkg.baseline_stores
+        self._already_corrected = pkg.already_corrected
+        self.animal_kind = pkg.animal_kind
+        self.n_frames = pkg.n_frames
         store = self._stores[self.animal_kind]
-        self.n_frames = max(1, store.n_frames)
         self.involved_ids = list(store.ids)
-        self.fps = float(
-            store.meta.get("fps")
-            or (self.events[0].fps if self.events else 10)
-            or 10
-        )
+        self.fps = pkg.fps
         self.frame = 0
         self._dirty = False
 
@@ -419,17 +379,11 @@ class ReviewIdsTab(QWidget):
         self.kind_combo.blockSignals(False)
         self._refresh_id_combos()
 
-        # Subjects table
-        recs = load_subjects(review_dir)
-        if not recs:
-            kind_ids = {k: list(s.ids) for k, s in self._stores.items()}
-            recs = subjects_from_track_ids(kind_ids)
-        self.subjects_table.set_subjects(recs)
-
+        self.subjects_table.set_subjects(pkg.subjects)
         self.slider.setMaximum(max(0, self.n_frames - 1))
         self.setEnabled_controls(True)
         corr = "corrected" if self._already_corrected else "not yet remapped on disk"
-        self.lbl_pkg.setText(f"Package: {review_dir}  ·  tracklets: {corr}")
+        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  tracklets: {corr}")
         self._seek(0)
         self._refresh_marker_list()
         self._update_undo_button()
@@ -464,44 +418,22 @@ class ReviewIdsTab(QWidget):
     def _primary_store(self):
         return self._stores.get(self.animal_kind)
 
-    def _video_meta(self) -> Tuple[Optional[str], dict, float, Optional[int]]:
+    def _video_meta(self):
         store = self._primary_store()
         meta = dict(store.meta) if store else {}
         if self.events and self.events[0].video:
             meta.setdefault("video", self.events[0].video)
-        video = meta.get("video")
-        # Resolve relative video paths against review_dir / project
-        if video and not Path(str(video)).is_file():
-            candidates = [
-                Path(self.review_dir) / video,
-                Path(self.review_dir).parent / Path(video).name,
-            ]
-            cur = self.project.current_video_path()
-            if cur:
-                candidates.insert(0, Path(cur))
-            for c in candidates:
-                if c.is_file():
-                    video = str(c)
-                    break
+        video = resolve_video_path(
+            self.review_dir,
+            meta,
+            self.events,
+            self.project.current_video_path(),
+        )
         fps = float(meta.get("fps") or self.fps or 10)
-        return video, meta, fps, meta.get("framewidth")
-
-    def _ensure_cap(self, path: str) -> bool:
-        if self._cap is not None and self._cap_path == path:
-            return True
-        self._release_cap()
-        cap = cv2.VideoCapture(path)
-        if not cap.isOpened():
-            return False
-        self._cap = cap
-        self._cap_path = path
-        return True
+        return video, meta, fps
 
     def _release_cap(self) -> None:
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
-            self._cap_path = None
+        self._cap.release()
 
     def _stop_play(self) -> None:
         self._playing = False
@@ -547,81 +479,56 @@ class ReviewIdsTab(QWidget):
         self._seek(self.frame + 1)
 
     def _render(self) -> None:
-        video, meta, fps, fw = self._video_meta()
+        video, meta, fps = self._video_meta()
         self.fps = fps
         t = self.frame / fps if fps else 0.0
         store = self._primary_store()
 
-        if not video or not self._ensure_cap(str(video)):
+        frame, v_idx, err = read_preview_frame(
+            self._cap,
+            video_path=str(video) if video else "",
+            store_meta=meta,
+            analysis_frame=self.frame,
+            fps=fps,
+        )
+        if frame is None:
             self.status.setText(
-                f"Frame {self.frame}/{self.n_frames - 1}  t={t:.2f}s  |  "
-                f"video unavailable: {video}"
+                f"Frame {self.frame}/{self.n_frames - 1}  t={t:.2f}s  |  {err or 'no video'}"
             )
             self.video_label.setText("(no video)")
             return
 
-        v_idx = analysis_frame_to_video_frame(meta, self.frame, fps)
-        self._cap.set(cv2.CAP_PROP_POS_FRAMES, v_idx)
-        ok, frame = self._cap.read()
-        if not ok or frame is None:
-            self.status.setText(f"Failed to read video frame {v_idx}")
-            return
-        if fw is not None:
-            try:
-                fw = int(fw)
-                h, w = frame.shape[:2]
-                if w != fw and fw > 0:
-                    frame = cv2.resize(
-                        frame, (fw, int(h * fw / w)), interpolation=cv2.INTER_AREA
-                    )
-            except Exception:
-                pass
-
-        applied = [
-            m
-            for m in self.markers
-            if m.frame <= self.frame and m.animal_kind == self.animal_kind
-        ]
-        if store is not None:
-            # If tracklets already remapped on disk, do not re-apply markers for preview
-            # (would double-swap). Otherwise preview remaps from markers.
-            if self._already_corrected:
-                dets = detections_at_frame_after_markers(store, self.frame, [])
-            else:
-                dets = detections_at_frame_after_markers(store, self.frame, applied)
-            frame = draw_detections_overlay(
-                frame,
-                dets,
-                highlight_ids=self._selected_swap_ids(),
-                frame_idx=self.frame,
-                n_markers_applied=0 if self._already_corrected else len(applied),
-            )
-
+        frame, n_prev = compose_preview_frame(
+            frame,
+            store=store,
+            markers=self.markers,
+            animal_kind=self.animal_kind,
+            analysis_frame=self.frame,
+            already_corrected=self._already_corrected,
+            highlight_ids=self._selected_swap_ids(),
+        )
         n_risk = sum(
-            1 for e in self._events_for_kind() if e.start_frame <= self.frame <= e.end_frame
+            1
+            for e in events_for_kind(self.events, self.animal_kind)
+            if e.start_frame <= self.frame <= e.end_frame
         )
         self.status.setText(
-            f"Analysis frame {self.frame}/{self.n_frames - 1}  |  t={t:.2f}s  |  "
-            f"video f={v_idx}  |  switches={len(self.markers)}  |  "
-            f"in risk={bool(n_risk)}  |  preview markers={len(applied)}"
+            format_frame_status(
+                analysis_frame=self.frame,
+                n_frames=self.n_frames,
+                t_sec=t,
+                video_idx=v_idx,
+                n_markers=len(self.markers),
+                in_risk=bool(n_risk),
+                n_preview_markers=n_prev,
+            )
         )
-        self._set_bgr_image(frame)
-
-    def _set_bgr_image(self, arr: np.ndarray, max_w=900, max_h=540) -> None:
-        rgb = cv2.cvtColor(arr, cv2.COLOR_BGR2RGB)
-        h, w = rgb.shape[:2]
-        scale = min(max_w / w, max_h / h, 1.0)
-        nw, nh = max(1, int(w * scale)), max(1, int(h * scale))
-        rgb = np.ascontiguousarray(
-            cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
-        )
-        qimg = QImage(rgb.data, nw, nh, nw * 3, QImage.Format.Format_RGB888).copy()
-        self.video_label.setPixmap(QPixmap.fromImage(qimg))
+        self.video_label.setPixmap(bgr_to_qpixmap(frame))
 
     # --- markers ---
 
     def _events_for_kind(self) -> List[ContactEvent]:
-        return [e for e in self.events if e.animal_kind == self.animal_kind]
+        return events_for_kind(self.events, self.animal_kind)
 
     def _refresh_timeline(self) -> None:
         self.timeline.set_data(
@@ -632,11 +539,8 @@ class ReviewIdsTab(QWidget):
             min_risk=self.min_risk,
         )
 
-    def _snapshot_markers(self) -> List[SwitchMarker]:
-        return [SwitchMarker.from_dict(m.to_dict()) for m in self.markers]
-
     def _push_undo(self) -> None:
-        self._undo_stack.append(self._snapshot_markers())
+        self._undo_stack.append(clone_markers(self.markers))
         if len(self._undo_stack) > 50:
             self._undo_stack = self._undo_stack[-50:]
         self._update_undo_button()
@@ -656,19 +560,7 @@ class ReviewIdsTab(QWidget):
         self._update_undo_button()
 
     def _refresh_marker_list(self) -> None:
-        self.marker_table.setRowCount(0)
-        rows = sorted(self.markers, key=lambda x: x.frame)
-        self.marker_table.setRowCount(len(rows))
-        for i, m in enumerate(rows):
-            self.marker_table.setItem(i, 0, QTableWidgetItem(m.marker_id))
-            self.marker_table.setItem(i, 1, QTableWidgetItem(str(m.frame)))
-            self.marker_table.setItem(
-                i, 2, QTableWidgetItem(f"{m.time_sec:.2f}" if m.time_sec is not None else "")
-            )
-            self.marker_table.setItem(
-                i, 3, QTableWidgetItem(",".join(str(x) for x in m.involved_ids))
-            )
-            self.marker_table.setItem(i, 4, QTableWidgetItem(m.linked_event_id or ""))
+        self.markers_panel.set_markers(self.markers)
 
     def _mark_swap(self) -> None:
         if not self.review_dir:
@@ -717,8 +609,8 @@ class ReviewIdsTab(QWidget):
         self._apply_marker_change()
 
     def _delete_selected_marker(self) -> None:
-        rows = sorted({i.row() for i in self.marker_table.selectedIndexes()})
-        if not rows:
+        mid = self.markers_panel.selected_marker_id()
+        if not mid:
             if self._remove_at_current_frame(silent_if_none=True):
                 return
             QMessageBox.information(
@@ -727,7 +619,6 @@ class ReviewIdsTab(QWidget):
                 "Select a marker in the list, or move to a marked frame and remove.",
             )
             return
-        mid = self.marker_table.item(rows[0], 0).text()
         self._push_undo()
         self.markers = [m for m in self.markers if m.marker_id != mid]
         self._apply_marker_change()
@@ -758,9 +649,8 @@ class ReviewIdsTab(QWidget):
         self._apply_marker_change()
 
     def _on_marker_activated(self, row: int, _col: int) -> None:
-        try:
-            f = int(self.marker_table.item(row, 1).text())
-        except (ValueError, AttributeError):
+        f = self.markers_panel.frame_at_row(row)
+        if f is None:
             return
         self._stop_play()
         self._seek(f)
@@ -808,52 +698,34 @@ class ReviewIdsTab(QWidget):
             QMessageBox.information(self, "Save", "Load a package first.")
             return
         self._stop_play()
-        try:
-            decisions = finalize_switch_annotations(
-                self.review_dir,
-                self.markers,
-                events=self.events,
-                export_samples=True,
-            )
-            n = 0
-            remap_note = ""
-            if not self._already_corrected:
-                n = apply_decisions_and_save_tracklets(
-                    self.review_dir,
-                    decisions,
-                    baseline_stores=self._baseline_stores,
-                    source="pyside_id_review",
-                )
-                self._already_corrected = True
-                # After first remap, live stores match corrected disk; refresh clones
-                for kind in list(self._stores.keys()):
-                    self._stores[kind] = load_tracklets(self.review_dir, kind)
-                    self._baseline_stores[kind] = clone_store(self._stores[kind])
-                remap_note = f"Remap applications: {n}\n"
-            else:
-                remap_note = (
-                    "Tracklets already corrected — skipped re-apply "
-                    "(subjects + switches updated).\n"
-                )
-            subjects = self.subjects_table.get_subjects()
-            save_subjects(self.review_dir, subjects)
-            self._dirty = False
-            self.lbl_pkg.setText(
-                f"Package: {self.review_dir}  ·  tracklets: corrected"
-            )
-            self.package_saved.emit(self.review_dir)
-            QMessageBox.information(
-                self,
-                "Saved",
-                f"Saved identity package:\n{self.review_dir}\n\n"
-                f"Switches: {len(self.markers)}\n"
-                f"{remap_note}"
-                f"Subjects: {len(subjects)}\n\n"
-                "Annotate ethogram will pick up names/colors on next load.",
-            )
-            self._render()
-        except Exception as exc:
-            QMessageBox.critical(self, "Save failed", str(exc))
+        result = save_review_package(
+            self.review_dir,
+            self.markers,
+            self.events,
+            self.subjects_table.get_subjects(),
+            already_corrected=self._already_corrected,
+            baseline_stores=self._baseline_stores,
+        )
+        if not result.ok:
+            QMessageBox.critical(self, "Save failed", result.error)
+            return
+        self._already_corrected = result.already_corrected
+        if result.stores:
+            self._stores = result.stores
+            self._baseline_stores = result.baseline_stores
+        self._dirty = False
+        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  tracklets: corrected")
+        self.package_saved.emit(self.review_dir)
+        QMessageBox.information(
+            self,
+            "Saved",
+            f"Saved identity package:\n{self.review_dir}\n\n"
+            f"Switches: {len(self.markers)}\n"
+            f"{result.remap_note}"
+            f"Subjects: {result.n_subjects}\n\n"
+            "Annotate ethogram will pick up names/colors on next load.",
+        )
+        self._render()
 
     def closeEvent(self, event) -> None:
         self._stop_play()
