@@ -421,7 +421,7 @@ No `--legacy-wx` / wxPython dependency (migration complete).
 
 ### Next Now
 
-7. **AUD-TEST-002** — Optional integration/smoke suite (still light; unit layer is the main 3e investment).  
+7. ~~**AUD-TEST-002**~~ — **Done** on `audit/test-002-smoke` → `audit/codebase-cleanup`: `tests/integration/test_workbench_smoke.py` (+ fixtures).  
 8. **AUD-ANN-002** — Annotator export/schema regressions when bugs appear.  
 
 ### Later
@@ -474,7 +474,7 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 0 Inventory | **Done** (this doc §1) |
 | 1 Findings draft | **Done** (this doc §3; may grow) |
 | 2 Prioritization with owner | Wave 3b + follow-up accepted |
-| 3 Implementation waves | 3a–3c on main; **3e unit/behavioral tests expanded** (TEST-002 optional next) |
+| 3 Implementation waves | 3a–3e unit on main; **TEST-002 smoke** on audit umbrella; remaining slices via sub-branches |
 
 ---
 
@@ -492,3 +492,4 @@ Each wave: branch off `main` → small PR → smoke relevant workbench path → 
 | 2026-07-27 | Wave 3c merged to main; AUD-TEST-001: `test_workbench_behavioral.py`. |
 | 2026-07-27 | Wave 3e continue: path_browse, review render/package load, queue cancel/frame signals, expanded behavioral tests. |
 | 2026-07-27 | Audit git workflow: umbrella `audit/codebase-cleanup` + sub-branches; **AUD-GUI-007b** path-browse migration. |
+| 2026-07-27 | **AUD-TEST-002**: integration smoke suite under `tests/integration/`. |
