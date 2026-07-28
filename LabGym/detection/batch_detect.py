@@ -76,13 +76,107 @@ class DetectTrackResult:
         return asdict(self)
 
 
+def _looks_like_categorizer_parameters(raw: str) -> bool:
+    """True when *raw* is LabGym categorizer CSV-style model_parameters.txt."""
+    head = (raw or "")[:200].lstrip("\ufeff").lower()
+    if not head:
+        return False
+    # Categorizer header row: classnames,dim_tconv,dim_conv,...,network,...
+    first_line = head.splitlines()[0] if head else ""
+    if "classnames" in first_line and (
+        "network" in first_line or "time_step" in first_line or "dim_tconv" in first_line
+    ):
+        return True
+    if first_line.startswith("classnames,"):
+        return True
+    return False
+
+
+def _read_detector_parameters_json(detector_path: str | Path) -> dict:
+    """Load and validate JSON model_parameters for a detector folder."""
+    root = Path(detector_path)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Detector folder not found: {root}")
+
+    params = root / "model_parameters.txt"
+    if not params.is_file():
+        raise FileNotFoundError(
+            f"Not a LabGym detector folder (missing model_parameters.txt):\n{root}"
+        )
+
+    raw = params.read_text(encoding="utf-8", errors="replace")
+    if _looks_like_categorizer_parameters(raw):
+        raise ValueError(
+            "This folder is a LabGym *categorizer* (behavior model), not a "
+            "detector.\n\n"
+            f"{root}\n\n"
+            "Detect + track needs a detector folder that contains:\n"
+            "  • model_final.pth\n"
+            "  • config.yaml\n"
+            "  • model_parameters.txt (JSON with animal_names)\n\n"
+            "Categorizers use model.keras + a CSV model_parameters.txt and belong "
+            "under Categorizer → Process videos."
+        )
+
+    stripped = raw.strip()
+    if not stripped:
+        raise ValueError(f"Empty model_parameters.txt in detector folder:\n{params}")
+
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "Could not parse detector model_parameters.txt as JSON.\n"
+            f"{params}\n\n"
+            f"Parse error: {exc}\n\n"
+            "If this folder is a categorizer, select a detector instead "
+            "(Mask R-CNN folder with model_final.pth + config.yaml)."
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"Detector model_parameters.txt must be a JSON object:\n{params}"
+        )
+    return data
+
+
+def validate_detector_folder(
+    detector_path: str | Path, *, require_weights: bool = True
+) -> Path:
+    """Ensure *detector_path* is a LabGym detector (not a categorizer).
+
+    Returns the folder path. Raises ``FileNotFoundError`` / ``ValueError`` with
+    a user-facing explanation.
+    """
+    root = Path(detector_path)
+    _read_detector_parameters_json(root)
+
+    if require_weights:
+        missing = [
+            name
+            for name in ("model_final.pth", "config.yaml")
+            if not (root / name).is_file()
+        ]
+        if missing:
+            raise ValueError(
+                "Detector folder is incomplete (missing "
+                + ", ".join(missing)
+                + f"):\n{root}\n\n"
+                "A trained LabGym detector needs model_final.pth, config.yaml, and "
+                "JSON model_parameters.txt."
+            )
+    return root
+
+
 def load_detector_animal_kinds(detector_path: str | Path) -> List[str]:
-    """Read animal category names from a LabGym detector folder."""
-    path = Path(detector_path) / "model_parameters.txt"
-    if not path.is_file():
-        raise FileNotFoundError(f"Detector parameters not found: {path}")
-    raw = path.read_text(encoding="utf-8")
-    data = json.loads(raw)
+    """Read animal category names from a LabGym detector folder.
+
+    Validates that the folder is not a categorizer and that parameters are JSON.
+    Does not require weights files (use :func:`validate_detector_folder` before run).
+    """
+    root = Path(detector_path)
+    data = _read_detector_parameters_json(root)
+    path = root / "model_parameters.txt"
     names = data.get("animal_names") or []
     if not names:
         mapping = data.get("animal_mapping") or {}
@@ -92,16 +186,31 @@ def load_detector_animal_kinds(detector_path: str | Path) -> List[str]:
     return [str(n) for n in names]
 
 
+def is_detector_folder(path: str | Path, *, require_weights: bool = True) -> bool:
+    """Return True if *path* looks like a usable LabGym detector folder."""
+    try:
+        if require_weights:
+            validate_detector_folder(path, require_weights=True)
+            load_detector_animal_kinds(path)
+        else:
+            load_detector_animal_kinds(path)
+        return True
+    except (OSError, ValueError, json.JSONDecodeError, TypeError):
+        return False
+
+
 def list_detectors(models_root: str | Path) -> List[Path]:
-    """Find detector folders (contain model_parameters.txt) under a root."""
+    """Find detector folders under a root (excludes categorizer folders)."""
     root = Path(models_root)
     if not root.is_dir():
         return []
     found: List[Path] = []
     for dirpath, _dirnames, filenames in os.walk(root):
-        if "model_parameters.txt" in filenames:
-            found.append(Path(dirpath))
-    # also one level of LabGym bundled detectors if models_root is empty
+        if "model_parameters.txt" not in filenames:
+            continue
+        p = Path(dirpath)
+        if is_detector_folder(p, require_weights=True):
+            found.append(p)
     return sorted(found)
 
 
@@ -132,13 +241,15 @@ def detect_and_track_video(
             error=f"Video not found: {video}",
             log=log,
         )
-    if not Path(config.detector_path).is_dir():
+    try:
+        validate_detector_folder(config.detector_path)
+    except (OSError, ValueError) as exc:
         return DetectTrackResult(
             video_path=str(video),
             results_path="",
             id_review_dir="",
             ok=False,
-            error=f"Detector folder not found: {config.detector_path}",
+            error=str(exc),
             log=log,
         )
 
@@ -211,6 +322,7 @@ def detect_and_track_video(
                 background_free=bool(config.background_free),
                 black_background=bool(config.black_background),
                 frame_progress=frame_progress,
+                status_progress=_prog,
             )
         else:
             aad.acquire_information(
@@ -219,6 +331,7 @@ def detect_and_track_video(
                 black_background=bool(config.black_background),
                 color_costar=bool(config.color_costar),
                 frame_progress=frame_progress,
+                status_progress=_prog,
             )
         if int(config.behavior_mode) != 1:
             _prog("Crafting track data…")
