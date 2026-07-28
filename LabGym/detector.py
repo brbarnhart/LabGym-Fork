@@ -47,12 +47,30 @@ class Detector():
 		self.current_detector=None # the current Detector used for inference
 
 
-	def train(self,path_to_annotation,path_to_trainingimages,path_to_detector,iteration_num,inference_size):
+	def train(
+		self,
+		path_to_annotation,
+		path_to_trainingimages,
+		path_to_detector,
+		iteration_num,
+		inference_size,
+		init_from_detector=None,
+		base_lr=None,
+	):
 
 		# path_to_annotation: the path to the .json file that stores the annotations in coco format
 		# path_to_trainingimages: the folder that stores all the training images
 		# iteration_num: the number of training iterations
 		# inference_size: the Detector inferencing frame size
+		# init_from_detector: optional existing LabGym detector folder to warm-start
+		#   from (model_final.pth). Categories must match the annotation file.
+		# base_lr: optional solver base learning rate (defaults: 0.001 from COCO,
+		#   0.0001 when continuing from a detector)
+
+		from LabGym.detection.continue_train import (
+			DEFAULT_BASE_LR,
+			plan_continue_training,
+		)
 
 		if str('LabGym_detector_train') in DatasetCatalog.list():
 			DatasetCatalog.remove('LabGym_detector_train')
@@ -76,18 +94,39 @@ class Detector():
 
 		print('Animal names in annotation file: '+str(model_parameters_dict['animal_names']))
 
+		continue_plan=None
+		if init_from_detector:
+			continue_plan=plan_continue_training(
+				init_from_detector,
+				path_to_annotation,
+				base_lr=base_lr,
+			)
+			print('Continue training from detector: '+str(continue_plan.base_detector))
+			print('Initial weights: '+str(continue_plan.weights_path))
+			print('Classes (must match): '+str(continue_plan.animal_names))
+		elif base_lr is not None and float(base_lr)<=0:
+			raise ValueError('base_lr must be positive')
+
 		cfg=get_cfg()
 		cfg.merge_from_file(model_zoo.get_config_file('COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml'))
 		cfg.OUTPUT_DIR=path_to_detector
 		cfg.DATASETS.TRAIN=('LabGym_detector_train',)
 		cfg.DATASETS.TEST=()
 		cfg.DATALOADER.NUM_WORKERS=4
-		cfg.MODEL.WEIGHTS=model_zoo.get_checkpoint_url('COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml')
+		if continue_plan is not None:
+			cfg.MODEL.WEIGHTS=continue_plan.weights_path
+		else:
+			cfg.MODEL.WEIGHTS=model_zoo.get_checkpoint_url('COCO-InstanceSegmentation/mask_rcnn_R_50_FPN_3x.yaml')
 		cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE=128
 		cfg.MODEL.ROI_HEADS.NUM_CLASSES=int(len(classnames))
 		cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST=0.5
 		cfg.SOLVER.MAX_ITER=int(iteration_num)
-		cfg.SOLVER.BASE_LR=0.001
+		if continue_plan is not None:
+			cfg.SOLVER.BASE_LR=float(continue_plan.base_lr)
+		elif base_lr is not None:
+			cfg.SOLVER.BASE_LR=float(base_lr)
+		else:
+			cfg.SOLVER.BASE_LR=float(DEFAULT_BASE_LR)
 		cfg.SOLVER.WARMUP_ITERS=int(iteration_num*0.1)
 		cfg.SOLVER.STEPS=(int(iteration_num*0.4),int(iteration_num*0.8))
 		cfg.SOLVER.GAMMA=0.5
@@ -100,7 +139,16 @@ class Detector():
 		cfg.INPUT.MAX_SIZE_TRAIN=int(inference_size)
 		os.makedirs(cfg.OUTPUT_DIR)
 
+		print(
+			'Training config: MAX_ITER='+str(cfg.SOLVER.MAX_ITER)
+			+' BASE_LR='+str(cfg.SOLVER.BASE_LR)
+			+' NUM_CLASSES='+str(cfg.MODEL.ROI_HEADS.NUM_CLASSES)
+			+' init='+('continue' if continue_plan is not None else 'COCO')
+		)
+
 		trainer=DefaultTrainer(cfg)
+		# resume=False: load MODEL.WEIGHTS (COCO or previous detector) and start
+		# a fresh iteration counter for this run (not a mid-run Detectron2 resume).
 		trainer.resume_or_load(False)
 		trainer.train()
 
@@ -108,6 +156,8 @@ class Detector():
 
 		model_parameters_dict['animal_mapping']={}
 		model_parameters_dict['inferencing_framesize']=int(inference_size)
+		if continue_plan is not None:
+			model_parameters_dict['continued_from']=str(continue_plan.base_detector)
 
 		for i in range(len(classnames)):
 			model_parameters_dict['animal_mapping'][i]=classnames[i]

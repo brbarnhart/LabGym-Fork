@@ -5,11 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import Qt, QObject, QThread, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -21,8 +22,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from LabGym.detection.continue_train import (
+    CONTINUE_BASE_LR,
+    CONTINUE_DEFAULT_ITERATIONS,
+    DEFAULT_BASE_LR,
+    DEFAULT_ITERATIONS,
+    plan_continue_training,
+    suggest_continued_detector_name,
+)
 from LabGym.gui_pyside.project.controller import ProjectController
-from LabGym.gui_pyside.widgets.path_browse import path_edit_row, set_line_edit_directory
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    path_edit_row,
+    set_line_edit_directory,
+)
 
 
 class _TrainWorker(QObject):
@@ -40,7 +53,13 @@ class _TrainWorker(QObject):
             from LabGym.detector import Detector
 
             dt = Detector()
-            self.progress.emit("Training (this can take a long time)…")
+            if self.kwargs.get("init_from_detector"):
+                self.progress.emit(
+                    "Continue training from existing detector "
+                    f"(LR={self.kwargs.get('base_lr')})…"
+                )
+            else:
+                self.progress.emit("Training from COCO init (this can take a long time)…")
             dt.train(**self.kwargs)
             self.finished.emit(self.kwargs["path_to_detector"])
         except Exception as exc:
@@ -52,17 +71,27 @@ class TrainDetectorTab(QWidget):
         super().__init__(parent)
         self.project = project
         self._thread: Optional[QThread] = None
+        self._user_set_name = False
+        self._user_set_iter = False
+        self._user_set_lr = False
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
+        intro = QLabel(
             "Train a LabGym Mask R-CNN detector from COCO instance-segmentation "
-            "annotations. Runs <code>Detector.train</code> off the UI thread."
-        ))
+            "annotations. Optionally <b>continue training</b> from an existing "
+            "detector (same animal categories) using new or expanded annotations "
+            "— useful after exporting hard-case frames from Review IDs."
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(intro)
 
         form = QFormLayout()
         self.ed_images = QLineEdit()
         self.ed_images.setToolTip(
-            "Folder of all training images referenced by the COCO annotation file."
+            "Folder of all training images referenced by the COCO annotation file. "
+            "When fine-tuning, include original images plus new hard-case frames "
+            "when possible to limit forgetting."
         )
         b1 = QPushButton("Browse…")
         b1.clicked.connect(lambda: set_line_edit_directory(self, self.ed_images))
@@ -77,7 +106,7 @@ class TrainDetectorTab(QWidget):
         self.ed_ann = QLineEdit()
         self.ed_ann.setToolTip(
             "COCO instance-segmentation JSON describing animal/object masks and "
-            "categories for those images (LabGym / CVAT export format)."
+            "categories for those images (LabGym / CVAT / EZannot export format)."
         )
         b2 = QPushButton("Browse…")
         b2.clicked.connect(lambda: self._browse_file(self.ed_ann, "JSON (*.json)"))
@@ -101,12 +130,47 @@ class TrainDetectorTab(QWidget):
         self.ed_name = QLineEdit("New_detector")
         self.ed_name.setToolTip(
             "Name of the new detector subfolder. Letters, numbers, _ and - only; "
-            "must not already exist under the parent folder."
+            "must not already exist under the parent folder. Prefer a new name "
+            "when fine-tuning so the previous detector is kept."
         )
+        self.ed_name.textEdited.connect(self._on_name_edited)
         form.addRow(
             self._lab("Detector name:", "Becomes <parent>/<name>/."),
             self.ed_name,
         )
+
+        # --- Continue training ---
+        self.chk_continue = QCheckBox("Continue training from an existing detector")
+        self.chk_continue.setToolTip(
+            "Warm-start from a previous LabGym detector’s model_final.pth instead "
+            "of COCO ImageNet/COCO pretrain. Animal category names in the "
+            "annotation must match the base detector (same names, same order). "
+            "Uses a lower default learning rate."
+        )
+        self.chk_continue.toggled.connect(self._on_continue_toggled)
+        form.addRow(self.chk_continue)
+
+        self.ed_base = QLineEdit()
+        self.ed_base.setEnabled(False)
+        self.ed_base.setPlaceholderText("Select a trained detector folder…")
+        self.ed_base.setToolTip(
+            "Existing detector folder (model_final.pth, config.yaml, "
+            "model_parameters.txt). Not a categorizer."
+        )
+        self.btn_base = QPushButton("Browse…")
+        self.btn_base.setEnabled(False)
+        self.btn_base.clicked.connect(self._browse_base)
+        form.addRow(
+            self._lab(
+                "Base detector:",
+                "Weights and class list used to initialize continue-training.",
+            ),
+            path_edit_row(self.ed_base, self.btn_base),
+        )
+        self.lbl_base_info = QLabel("")
+        self.lbl_base_info.setWordWrap(True)
+        self.lbl_base_info.setStyleSheet("color: #9ab;")
+        form.addRow("", self.lbl_base_info)
 
         self.spin_size = QSpinBox()
         self.spin_size.setRange(32, 2048)
@@ -115,21 +179,39 @@ class TrainDetectorTab(QWidget):
         tip_size = (
             "Inferencing frame size (pixels on the short side, divisible by 32). "
             "Larger → more accurate, slower. Smaller → faster, less detail. "
-            "480 is LabGym’s usual default; must be divisible by 32."
+            "480 is LabGym’s usual default; must be divisible by 32. "
+            "When continuing, defaults from the base detector if available."
         )
         self.spin_size.setToolTip(tip_size)
         form.addRow(self._lab("Inference frame size:", tip_size), self.spin_size)
 
         self.spin_iter = QSpinBox()
         self.spin_iter.setRange(1, 1_000_000)
-        self.spin_iter.setValue(1000)
+        self.spin_iter.setValue(DEFAULT_ITERATIONS)
         tip_iter = (
             "Number of Detectron2 training iterations. More → usually better accuracy "
-            "but longer training. 200–2000 is typical; social/interactive detectors "
-            "sometimes need more."
+            "but longer training. Continue-training often needs fewer iterations "
+            f"(default {CONTINUE_DEFAULT_ITERATIONS}) than training from COCO "
+            f"(default {DEFAULT_ITERATIONS})."
         )
         self.spin_iter.setToolTip(tip_iter)
+        self.spin_iter.valueChanged.connect(self._on_iter_changed)
         form.addRow(self._lab("Training iterations:", tip_iter), self.spin_iter)
+
+        self.spin_lr = QDoubleSpinBox()
+        self.spin_lr.setDecimals(6)
+        self.spin_lr.setRange(1e-7, 1.0)
+        self.spin_lr.setSingleStep(0.0001)
+        self.spin_lr.setValue(DEFAULT_BASE_LR)
+        tip_lr = (
+            "Solver base learning rate. Continue-training defaults to a lower LR "
+            f"({CONTINUE_BASE_LR}) to avoid destroying useful weights; from-scratch "
+            f"default is {DEFAULT_BASE_LR}."
+        )
+        self.spin_lr.setToolTip(tip_lr)
+        self.spin_lr.valueChanged.connect(self._on_lr_changed)
+        form.addRow(self._lab("Base learning rate:", tip_lr), self.spin_lr)
+
         layout.addLayout(form)
 
         self.btn = QPushButton("Train detector")
@@ -139,6 +221,7 @@ class TrainDetectorTab(QWidget):
         self.log.setReadOnly(True)
         layout.addWidget(self.log, 1)
 
+        self.project.project_replaced.connect(self._defaults)
         self._defaults()
 
     def _defaults(self) -> None:
@@ -146,13 +229,17 @@ class TrainDetectorTab(QWidget):
         if p.root_dir:
             models = p.resolve_path(p.paths.models_root or "models")
             self.ed_out.setText(str(models))
-            return
-        try:
-            from LabGym.mypkg_resources import resource_filename
+        else:
+            try:
+                from LabGym.mypkg_resources import resource_filename
 
-            self.ed_out.setText(str(resource_filename("LabGym", "detectors")))
-        except Exception:
-            pass
+                self.ed_out.setText(str(resource_filename("LabGym", "detectors")))
+            except Exception:
+                pass
+        # Prefill base detector from project default when it looks like a detector path.
+        det = (p.defaults.detector_name or "").strip()
+        if det and Path(det).is_dir() and not self.ed_base.text().strip():
+            self.ed_base.setText(det)
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -160,12 +247,107 @@ class TrainDetectorTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
-
-
     def _browse_file(self, edit: QLineEdit, filt: str) -> None:
         p, _ = QFileDialog.getOpenFileName(self, "Select file", edit.text(), filt)
         if p:
             edit.setText(p)
+
+    def _browse_base(self) -> None:
+        start = (
+            self.ed_base.text().strip()
+            or self.ed_out.text().strip()
+            or self.project.project.root_dir
+            or ""
+        )
+        d = browse_existing_directory(self, start, "Select base detector folder")
+        if d:
+            self.ed_base.setText(d)
+            self._refresh_base_info()
+
+    def _on_name_edited(self, _text: str) -> None:
+        self._user_set_name = True
+
+    def _on_iter_changed(self, _v: int) -> None:
+        # Only mark user-set after initial continue toggle has applied defaults.
+        if self.sender() is self.spin_iter and self.spin_iter.hasFocus():
+            self._user_set_iter = True
+
+    def _on_lr_changed(self, _v: float) -> None:
+        if self.sender() is self.spin_lr and self.spin_lr.hasFocus():
+            self._user_set_lr = True
+
+    def _on_continue_toggled(self, on: bool) -> None:
+        self.ed_base.setEnabled(on)
+        self.btn_base.setEnabled(on)
+        if on:
+            if not self._user_set_iter:
+                self.spin_iter.blockSignals(True)
+                self.spin_iter.setValue(CONTINUE_DEFAULT_ITERATIONS)
+                self.spin_iter.blockSignals(False)
+            if not self._user_set_lr:
+                self.spin_lr.blockSignals(True)
+                self.spin_lr.setValue(CONTINUE_BASE_LR)
+                self.spin_lr.blockSignals(False)
+            self._refresh_base_info()
+        else:
+            if not self._user_set_iter:
+                self.spin_iter.blockSignals(True)
+                self.spin_iter.setValue(DEFAULT_ITERATIONS)
+                self.spin_iter.blockSignals(False)
+            if not self._user_set_lr:
+                self.spin_lr.blockSignals(True)
+                self.spin_lr.setValue(DEFAULT_BASE_LR)
+                self.spin_lr.blockSignals(False)
+            self.lbl_base_info.setText("")
+
+    def _refresh_base_info(self) -> None:
+        if not self.chk_continue.isChecked():
+            self.lbl_base_info.setText("")
+            return
+        base = self.ed_base.text().strip()
+        ann = self.ed_ann.text().strip()
+        if not base:
+            self.lbl_base_info.setText("Select a base detector folder.")
+            return
+        try:
+            if ann and Path(ann).is_file():
+                plan = plan_continue_training(base, ann, base_lr=float(self.spin_lr.value()))
+            else:
+                # Validate detector only; full class check when annotation is set.
+                from LabGym.detection.batch_detect import (
+                    load_detector_animal_kinds,
+                    validate_detector_folder,
+                )
+
+                validate_detector_folder(base, require_weights=True)
+                names = load_detector_animal_kinds(base)
+                plan = None
+                self.lbl_base_info.setText(
+                    f"Base OK — classes: {', '.join(names)}. "
+                    "Select annotation JSON to verify class match."
+                )
+                if not self._user_set_name and names:
+                    self.ed_name.setText(suggest_continued_detector_name(base))
+                return
+        except Exception as exc:
+            brief = str(exc).splitlines()[0]
+            self.lbl_base_info.setText(f"Base detector error: {brief}")
+            self.lbl_base_info.setToolTip(str(exc))
+            return
+
+        self.lbl_base_info.setToolTip("")
+        info = (
+            f"Base OK — continue with classes: {', '.join(plan.animal_names)}. "
+            f"Weights: {Path(plan.weights_path).name}."
+        )
+        if plan.inference_size:
+            info += f" Suggested inference size: {plan.inference_size}."
+            # Only auto-apply size if still at a common default.
+            if self.spin_size.value() in (480, plan.inference_size):
+                self.spin_size.setValue(int(plan.inference_size))
+        self.lbl_base_info.setText(info)
+        if not self._user_set_name:
+            self.ed_name.setText(suggest_continued_detector_name(base))
 
     def _run(self) -> None:
         if self._thread is not None:
@@ -188,15 +370,53 @@ class TrainDetectorTab(QWidget):
         if Path(out).exists():
             QMessageBox.warning(self, "Train", f"Already exists:\n{out}")
             return
+
+        init_from = None
+        base_lr = float(self.spin_lr.value())
+        if self.chk_continue.isChecked():
+            init_from = self.ed_base.text().strip()
+            if not init_from:
+                QMessageBox.warning(
+                    self,
+                    "Continue training",
+                    "Select the base detector folder to continue from.",
+                )
+                return
+            try:
+                plan = plan_continue_training(init_from, ann, base_lr=base_lr)
+            except (OSError, ValueError) as exc:
+                QMessageBox.warning(self, "Continue training", str(exc))
+                return
+            init_from = plan.base_detector
+            base_lr = plan.base_lr
+
+        size = int(self.spin_size.value())
+        if size % 32 != 0:
+            QMessageBox.warning(
+                self,
+                "Train",
+                "Inference frame size must be divisible by 32 "
+                f"(got {size}).",
+            )
+            return
+
         kwargs = dict(
             path_to_annotation=ann,
             path_to_trainingimages=images,
             path_to_detector=out,
             iteration_num=int(self.spin_iter.value()),
-            inference_size=int(self.spin_size.value()),
+            inference_size=size,
+            init_from_detector=init_from,
+            base_lr=base_lr,
         )
         self.btn.setEnabled(False)
-        self.log.append(f"Training → {out}")
+        mode = "continue" if init_from else "from COCO"
+        self.log.append(
+            f"Training ({mode}) → {out}\n"
+            f"  iterations={kwargs['iteration_num']}  LR={base_lr}  "
+            f"size={size}"
+            + (f"\n  init_from={init_from}" if init_from else "")
+        )
         self._thread = QThread(self)
         worker = _TrainWorker(kwargs)
         worker.moveToThread(self._thread)
