@@ -36,12 +36,16 @@ from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
     set_line_edit_directory,
 )
+from LabGym.gui_pyside.workbenches.detector.train_progress_dialog import (
+    TrainDetectorProgressDialog,
+)
 
 
 class _TrainWorker(QObject):
     finished = Signal(str)
     error = Signal(str)
     progress = Signal(str)
+    progress_train = Signal(int, int, dict)
 
     def __init__(self, kwargs: dict):
         super().__init__()
@@ -60,7 +64,18 @@ class _TrainWorker(QObject):
                 )
             else:
                 self.progress.emit("Training from COCO init (this can take a long time)…")
-            dt.train(**self.kwargs)
+
+            def _cb(iteration: int, max_iter: int, metrics: dict) -> None:
+                # Qt queued connection carries plain dict of floats safely.
+                self.progress_train.emit(
+                    int(iteration),
+                    int(max_iter),
+                    dict(metrics or {}),
+                )
+
+            train_kwargs = dict(self.kwargs)
+            train_kwargs["train_progress_cb"] = _cb
+            dt.train(**train_kwargs)
             self.finished.emit(self.kwargs["path_to_detector"])
         except Exception as exc:
             self.error.emit(str(exc))
@@ -71,6 +86,7 @@ class TrainDetectorTab(QWidget):
         super().__init__(parent)
         self.project = project
         self._thread: Optional[QThread] = None
+        self._progress_dlg: Optional[TrainDetectorProgressDialog] = None
         self._user_set_name = False
         self._user_set_iter = False
         self._user_set_lr = False
@@ -400,28 +416,37 @@ class TrainDetectorTab(QWidget):
             )
             return
 
+        max_iter = int(self.spin_iter.value())
         kwargs = dict(
             path_to_annotation=ann,
             path_to_trainingimages=images,
             path_to_detector=out,
-            iteration_num=int(self.spin_iter.value()),
+            iteration_num=max_iter,
             inference_size=size,
             init_from_detector=init_from,
             base_lr=base_lr,
         )
         self.btn.setEnabled(False)
         mode = "continue" if init_from else "from COCO"
-        self.log.append(
+        summary = (
             f"Training ({mode}) → {out}\n"
-            f"  iterations={kwargs['iteration_num']}  LR={base_lr}  "
+            f"  iterations={max_iter}  LR={base_lr}  "
             f"size={size}"
             + (f"\n  init_from={init_from}" if init_from else "")
         )
+        self.log.append(summary)
+
+        dlg = self._ensure_progress_dialog()
+        dlg.begin_job(max_iter=max_iter)
+        dlg.append_log(summary)
+        dlg.append_log("Live total_loss curve updates about every 20 iterations.")
+
         self._thread = QThread(self)
         worker = _TrainWorker(kwargs)
         worker.moveToThread(self._thread)
         self._thread.started.connect(worker.run)
-        worker.progress.connect(lambda m: self.log.append(m))
+        worker.progress.connect(self._on_status)
+        worker.progress_train.connect(dlg.on_train_progress)
         worker.finished.connect(self._on_done)
         worker.error.connect(self._on_err)
         worker.finished.connect(self._thread.quit)
@@ -430,16 +455,32 @@ class TrainDetectorTab(QWidget):
         self._worker = worker
         self._thread.start()
 
+    def _ensure_progress_dialog(self) -> TrainDetectorProgressDialog:
+        if self._progress_dlg is None:
+            self._progress_dlg = TrainDetectorProgressDialog(self)
+        return self._progress_dlg
+
+    def _on_status(self, msg: str) -> None:
+        self.log.append(msg)
+        if self._progress_dlg is not None:
+            self._progress_dlg.on_status(msg)
+
     def _cleanup(self) -> None:
         self._thread = None
         self.btn.setEnabled(True)
 
     def _on_done(self, path: str) -> None:
         self.log.append(f"Done: {path}")
+        if self._progress_dlg is not None:
+            self._progress_dlg.append_log(f"Done: {path}")
+            self._progress_dlg.mark_finished()
         self.project.project.defaults.detector_name = path
         self.project.mark_dirty()
         QMessageBox.information(self, "Train detector", f"Trained detector saved:\n{path}")
 
     def _on_err(self, msg: str) -> None:
         self.log.append(f"ERROR: {msg}")
+        if self._progress_dlg is not None:
+            self._progress_dlg.append_log(f"ERROR: {msg}")
+            self._progress_dlg.mark_finished(failed=True)
         QMessageBox.critical(self, "Train failed", msg)

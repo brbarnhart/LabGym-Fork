@@ -56,6 +56,8 @@ class Detector():
 		inference_size,
 		init_from_detector=None,
 		base_lr=None,
+		train_progress_cb=None,
+		progress_period=None,
 	):
 
 		# path_to_annotation: the path to the .json file that stores the annotations in coco format
@@ -66,10 +68,16 @@ class Detector():
 		#   from (model_final.pth). Categories must match the annotation file.
 		# base_lr: optional solver base learning rate (defaults: 0.001 from COCO,
 		#   0.0001 when continuing from a detector)
+		# train_progress_cb: optional callable(iter, max_iter, metrics_dict) for UI
+		# progress_period: optional override for how often to invoke the callback
 
 		from LabGym.detection.continue_train import (
 			DEFAULT_BASE_LR,
 			plan_continue_training,
+		)
+		from LabGym.detection.train_progress import (
+			ProgressCallbackHook,
+			progress_report_period,
 		)
 
 		if str('LabGym_detector_train') in DatasetCatalog.list():
@@ -150,6 +158,13 @@ class Detector():
 		# resume=False: load MODEL.WEIGHTS (COCO or previous detector) and start
 		# a fresh iteration counter for this run (not a mid-run Detectron2 resume).
 		trainer.resume_or_load(False)
+		if train_progress_cb is not None:
+			period=progress_period
+			if period is None:
+				period=progress_report_period(int(iteration_num))
+			trainer.register_hooks([
+				ProgressCallbackHook(train_progress_cb,period=int(period)),
+			])
 		trainer.train()
 
 		model_parameters=os.path.join(cfg.OUTPUT_DIR,'model_parameters.txt')
