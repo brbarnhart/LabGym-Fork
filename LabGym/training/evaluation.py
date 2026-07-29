@@ -478,6 +478,9 @@ def load_evaluation_run(run_dir: PathLike) -> Dict[str, Any]:
     counts_path = path / "confusion_counts.json"
     if counts_path.is_file():
         out["confusion_counts"] = json.loads(counts_path.read_text(encoding="utf-8"))
+    row_norm_path = path / "confusion_row_norm.json"
+    if row_norm_path.is_file():
+        out["confusion_row_norm"] = json.loads(row_norm_path.read_text(encoding="utf-8"))
     pred_path = path / "predictions.csv"
     if pred_path.is_file():
         out["predictions"] = pd.read_csv(pred_path)
@@ -490,6 +493,154 @@ def load_evaluation_run(run_dir: PathLike) -> Dict[str, Any]:
             report_path.read_text(encoding="utf-8")
         )
     return out
+
+
+@dataclass
+class EvaluationRunInfo:
+    """Lightweight index row for one eval run under a model directory."""
+
+    run_id: str
+    run_dir: str
+    source: str = ""
+    created_utc: str = ""
+    macro_f1: Optional[float] = None
+    n_examples: int = 0
+    n_misclassified: int = 0
+    ground_truth_path: str = ""
+    model_settings: Dict[str, Any] = field(default_factory=dict)
+
+    def display_label(self) -> str:
+        """Short list label for UI combos / list widgets."""
+        f1 = f"F1={self.macro_f1:.3f}" if self.macro_f1 is not None else "F1=?"
+        src = self.source or "run"
+        when = (self.created_utc or "")[:19].replace("T", " ")
+        return f"{self.run_id}  [{src}]  {f1}  n={self.n_examples}  {when}".strip()
+
+
+def list_evaluation_runs(model_dir: PathLike) -> List[EvaluationRunInfo]:
+    """List evaluation runs under ``<model_dir>/eval/``, newest first.
+
+    Runs without ``run_meta.json`` are still listed if the directory exists
+    (using the directory name as ``run_id``).
+    """
+    root = Path(model_dir) / "eval"
+    if not root.is_dir():
+        return []
+    infos: List[EvaluationRunInfo] = []
+    for child in root.iterdir():
+        if not child.is_dir():
+            continue
+        meta: Dict[str, Any] = {}
+        meta_path = child / "run_meta.json"
+        if meta_path.is_file():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                meta = {}
+        summary: Dict[str, Any] = {}
+        summary_path = child / "metrics_summary.json"
+        if summary_path.is_file():
+            try:
+                summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                summary = {}
+        gt = meta.get("ground_truth_snapshot") or {}
+        gt_path = ""
+        if isinstance(gt, dict):
+            gt_path = str(gt.get("path") or gt.get("ground_truth_path") or "")
+        macro = meta.get("macro_f1", summary.get("macro_f1"))
+        try:
+            macro_f = float(macro) if macro is not None else None
+        except (TypeError, ValueError):
+            macro_f = None
+        n_ex = int(meta.get("n_examples") or summary.get("n_examples") or 0)
+        n_mis = int(
+            meta.get("n_misclassified") or summary.get("n_misclassified") or 0
+        )
+        settings = meta.get("model_settings") or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        infos.append(
+            EvaluationRunInfo(
+                run_id=str(meta.get("run_id") or child.name),
+                run_dir=str(child),
+                source=str(meta.get("source") or ""),
+                created_utc=str(meta.get("created_utc") or ""),
+                macro_f1=macro_f,
+                n_examples=n_ex,
+                n_misclassified=n_mis,
+                ground_truth_path=gt_path,
+                model_settings=dict(settings),
+            )
+        )
+
+    def _sort_key(info: EvaluationRunInfo) -> Tuple[str, str]:
+        # Newest first; fall back to run_id
+        return (info.created_utc or "", info.run_id)
+
+    infos.sort(key=_sort_key, reverse=True)
+    return infos
+
+
+def store_behavior_categories(store_path: PathLike) -> List[str]:
+    """Immediate subfolder names of an example store (behavior categories)."""
+    root = Path(store_path)
+    if not root.is_dir():
+        return []
+    return sorted(
+        p.name for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")
+    )
+
+
+def model_classnames_from_parameters(model_dir: PathLike) -> List[str]:
+    """Read ``classnames`` from a categorizer's ``model_parameters.txt``."""
+    path = Path(model_dir) / "model_parameters.txt"
+    if not path.is_file():
+        return []
+    try:
+        params = pd.read_csv(path)
+    except Exception:
+        return []
+    if "classnames" not in params.columns:
+        return []
+    return [str(v) for v in params["classnames"].tolist() if pd.notna(v)]
+
+
+def taxonomy_drift(
+    model_classnames: Sequence[str],
+    store_categories: Sequence[str],
+) -> Dict[str, Any]:
+    """Compare model label space to example-store category folders.
+
+    Scoring always uses the model label space; this report is for UI banners.
+    """
+    model_set = {str(c) for c in model_classnames}
+    store_set = {str(c) for c in store_categories}
+    only_model = sorted(model_set - store_set)
+    only_store = sorted(store_set - model_set)
+    shared = sorted(model_set & store_set)
+    return {
+        "has_drift": bool(only_model or only_store),
+        "only_in_model": only_model,
+        "only_in_store": only_store,
+        "shared": shared,
+        "model_classnames": list(model_classnames),
+        "store_categories": list(store_categories),
+    }
+
+
+def format_taxonomy_drift_message(drift: Mapping[str, Any]) -> str:
+    """Human-readable taxonomy-drift banner text (empty if no drift)."""
+    if not drift.get("has_drift"):
+        return ""
+    parts: List[str] = ["Taxonomy drift: scoring uses the model's class list."]
+    only_m = drift.get("only_in_model") or []
+    only_s = drift.get("only_in_store") or []
+    if only_m:
+        parts.append(f"Only in model: {', '.join(only_m)}.")
+    if only_s:
+        parts.append(f"Only in ground-truth folders: {', '.join(only_s)}.")
+    return " ".join(parts)
 
 
 def model_settings_from_parameters_df(parameters: pd.DataFrame) -> Dict[str, Any]:

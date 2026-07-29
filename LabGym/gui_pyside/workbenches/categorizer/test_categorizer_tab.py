@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QFileDialog,
     QFormLayout,
@@ -53,10 +53,16 @@ class TestCategorizerTab(QWidget):
         self._thread: Optional[QThread] = None
 
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(
-            "Test a trained categorizer against ground-truth behavior example folders "
-            "(same layout as training examples)."
-        ))
+        intro = QLabel(
+            "Quick path: test one trained categorizer against one ground-truth "
+            "folder (same layout as training examples). Uses the shared evaluation "
+            "engine and writes <code>model/eval/&lt;run_id&gt;/</code>. "
+            "For metrics browsing, multi-model compare, and review queues, use "
+            "<b>Manage dataset → Evaluate</b>."
+        )
+        intro.setWordWrap(True)
+        intro.setTextFormat(Qt.TextFormat.RichText)
+        layout.addWidget(intro)
 
         form = QFormLayout()
         self.ed_gt = QLineEdit()

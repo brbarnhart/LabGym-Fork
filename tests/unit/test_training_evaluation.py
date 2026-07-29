@@ -11,11 +11,16 @@ import pytest
 
 from LabGym.training.evaluation import (
     compute_evaluation_metrics,
+    format_taxonomy_drift_message,
     hard_labels_from_targets,
+    list_evaluation_runs,
     load_evaluation_run,
+    model_classnames_from_parameters,
     model_settings_from_parameters_df,
     predictions_from_model_output,
     rank_high_loss_examples,
+    store_behavior_categories,
+    taxonomy_drift,
     top_confused_pairs_from_matrix,
     write_evaluation_run,
 )
@@ -211,3 +216,74 @@ def test_model_settings_from_parameters_df():
 def test_unknown_label_raises():
     with pytest.raises(ValueError, match="unknown label"):
         compute_evaluation_metrics(["a", "ghost"], ["a", "b"], y_pred=["a", "b"])
+
+
+def test_list_evaluation_runs_newest_first(tmp_path: Path):
+    model = tmp_path / "m"
+    classnames = ["a", "b"]
+    m = compute_evaluation_metrics(
+        [0, 1], classnames, y_pred=[0, 1], example_ids=["e0", "e1"]
+    )
+    write_evaluation_run(
+        model,
+        m,
+        run_id="older",
+        source="test",
+        extra_meta={"created_utc": "2020-01-01T00:00:00+00:00"},
+    )
+    # write_evaluation_run always stamps created_utc; rewrite meta for sort test
+    older_meta = model / "eval" / "older" / "run_meta.json"
+    data = json.loads(older_meta.read_text(encoding="utf-8"))
+    data["created_utc"] = "2020-01-01T00:00:00+00:00"
+    older_meta.write_text(json.dumps(data), encoding="utf-8")
+
+    write_evaluation_run(
+        model,
+        m,
+        run_id="newer",
+        source="evaluate",
+        extra_meta={"created_utc": "2025-06-01T12:00:00+00:00"},
+    )
+    newer_meta = model / "eval" / "newer" / "run_meta.json"
+    data = json.loads(newer_meta.read_text(encoding="utf-8"))
+    data["created_utc"] = "2025-06-01T12:00:00+00:00"
+    newer_meta.write_text(json.dumps(data), encoding="utf-8")
+
+    # Empty dir without meta still listed
+    (model / "eval" / "orphan").mkdir()
+
+    runs = list_evaluation_runs(model)
+    ids = [r.run_id for r in runs]
+    assert ids[0] == "newer"
+    assert "older" in ids
+    assert "orphan" in ids
+    assert runs[0].source == "evaluate"
+    assert runs[0].macro_f1 == pytest.approx(1.0)
+    assert "F1=" in runs[0].display_label()
+
+
+def test_taxonomy_drift_and_store_categories(tmp_path: Path):
+    store = tmp_path / "examples"
+    (store / "groom").mkdir(parents=True)
+    (store / "walk").mkdir()
+    (store / "rear").mkdir()
+    cats = store_behavior_categories(store)
+    assert cats == ["groom", "rear", "walk"]
+
+    drift = taxonomy_drift(["groom", "walk", "climb"], cats)
+    assert drift["has_drift"] is True
+    assert drift["only_in_model"] == ["climb"]
+    assert drift["only_in_store"] == ["rear"]
+    msg = format_taxonomy_drift_message(drift)
+    assert "climb" in msg and "rear" in msg
+    assert format_taxonomy_drift_message(taxonomy_drift(cats, cats)) == ""
+
+
+def test_model_classnames_from_parameters(tmp_path: Path):
+    model = tmp_path / "cat"
+    model.mkdir()
+    pd.DataFrame(
+        {"classnames": ["a", "b"], "network": [0, None], "time_step": [8, None]}
+    ).to_csv(model / "model_parameters.txt", index=False)
+    assert model_classnames_from_parameters(model) == ["a", "b"]
+    assert model_classnames_from_parameters(tmp_path / "missing") == []

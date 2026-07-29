@@ -64,6 +64,7 @@ def test_shell_has_detect_process_review_tabs():
     assert w.wb_detector.set_current_tab("detect_track")
     assert w.wb_detector.set_current_tab("review_ids")
     assert w.wb_categorizer.set_current_tab("process")
+    assert w.wb_categorizer.set_current_tab("manage_dataset")
     assert w.wb_results.set_current_tab("mine")
 
 

@@ -2669,3 +2669,7 @@ class Categorizers():
 					os.path.join(result_path,'testing_metrics.csv'),float_format='%.4f')
 
 			print('Testing completed!')
+			return str(run_dir)
+
+		print('Testing aborted: behavior category names do not match the Categorizer.')
+		return None
