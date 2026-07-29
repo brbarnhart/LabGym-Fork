@@ -1,4 +1,4 @@
-"""Training helpers: soft labels, combined losses, example sorting."""
+"""Training helpers: soft labels, combined losses, example sorting, evaluation."""
 
 from .soft_labels import (
     LABEL_MODE_HARD_ONLY,
@@ -21,6 +21,18 @@ from .ethogram_examples import (
     generate_examples_from_ethogram,
     sample_windows_from_bout,
 )
+from .evaluation import (
+    EvaluationMetrics,
+    ExamplePrediction,
+    HighLossExample,
+    compute_evaluation_metrics,
+    hard_labels_from_targets,
+    load_evaluation_run,
+    model_settings_from_parameters_df,
+    predictions_from_model_output,
+    rank_high_loss_examples,
+    write_evaluation_run,
+)
 
 __all__ = [
     "LABEL_MODE_HARD_ONLY",
@@ -39,4 +51,14 @@ __all__ = [
     "collect_windows",
     "generate_examples_from_ethogram",
     "sample_windows_from_bout",
+    "EvaluationMetrics",
+    "ExamplePrediction",
+    "HighLossExample",
+    "compute_evaluation_metrics",
+    "hard_labels_from_targets",
+    "load_evaluation_run",
+    "model_settings_from_parameters_df",
+    "predictions_from_model_output",
+    "rank_high_loss_examples",
+    "write_evaluation_run",
 ]

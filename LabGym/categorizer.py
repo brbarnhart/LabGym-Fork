@@ -294,6 +294,135 @@ class Categorizers():
 		return None
 
 
+	def _record_holdout_evaluation(
+		self,
+		model_path,
+		raw_predictions,
+		testY,
+		*,
+		out_path=None,
+		source='train_holdout',
+		example_ids=None,
+		ground_truth_snapshot=None,
+		model_settings=None,
+	):
+		'''Score hold-out predictions via the shared evaluation engine.
+
+		Writes legacy ``training_metrics.csv`` (and optional xlsx) plus a durable
+		run under ``<model_path>/eval/<run_id>/``.
+		'''
+		from LabGym.training.evaluation import (
+			compute_evaluation_metrics,
+			hard_labels_from_targets,
+			model_settings_from_parameters_df,
+			predictions_from_model_output,
+			write_evaluation_run,
+		)
+
+		classnames=list(self.classnames)
+		C=len(classnames)
+		true_idx=hard_labels_from_targets(np.asarray(testY),C)
+		pred_idx,conf=predictions_from_model_output(np.asarray(raw_predictions),C)
+		metrics=compute_evaluation_metrics(
+			true_idx,
+			classnames,
+			y_pred=pred_idx,
+			confidences=conf,
+			example_ids=example_ids,
+		)
+		print(classification_report(
+			true_idx,pred_idx,target_names=classnames,zero_division=0))
+		report=metrics.classification_report
+		pd.DataFrame(report).transpose().to_csv(
+			os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
+		if out_path is not None:
+			pd.DataFrame(report).transpose().to_excel(
+				os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+
+		settings=dict(model_settings or {})
+		params_path=os.path.join(model_path,'model_parameters.txt')
+		if not settings and os.path.isfile(params_path):
+			try:
+				settings=model_settings_from_parameters_df(pd.read_csv(params_path))
+			except Exception:
+				settings={}
+		gt_snap=dict(ground_truth_snapshot or {})
+		gt_snap.setdefault('partition','validation')
+		gt_snap.setdefault('n_examples',metrics.n_examples)
+		run_dir=write_evaluation_run(
+			model_path,
+			metrics,
+			source=source,
+			model_settings=settings,
+			ground_truth_snapshot=gt_snap,
+		)
+		print('Evaluation run saved in: '+str(run_dir))
+		self.log.append('Evaluation run saved in: '+str(run_dir))
+		return metrics
+
+
+	def _evaluate_sequence_holdout(
+		self,
+		model,
+		validation_data,
+		model_path,
+		*,
+		out_path=None,
+		ground_truth_snapshot=None,
+		input_mode='x',
+	):
+		'''Predict over a Keras Sequence validation set and record metrics.
+
+		Args:
+			input_mode: ``x`` for single tensor batches; ``aa`` for
+				Animation Analyzer (animations only from AA dual output);
+				``comb`` for combined net ([animations, pattern_images]).
+		'''
+		if validation_data is None or len(validation_data)==0:
+			print('No validation batches for hold-out metrics.')
+			self.log.append('No validation batches for hold-out metrics.')
+			return None
+
+		if self.classnames is None:
+			self.classnames=list(getattr(validation_data,'classnames',[]) or [])
+
+		all_y=[]
+		all_pred=[]
+		example_ids=[]
+		bs=int(getattr(validation_data,'batch_size',32))
+		paths=list(getattr(validation_data,'pattern_image_paths',[]) or [])
+
+		for idx in range(len(validation_data)):
+			batch_x,batch_y=validation_data[idx]
+			if input_mode=='aa':
+				# AA Sequence yields [animations, patterns]; analyzer uses animations only.
+				if isinstance(batch_x,(list,tuple)):
+					batch_x=batch_x[0]
+			# comb and x: use batch_x as returned
+			raw=model.predict(batch_x,verbose=0)
+			all_pred.append(np.asarray(raw))
+			all_y.append(np.asarray(batch_y))
+			if paths:
+				start=idx*bs
+				example_ids.extend(
+					[os.path.basename(p) for p in paths[start:start+bs]])
+
+		y=np.concatenate(all_y,axis=0)
+		preds=np.concatenate(all_pred,axis=0)
+		ids=example_ids if example_ids else None
+		snap=dict(ground_truth_snapshot or {})
+		snap.setdefault('source','onfly_validation_sequence')
+		return self._record_holdout_evaluation(
+			model_path,
+			preds,
+			y,
+			out_path=out_path,
+			example_ids=ids,
+			ground_truth_snapshot=snap,
+			source='train_holdout',
+		)
+
+
 	def _soft_matrix_for_paths(self,path_files,classnames,data_path,soft_labels_path=None):
 		'''Load soft label vectors aligned to path_files; None if unavailable.'''
 		path=self._resolve_soft_labels_path(data_path,soft_labels_path)
@@ -1231,26 +1360,9 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict(testX,batch_size=batch_size)
-
-				# Metrics use hard half of stacked targets when present
-				testY_hard=np.asarray(testY)
-				C=len(self.classnames)
-				if testY_hard.ndim==2 and testY_hard.shape[1]==2*C:
-					testY_hard=testY_hard[:,:C]
-				elif testY_hard.ndim==2 and C==2 and testY_hard.shape[1]==2:
-					testY_hard=testY_hard[:,:1]
-
-				if len(self.classnames)==2:
-					predictions=[round(i[0]) for i in predictions]
-					print(classification_report(testY_hard,predictions,target_names=self.classnames))
-					report=classification_report(testY_hard,predictions,target_names=self.classnames,output_dict=True)
-				else:
-					print(classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames))
-					report=classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames,output_dict=True)
-
-				pd.DataFrame(report).transpose().to_csv(os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
-				if out_path is not None:
-					pd.DataFrame(report).transpose().to_excel(os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+				self._record_holdout_evaluation(
+					model_path,predictions,testY,out_path=out_path,
+					ground_truth_snapshot={'data_path':str(data_path),'network':0})
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1482,18 +1594,9 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict(testX,batch_size=batch_size)
-
-				if len(self.classnames)==2:
-					predictions=[round(i[0]) for i in predictions]
-					print(classification_report(testY,predictions,target_names=self.classnames))
-					report=classification_report(testY,predictions,target_names=self.classnames,output_dict=True)
-				else:
-					print(classification_report(testY.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames))
-					report=classification_report(testY.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames,output_dict=True)
-
-				pd.DataFrame(report).transpose().to_csv(os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
-				if out_path is not None:
-					pd.DataFrame(report).transpose().to_excel(os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+				self._record_holdout_evaluation(
+					model_path,predictions,testY,out_path=out_path,
+					ground_truth_snapshot={'data_path':str(data_path),'network':1})
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1717,25 +1820,9 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict([test_animations,test_pattern_images],batch_size=batch_size)
-
-				testY_hard=np.asarray(testY)
-				C=len(self.classnames)
-				if testY_hard.ndim==2 and testY_hard.shape[1]==2*C:
-					testY_hard=testY_hard[:,:C]
-				elif testY_hard.ndim==2 and C==2 and testY_hard.shape[1]==2:
-					testY_hard=testY_hard[:,:1]
-
-				if len(self.classnames)==2:
-					predictions=[round(i[0]) for i in predictions]
-					print(classification_report(testY_hard,predictions,target_names=self.classnames))
-					report=classification_report(testY_hard,predictions,target_names=self.classnames,output_dict=True)
-				else:
-					print(classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames))
-					report=classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames,output_dict=True)
-
-				pd.DataFrame(report).transpose().to_csv(os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
-				if out_path is not None:
-					pd.DataFrame(report).transpose().to_excel(os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+				self._record_holdout_evaluation(
+					model_path,predictions,testY,out_path=out_path,
+					ground_truth_snapshot={'data_path':str(data_path),'network':2})
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1932,6 +2019,11 @@ class Categorizers():
 			print(datetime.datetime.now())
 			self.log.append(str(datetime.datetime.now()))
 
+			self._evaluate_sequence_holdout(
+				model,validation_data,model_path,out_path=out_path,
+				ground_truth_snapshot={'data_path':str(data_path),'network':0},
+				input_mode='x')
+
 			plt.style.use('classic')
 			plt.figure()
 			plt.plot(H.history['loss'],label='train_loss')
@@ -2044,6 +2136,12 @@ class Categorizers():
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
 			self.log.append(str(datetime.datetime.now()))
+
+			self.classnames=list(train_data.classmapping.keys())
+			self._evaluate_sequence_holdout(
+				model,validation_data,model_path,out_path=out_path,
+				ground_truth_snapshot={'data_path':str(data_path),'network':1},
+				input_mode='aa')
 
 			plt.style.use('classic')
 			plt.figure()
@@ -2163,6 +2261,11 @@ class Categorizers():
 			print(datetime.datetime.now())
 			self.log.append(str(datetime.datetime.now()))
 
+			self._evaluate_sequence_holdout(
+				model,validation_data,model_path,out_path=out_path,
+				ground_truth_snapshot={'data_path':str(data_path),'network':2},
+				input_mode='comb')
+
 			plt.style.use('classic')
 			plt.figure()
 			plt.plot(H.history['loss'],label='train_loss')
@@ -2267,6 +2370,8 @@ class Categorizers():
 
 		if len(incorrect_behaviors)==0 and len(incorrect_classes)==0:
 
+			example_ids=deque()
+
 			for behavior in behaviornames:
 
 				if network!=0:
@@ -2313,6 +2418,7 @@ class Categorizers():
 						pattern_images.append(img_to_array(pattern_image))
 
 					labels.append(classnames.index(behavior))
+					example_ids.append(os.path.join(behavior,i))
 
 			if network!=0:
 				animations=np.array(animations,dtype='float32')/255.0
@@ -2323,21 +2429,52 @@ class Categorizers():
 			model=self.load_categorizer_model(model_path)
 
 			if network==0:
-				predictions=model.predict(pattern_images,batch_size=32)
+				raw_predictions=model.predict(pattern_images,batch_size=32)
 			elif network==1:
-				predictions=model.predict(animations,batch_size=32)
+				raw_predictions=model.predict(animations,batch_size=32)
 			else:
-				predictions=model.predict([animations,pattern_images],batch_size=32)
+				raw_predictions=model.predict([animations,pattern_images],batch_size=32)
 
-			if len(classnames)==2:
-				predictions=[round(i[0]) for i in predictions]
-				print(classification_report(labels,predictions,target_names=classnames))
-				report=classification_report(labels,predictions,target_names=classnames,output_dict=True)
-			else:
-				print(classification_report(labels,predictions.argmax(axis=1),target_names=classnames))
-				report=classification_report(labels,predictions.argmax(axis=1),target_names=classnames,output_dict=True)
+			from LabGym.training.evaluation import (
+				compute_evaluation_metrics,
+				model_settings_from_parameters_df,
+				predictions_from_model_output,
+				write_evaluation_run,
+			)
+
+			pred_idx,conf=predictions_from_model_output(
+				np.asarray(raw_predictions),len(classnames))
+			metrics=compute_evaluation_metrics(
+				labels,
+				classnames,
+				y_pred=pred_idx,
+				confidences=conf,
+				example_ids=list(example_ids),
+			)
+			print(classification_report(
+				labels,pred_idx,target_names=classnames,zero_division=0))
+			report=metrics.classification_report
 
 			if result_path is not None:
-				pd.DataFrame(report).transpose().to_excel(os.path.join(result_path,'testing_reports.xlsx'),float_format='%.2f')
+				pd.DataFrame(report).transpose().to_excel(
+					os.path.join(result_path,'testing_reports.xlsx'),float_format='%.2f')
+
+			settings=model_settings_from_parameters_df(parameters)
+			run_dir=write_evaluation_run(
+				model_path,
+				metrics,
+				source='test',
+				model_settings=settings,
+				ground_truth_snapshot={
+					'path':str(groundtruth_path),
+					'n_examples':metrics.n_examples,
+					'behavior_folders':list(behaviornames),
+				},
+			)
+			print('Evaluation run saved in: '+str(run_dir))
+			if result_path is not None:
+				# Mirror summary next to optional result folder for convenience
+				pd.DataFrame(report).transpose().to_csv(
+					os.path.join(result_path,'testing_metrics.csv'),float_format='%.4f')
 
 			print('Testing completed!')
