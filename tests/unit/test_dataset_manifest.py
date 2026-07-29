@@ -63,6 +63,18 @@ def test_exclude_recategorize_undo(tmp_path: Path):
     assert len(m.effective_examples()) == 2
 
 
+def test_keep_and_ensure_example(tmp_path: Path):
+    m = DatasetManifest(store_root=tmp_path)
+    rec = m.ensure_example("new1", "groom", path_hint="new1_groom.jpg")
+    assert rec.example_id == "new1"
+    assert "new1" in m.examples
+    m.exclude("new1")
+    m.keep("new1")
+    assert m.examples["new1"].excluded is False
+    assert m.undo()  # undo keep restores excluded
+    assert m.examples["new1"].excluded is True
+
+
 def test_train_val_split_stable_and_persists(tmp_path: Path):
     m = DatasetManifest(store_root=tmp_path)
     scanned = []

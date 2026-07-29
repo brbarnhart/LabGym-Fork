@@ -45,6 +45,9 @@ def test_train_test_categorizer_construct():
         ManageDatasetHost,
     )
     from LabGym.gui_pyside.workbenches.categorizer.evaluate_tab import EvaluateTab
+    from LabGym.gui_pyside.workbenches.categorizer.review_examples_tab import (
+        ReviewExamplesTab,
+    )
 
     p = ProjectController()
     assert TrainCategorizerTab(p) is not None
@@ -52,8 +55,11 @@ def test_train_test_categorizer_construct():
     host = ManageDatasetHost(p)
     assert host is not None
     assert EvaluateTab(p) is not None
+    assert ReviewExamplesTab(p) is not None
     host.show_evaluate()
     assert host.inner.currentWidget() is host.evaluate_tab
+    host.show_review()
+    assert host.inner.currentWidget() is host.review_tab
 
 
 def test_full_shell_has_phase56_tabs():

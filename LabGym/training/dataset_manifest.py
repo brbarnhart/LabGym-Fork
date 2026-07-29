@@ -273,6 +273,42 @@ class DatasetManifest:
         rec.excluded = bool(excluded)
         self._push_undo([before], label="exclude" if excluded else "include")
 
+    def keep(self, example_id: str) -> None:
+        """Keep example in the effective set with its current active label.
+
+        Clears exclusion if set. Does not change label overrides. Used by
+        Review examples as an explicit "leave as-is" decision (undoable).
+        """
+        rec = self._require(example_id)
+        before = self._snapshot_fields(rec)
+        rec.excluded = False
+        self._push_undo([before], label="keep")
+
+    def ensure_example(
+        self,
+        example_id: str,
+        original_label: str,
+        *,
+        path_hint: Optional[str] = None,
+    ) -> ExampleRecord:
+        """Return existing record or add a new unassigned one (no undo)."""
+        eid = str(example_id)
+        if eid in self.examples:
+            rec = self.examples[eid]
+            if not rec.original_label and original_label:
+                rec.original_label = str(original_label)
+            if path_hint and not rec.path_hint:
+                rec.path_hint = path_hint
+            return rec
+        rec = ExampleRecord(
+            example_id=eid,
+            original_label=str(original_label or ""),
+            path_hint=path_hint,
+            split=SPLIT_UNASSIGNED,
+        )
+        self.examples[eid] = rec
+        return rec
+
     def recategorize(self, example_id: str, new_label: Optional[str]) -> None:
         """Set or clear a label override (None clears)."""
         rec = self._require(example_id)
@@ -858,3 +894,113 @@ def filter_paths_by_manifest(
         out_p.append(str(p))
         out_l.append(rec.active_label)
     return out_p, out_l
+
+
+def apply_manifest_to_path_list(
+    path_files: Sequence[PathLike],
+    manifest: DatasetManifest,
+    *,
+    drop_excluded: bool = True,
+    drop_sealed: bool = True,
+    filename_label_fn: Optional[Any] = None,
+) -> Tuple[List[str], Dict[str, str], int]:
+    """Filter training paths and resolve active labels from the manifest.
+
+    Args:
+        path_files: Candidate media paths (typically ``.jpg`` pattern images).
+        manifest: Loaded dataset manifest for the store.
+        drop_excluded: Remove excluded examples.
+        drop_sealed: Remove sealed-test examples (train-time isolation).
+        filename_label_fn: Optional ``path -> original label``; default uses
+            LabGym flat basename convention.
+
+    Returns:
+        ``(kept_paths, path_to_active_label, n_dropped)``.
+    """
+    if filename_label_fn is None:
+        def filename_label_fn(p: PathLike) -> str:  # type: ignore[misc]
+            return original_label_from_flat_name(Path(p).name)
+
+    kept: List[str] = []
+    labels: Dict[str, str] = {}
+    n_drop = 0
+    for p in path_files:
+        sp = str(p)
+        eid = example_id_from_path(sp)
+        rec = manifest.examples.get(eid)
+        if rec is not None:
+            if drop_excluded and rec.excluded:
+                n_drop += 1
+                continue
+            if drop_sealed and rec.split == SPLIT_SEALED_TEST:
+                n_drop += 1
+                continue
+            active = rec.active_label
+        else:
+            active = str(filename_label_fn(sp))
+        kept.append(sp)
+        labels[sp] = active
+    return kept, labels, n_drop
+
+
+def rebuild_classmapping(
+    active_labels: Iterable[str],
+) -> Tuple[List[str], Dict[str, Any]]:
+    """Build sorted classnames and one-hot (or binary) class mapping.
+
+    Uses sklearn ``LabelBinarizer`` the same way as onfly Sequence loaders.
+    """
+    from sklearn.preprocessing import LabelBinarizer
+
+    classnames = sorted({str(c) for c in active_labels if str(c).strip() != ""})
+    if not classnames:
+        return [], {}
+    labels = np.array(classnames)
+    lb = LabelBinarizer()
+    transformed = lb.fit_transform(labels)
+    transformed = [list(i) for i in transformed]
+    classmapping = {name: transformed[i] for i, name in enumerate(classnames)}
+    return classnames, classmapping
+
+
+def resolve_example_media_path(
+    store_root: PathLike,
+    example_id: str,
+    *,
+    path_hint: Optional[str] = None,
+    scan_index: Optional[Mapping[str, PathLike]] = None,
+) -> Optional[Path]:
+    """Locate a preview media file for ``example_id`` under the store."""
+    root = Path(store_root)
+    eid = str(example_id)
+    candidates: List[Path] = []
+    if path_hint:
+        candidates.append(root / path_hint)
+        candidates.append(Path(path_hint))
+    if scan_index and eid in scan_index:
+        candidates.append(Path(scan_index[eid]))
+    # Flat prepared layout
+    for ext in (".jpg", ".jpeg", ".png", ".avi", ".JPG", ".JPEG", ".PNG", ".AVI"):
+        candidates.append(root / f"{eid}{ext}")
+        for sub in ("train", "validation", "test"):
+            candidates.append(root / sub / f"{eid}{ext}")
+    # Behavior-folder layout: */<eid>.*
+    if root.is_dir():
+        for behavior in root.iterdir():
+            if not behavior.is_dir() or behavior.name.startswith("."):
+                continue
+            for ext in (".jpg", ".jpeg", ".png", ".avi"):
+                candidates.append(behavior / f"{eid}{ext}")
+
+    seen: set[str] = set()
+    for c in candidates:
+        try:
+            key = str(c.resolve()) if c.exists() else str(c)
+        except OSError:
+            key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        if c.is_file():
+            return c
+    return None

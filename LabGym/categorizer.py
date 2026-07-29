@@ -95,6 +95,7 @@ class DatasetFromPath_AA(Sequence):
 		self.channel=channel
 		self.label_mode=label_mode
 		self.class_means=class_means
+		self.active_label_by_path={}
 		self.pattern_image_paths,self.classmapping=self.load_info()
 		self.classnames=list(self.classmapping.keys())
 
@@ -121,6 +122,19 @@ class DatasetFromPath_AA(Sequence):
 		classmapping={name:labels[i] for i,name in enumerate(classnames)}
 
 		return pattern_image_paths,classmapping
+
+
+	def label_for_path(self,path_to_pattern_image):
+		'''Active hard label: manifest override when set, else filename tag.'''
+		if self.active_label_by_path:
+			lab=self.active_label_by_path.get(path_to_pattern_image)
+			if lab is not None:
+				return lab
+			# Windows path key variants
+			lab=self.active_label_by_path.get(os.path.normpath(path_to_pattern_image))
+			if lab is not None:
+				return lab
+		return path_to_pattern_image.split('.jpg')[0].split('_')[-1]
 
 
 	def __len__(self):
@@ -153,7 +167,7 @@ class DatasetFromPath_AA(Sequence):
 			pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
 			pattern_images.append(img_to_array(pattern_image))
 
-			labels.append(np.array(self.classmapping[path_to_pattern_image.split('.jpg')[0].split('_')[-1]]))
+			labels.append(np.array(self.classmapping[self.label_for_path(path_to_pattern_image)]))
 
 		animations=np.array(animations)
 		animations=animations.astype('float32')/255.0
@@ -181,6 +195,7 @@ class DatasetFromPath(Sequence):
 		self.channel=channel
 		self.label_mode=label_mode
 		self.class_means=class_means
+		self.active_label_by_path={}
 		self.pattern_image_paths,self.classmapping=self.load_info()
 		self.classnames=list(self.classmapping.keys())
 
@@ -209,6 +224,18 @@ class DatasetFromPath(Sequence):
 		return pattern_image_paths,classmapping
 
 
+	def label_for_path(self,path_to_pattern_image):
+		'''Active hard label: manifest override when set, else filename tag.'''
+		if self.active_label_by_path:
+			lab=self.active_label_by_path.get(path_to_pattern_image)
+			if lab is not None:
+				return lab
+			lab=self.active_label_by_path.get(os.path.normpath(path_to_pattern_image))
+			if lab is not None:
+				return lab
+		return path_to_pattern_image.split('.jpg')[0].split('_')[-1]
+
+
 	def __len__(self):
 
 		return int(np.floor(len(self.pattern_image_paths)/self.batch_size))
@@ -228,7 +255,7 @@ class DatasetFromPath(Sequence):
 			pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
 			pattern_images.append(img_to_array(pattern_image))
 
-			labels.append(np.array(self.classmapping[path_to_pattern_image.split('.jpg')[0].split('_')[-1]]))
+			labels.append(np.array(self.classmapping[self.label_for_path(path_to_pattern_image)]))
 
 		pattern_images=np.array(pattern_images)
 		pattern_images=pattern_images.astype('float32')/255.0
@@ -295,11 +322,17 @@ class Categorizers():
 
 
 	def _filter_sequence_by_manifest(self,sequence,store_root):
-		'''Drop excluded / sealed-test examples from an onfly Sequence path list.'''
+		'''Apply dataset manifest effective view to an onfly Sequence.
+
+		Drops excluded and sealed-test examples, attaches active (override)
+		labels, and rebuilds ``classmapping`` / ``classnames`` so training
+		uses the effective training set rather than raw filenames only.
+		'''
 		from LabGym.training.dataset_manifest import (
-			SPLIT_SEALED_TEST,
 			DatasetManifest,
+			apply_manifest_to_path_list,
 			example_id_from_path,
+			rebuild_classmapping,
 		)
 
 		if sequence is None or not DatasetManifest.exists(store_root):
@@ -308,19 +341,26 @@ class Categorizers():
 		paths=list(getattr(sequence,'pattern_image_paths',[]) or [])
 		if not paths:
 			return 0
-		kept=[]
-		n_drop=0
-		for p in paths:
-			eid=example_id_from_path(p)
-			rec=manifest.examples.get(eid)
-			if rec is not None and (rec.excluded or rec.split==SPLIT_SEALED_TEST):
-				n_drop+=1
-				continue
-			kept.append(p)
+		kept,active_by_path,n_drop=apply_manifest_to_path_list(paths,manifest)
 		sequence.pattern_image_paths=kept
-		if n_drop:
-			msg='Manifest filtered %d excluded/sealed examples from %s'%(
-				n_drop,getattr(sequence,'path_to_examples',store_root))
+		sequence.active_label_by_path=dict(active_by_path)
+		# Rebuild class space from active labels (overrides may rename classes)
+		if kept:
+			classnames,classmapping=rebuild_classmapping(active_by_path.values())
+			if classnames:
+				sequence.classmapping=classmapping
+				sequence.classnames=list(classnames)
+		n_over=0
+		for p in kept:
+			rec=manifest.examples.get(example_id_from_path(p))
+			if rec is not None and rec.label_override:
+				n_over+=1
+		if n_drop or n_over:
+			msg=(
+				'Manifest effective view on %s: dropped %d excluded/sealed; '
+				'%d label overrides active; %d examples remain'
+				%(getattr(sequence,'path_to_examples',store_root),n_drop,n_over,len(kept))
+			)
 			print(msg)
 			self.log.append(msg)
 		return n_drop

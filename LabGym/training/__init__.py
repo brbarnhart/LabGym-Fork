@@ -51,10 +51,23 @@ from .dataset_manifest import (
     DatasetManifest,
     EffectiveExample,
     ExampleRecord,
+    apply_manifest_to_path_list,
     example_id_from_path,
     filter_paths_by_manifest,
+    rebuild_classmapping,
+    resolve_example_media_path,
     resolve_train_val_paths,
     scan_example_store,
+)
+from .review_queue import (
+    SOURCE_HIGH_LOSS,
+    SOURCE_MISCLASSIFIED,
+    ReviewQueueItem,
+    attach_media_paths,
+    available_categories,
+    build_review_queue,
+    ensure_queue_in_manifest,
+    normalize_example_id,
 )
 
 __all__ = [
@@ -101,8 +114,19 @@ __all__ = [
     "DatasetManifest",
     "EffectiveExample",
     "ExampleRecord",
+    "apply_manifest_to_path_list",
     "example_id_from_path",
     "filter_paths_by_manifest",
+    "rebuild_classmapping",
+    "resolve_example_media_path",
     "resolve_train_val_paths",
     "scan_example_store",
+    "SOURCE_HIGH_LOSS",
+    "SOURCE_MISCLASSIFIED",
+    "ReviewQueueItem",
+    "attach_media_paths",
+    "available_categories",
+    "build_review_queue",
+    "ensure_queue_in_manifest",
+    "normalize_example_id",
 ]
