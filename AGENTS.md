@@ -259,3 +259,19 @@ Lint: `[tool.ruff.lint]` in `pyproject.toml` (E4/E7/E9/F/I001); optional `tests/
 | `specifications.md` / `implementation-plan.md` | Workbench MVP (complete) baseline |
 | `pyproject.toml` | Deps, scripts, uv torch sources |
 | `pytest.ini` / `noxfile.py` | Test config and CI sessions |
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues on `brbarnhart/LabGym-Fork` (via `gh`). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (`CONTEXT.md` + `docs/adr/` at repo root). See `docs/agents/domain.md`.
