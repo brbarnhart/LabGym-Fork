@@ -294,6 +294,123 @@ class Categorizers():
 		return None
 
 
+	def _filter_sequence_by_manifest(self,sequence,store_root):
+		'''Drop excluded / sealed-test examples from an onfly Sequence path list.'''
+		from LabGym.training.dataset_manifest import (
+			SPLIT_SEALED_TEST,
+			DatasetManifest,
+			example_id_from_path,
+		)
+
+		if sequence is None or not DatasetManifest.exists(store_root):
+			return 0
+		manifest=DatasetManifest.load(store_root)
+		paths=list(getattr(sequence,'pattern_image_paths',[]) or [])
+		if not paths:
+			return 0
+		kept=[]
+		n_drop=0
+		for p in paths:
+			eid=example_id_from_path(p)
+			rec=manifest.examples.get(eid)
+			if rec is not None and (rec.excluded or rec.split==SPLIT_SEALED_TEST):
+				n_drop+=1
+				continue
+			kept.append(p)
+		sequence.pattern_image_paths=kept
+		if n_drop:
+			msg='Manifest filtered %d excluded/sealed examples from %s'%(
+				n_drop,getattr(sequence,'path_to_examples',store_root))
+			print(msg)
+			self.log.append(msg)
+		return n_drop
+
+
+	def _split_train_val_files(
+		self,
+		data_path,
+		path_files,
+		labels,
+		*,
+		val_fraction=0.2,
+		seed=42,
+		ignore_manifest=False,
+	):
+		'''Persist and reuse train/validation membership via dataset manifest.
+
+		Sealed-test and excluded examples never enter train or validation.
+		Falls back to sklearn ``train_test_split`` when ``ignore_manifest`` is True.
+		'''
+		from LabGym.training.dataset_manifest import resolve_train_val_paths
+
+		# labels may be one-hot arrays from LabelBinarizer — prefer string names
+		str_labels=[]
+		for i,lab in enumerate(labels):
+			if isinstance(lab,(list,tuple,np.ndarray)):
+				arr=np.asarray(lab)
+				if arr.ndim>0 and arr.size>1:
+					# one-hot: recover from parallel path filename
+					str_labels.append(
+						os.path.splitext(os.path.basename(path_files[i]))[0].split('_')[-1])
+				else:
+					str_labels.append(str(lab))
+			else:
+				str_labels.append(str(lab))
+
+		train_files,val_files,train_labs,val_labs,manifest=resolve_train_val_paths(
+			data_path,
+			path_files,
+			str_labels,
+			ignore_manifest=ignore_manifest,
+			val_fraction=val_fraction,
+			seed=seed,
+			persist=not ignore_manifest,
+		)
+		if manifest is not None:
+			counts=manifest.counts_by_split()
+			msg=(
+				'Dataset manifest split: train=%s validation=%s sealed_test=%s excluded filtered'
+				%(counts.get('train',0),counts.get('validation',0),counts.get('sealed_test',0))
+			)
+			print(msg)
+			self.log.append(msg)
+			if manifest.path.is_file():
+				self.log.append('Manifest: '+str(manifest.path))
+		return train_files,val_files,train_labs,val_labs,manifest
+
+
+	def _high_loss_from_model(
+		self,
+		model,
+		x,
+		y,
+		*,
+		example_ids=None,
+		top_k=100,
+		batch_size=32,
+	):
+		'''End-of-train high-loss ranking on the train-for-weights partition.'''
+		from LabGym.training.evaluation import (
+			hard_labels_from_targets,
+			high_loss_from_predictions,
+		)
+
+		classnames=list(self.classnames)
+		C=len(classnames)
+		raw=model.predict(x,batch_size=batch_size,verbose=0)
+		true_idx=hard_labels_from_targets(np.asarray(y),C)
+		n=int(true_idx.shape[0])
+		if example_ids is None:
+			ids=[f'train_{i}' for i in range(n)]
+		else:
+			ids=[str(e) for e in example_ids]
+			if len(ids)!=n:
+				# Augmentation expanded the batch — fall back to synthetic ids
+				ids=[f'train_{i}' for i in range(n)]
+		return high_loss_from_predictions(
+			ids,true_idx,np.asarray(raw),classnames,top_k=top_k)
+
+
 	def _record_holdout_evaluation(
 		self,
 		model_path,
@@ -305,11 +422,13 @@ class Categorizers():
 		example_ids=None,
 		ground_truth_snapshot=None,
 		model_settings=None,
+		high_loss=None,
 	):
 		'''Score hold-out predictions via the shared evaluation engine.
 
 		Writes legacy ``training_metrics.csv`` (and optional xlsx) plus a durable
-		run under ``<model_path>/eval/<run_id>/``.
+		run under ``<model_path>/eval/<run_id>/``. Optional ``high_loss`` is the
+		end-of-train train-partition ranking (not validation).
 		'''
 		from LabGym.training.evaluation import (
 			compute_evaluation_metrics,
@@ -349,16 +468,58 @@ class Categorizers():
 		gt_snap=dict(ground_truth_snapshot or {})
 		gt_snap.setdefault('partition','validation')
 		gt_snap.setdefault('n_examples',metrics.n_examples)
+		if high_loss is not None:
+			gt_snap['high_loss_top_k']=len(high_loss)
+			gt_snap['high_loss_partition']='train'
 		run_dir=write_evaluation_run(
 			model_path,
 			metrics,
 			source=source,
 			model_settings=settings,
 			ground_truth_snapshot=gt_snap,
+			high_loss=high_loss,
 		)
 		print('Evaluation run saved in: '+str(run_dir))
 		self.log.append('Evaluation run saved in: '+str(run_dir))
+		if high_loss:
+			print('High-loss train examples ranked: %d (see high_loss.csv)'%len(high_loss))
+			self.log.append('High-loss train examples ranked: %d'%len(high_loss))
 		return metrics
+
+
+	def _predict_sequence(self,model,sequence,input_mode='x'):
+		'''Run model.predict over a Keras Sequence; return y, proba, ids.'''
+		from LabGym.training.evaluation import hard_labels_from_targets
+
+		all_y=[]
+		all_pred=[]
+		example_ids=[]
+		bs=int(getattr(sequence,'batch_size',32))
+		paths=list(getattr(sequence,'pattern_image_paths',[]) or [])
+		classnames=list(self.classnames or getattr(sequence,'classnames',[]) or [])
+		C=max(len(classnames),1)
+
+		for idx in range(len(sequence)):
+			batch_x,batch_y=sequence[idx]
+			if input_mode=='aa':
+				if isinstance(batch_x,(list,tuple)):
+					batch_x=batch_x[0]
+			raw=model.predict(batch_x,verbose=0)
+			all_pred.append(np.asarray(raw))
+			all_y.append(np.asarray(batch_y))
+			if paths:
+				start=idx*bs
+				example_ids.extend(
+					[os.path.basename(p) for p in paths[start:start+bs]])
+
+		if not all_y:
+			return None,None,None
+		y=np.concatenate(all_y,axis=0)
+		preds=np.concatenate(all_pred,axis=0)
+		ids=example_ids if example_ids else [f'idx_{i}' for i in range(len(y))]
+		# Ensure hard indices available for high-loss
+		_ = hard_labels_from_targets(y,C)
+		return y,preds,ids
 
 
 	def _evaluate_sequence_holdout(
@@ -370,6 +531,8 @@ class Categorizers():
 		out_path=None,
 		ground_truth_snapshot=None,
 		input_mode='x',
+		train_data=None,
+		high_loss_top_k=100,
 	):
 		'''Predict over a Keras Sequence validation set and record metrics.
 
@@ -377,6 +540,7 @@ class Categorizers():
 			input_mode: ``x`` for single tensor batches; ``aa`` for
 				Animation Analyzer (animations only from AA dual output);
 				``comb`` for combined net ([animations, pattern_images]).
+			train_data: optional train Sequence for end-of-train high-loss ranking.
 		'''
 		if validation_data is None or len(validation_data)==0:
 			print('No validation batches for hold-out metrics.')
@@ -386,30 +550,24 @@ class Categorizers():
 		if self.classnames is None:
 			self.classnames=list(getattr(validation_data,'classnames',[]) or [])
 
-		all_y=[]
-		all_pred=[]
-		example_ids=[]
-		bs=int(getattr(validation_data,'batch_size',32))
-		paths=list(getattr(validation_data,'pattern_image_paths',[]) or [])
+		y,preds,ids=self._predict_sequence(model,validation_data,input_mode=input_mode)
+		if y is None:
+			print('No validation batches for hold-out metrics.')
+			return None
 
-		for idx in range(len(validation_data)):
-			batch_x,batch_y=validation_data[idx]
-			if input_mode=='aa':
-				# AA Sequence yields [animations, patterns]; analyzer uses animations only.
-				if isinstance(batch_x,(list,tuple)):
-					batch_x=batch_x[0]
-			# comb and x: use batch_x as returned
-			raw=model.predict(batch_x,verbose=0)
-			all_pred.append(np.asarray(raw))
-			all_y.append(np.asarray(batch_y))
-			if paths:
-				start=idx*bs
-				example_ids.extend(
-					[os.path.basename(p) for p in paths[start:start+bs]])
+		high_loss=None
+		if train_data is not None and len(train_data)>0:
+			from LabGym.training.evaluation import (
+				hard_labels_from_targets,
+				high_loss_from_predictions,
+			)
+			ty,tpred,tids=self._predict_sequence(model,train_data,input_mode=input_mode)
+			if ty is not None:
+				C=len(list(self.classnames))
+				true_idx=hard_labels_from_targets(ty,C)
+				high_loss=high_loss_from_predictions(
+					tids,true_idx,tpred,list(self.classnames),top_k=high_loss_top_k)
 
-		y=np.concatenate(all_y,axis=0)
-		preds=np.concatenate(all_pred,axis=0)
-		ids=example_ids if example_ids else None
 		snap=dict(ground_truth_snapshot or {})
 		snap.setdefault('source','onfly_validation_sequence')
 		return self._record_holdout_evaluation(
@@ -420,6 +578,7 @@ class Categorizers():
 			example_ids=ids,
 			ground_truth_snapshot=snap,
 			source='train_holdout',
+			high_loss=high_loss,
 		)
 
 
@@ -1286,7 +1445,8 @@ class Categorizers():
 				pd_parameters=pd.DataFrame.from_dict(parameters)
 				pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-				(train_files,test_files,y1,y2)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
 				class_means=None
@@ -1360,9 +1520,16 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict(testX,batch_size=batch_size)
+				hl=self._high_loss_from_model(
+					model,trainX,trainY,
+					example_ids=[os.path.basename(p) for p in train_files],
+					batch_size=batch_size)
 				self._record_holdout_evaluation(
 					model_path,predictions,testY,out_path=out_path,
-					ground_truth_snapshot={'data_path':str(data_path),'network':0})
+					ground_truth_snapshot={
+						'data_path':str(data_path),'network':0,
+						'split_source':'dataset_manifest'},
+					high_loss=hl)
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1385,7 +1552,8 @@ class Categorizers():
 
 			else:
 
-				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
@@ -1533,7 +1701,8 @@ class Categorizers():
 				pd_parameters=pd.DataFrame.from_dict(parameters)
 				pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-				(train_files,test_files,y1,y2)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				print('Perform augmentation for the behavior examples...')
 				self.log.append('Perform augmentation for the behavior examples...')
@@ -1594,9 +1763,16 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict(testX,batch_size=batch_size)
+				hl=self._high_loss_from_model(
+					model,trainX,trainY,
+					example_ids=[os.path.basename(p) for p in train_files],
+					batch_size=batch_size)
 				self._record_holdout_evaluation(
 					model_path,predictions,testY,out_path=out_path,
-					ground_truth_snapshot={'data_path':str(data_path),'network':1})
+					ground_truth_snapshot={
+						'data_path':str(data_path),'network':1,
+						'split_source':'dataset_manifest'},
+					high_loss=hl)
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1619,7 +1795,8 @@ class Categorizers():
 
 			else:
 
-				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
 				if reuse:
@@ -1746,7 +1923,8 @@ class Categorizers():
 				pd_parameters=pd.DataFrame.from_dict(parameters)
 				pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-				(train_files,test_files,y1,y2)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
 				class_means=None
@@ -1820,9 +1998,16 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict([test_animations,test_pattern_images],batch_size=batch_size)
+				hl=self._high_loss_from_model(
+					model,[train_animations,train_pattern_images],trainY,
+					example_ids=[os.path.basename(p) for p in train_files],
+					batch_size=batch_size)
 				self._record_holdout_evaluation(
 					model_path,predictions,testY,out_path=out_path,
-					ground_truth_snapshot={'data_path':str(data_path),'network':2})
+					ground_truth_snapshot={
+						'data_path':str(data_path),'network':2,
+						'split_source':'dataset_manifest'},
+					high_loss=hl)
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1845,7 +2030,8 @@ class Categorizers():
 
 			else:
 
-				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
@@ -1978,7 +2164,8 @@ class Categorizers():
 
 			train_data=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 			validation_data=DatasetFromPath(validation_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
-
+			self._filter_sequence_by_manifest(train_data,data_path)
+			self._filter_sequence_by_manifest(validation_data,data_path)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2022,7 +2209,7 @@ class Categorizers():
 			self._evaluate_sequence_holdout(
 				model,validation_data,model_path,out_path=out_path,
 				ground_truth_snapshot={'data_path':str(data_path),'network':0},
-				input_mode='x')
+				input_mode='x',train_data=train_data)
 
 			plt.style.use('classic')
 			plt.figure()
@@ -2093,6 +2280,8 @@ class Categorizers():
 
 			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
 			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
+			self._filter_sequence_by_manifest(train_data,data_path)
+			self._filter_sequence_by_manifest(validation_data,data_path)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2141,7 +2330,7 @@ class Categorizers():
 			self._evaluate_sequence_holdout(
 				model,validation_data,model_path,out_path=out_path,
 				ground_truth_snapshot={'data_path':str(data_path),'network':1},
-				input_mode='aa')
+				input_mode='aa',train_data=train_data)
 
 			plt.style.use('classic')
 			plt.figure()
@@ -2223,6 +2412,8 @@ class Categorizers():
 
 			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
+			self._filter_sequence_by_manifest(train_data,data_path)
+			self._filter_sequence_by_manifest(validation_data,data_path)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2264,7 +2455,7 @@ class Categorizers():
 			self._evaluate_sequence_holdout(
 				model,validation_data,model_path,out_path=out_path,
 				ground_truth_snapshot={'data_path':str(data_path),'network':2},
-				input_mode='comb')
+				input_mode='comb',train_data=train_data)
 
 			plt.style.use('classic')
 			plt.figure()

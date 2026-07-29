@@ -563,3 +563,63 @@ def predictions_from_model_output(
     pred = p.argmax(axis=1).astype(np.int64)
     conf = p.max(axis=1)
     return pred, conf
+
+
+def per_example_cross_entropy(
+    y_true_idx: Sequence[Any],
+    y_proba: np.ndarray,
+    n_classes: int,
+    *,
+    eps: float = 1e-7,
+) -> np.ndarray:
+    """Per-example cross-entropy loss from hard indices and model probabilities.
+
+    Supports binary sigmoid outputs ``(N,)`` / ``(N, 1)`` and multiclass
+    ``(N, C)``. Used for end-of-train high-loss ranking on the train partition.
+    """
+    true_idx = np.asarray(y_true_idx, dtype=np.int64).reshape(-1)
+    p = np.asarray(y_proba, dtype=np.float64)
+    n = true_idx.shape[0]
+    if p.ndim == 1 or (p.ndim == 2 and p.shape[1] == 1):
+        if n_classes != 2:
+            raise ValueError("1-D / single-column proba requires n_classes == 2")
+        p1 = p.reshape(-1)
+        if p1.shape[0] != n:
+            raise ValueError("y_proba length must match y_true_idx")
+        p1 = np.clip(p1, eps, 1.0 - eps)
+        # binary CE with true in {0,1}
+        t = true_idx.astype(np.float64)
+        return -(t * np.log(p1) + (1.0 - t) * np.log(1.0 - p1))
+    if p.ndim != 2 or p.shape[0] != n:
+        raise ValueError(f"y_proba shape {p.shape} incompatible with n={n}")
+    if p.shape[1] != n_classes:
+        raise ValueError(
+            f"y_proba columns ({p.shape[1]}) must match n_classes ({n_classes})"
+        )
+    p = np.clip(p, eps, 1.0)
+    rows = np.arange(n)
+    return -np.log(p[rows, true_idx])
+
+
+def high_loss_from_predictions(
+    example_ids: Sequence[str],
+    y_true_idx: Sequence[Any],
+    y_proba: np.ndarray,
+    classnames: Sequence[str],
+    *,
+    top_k: Optional[int] = 100,
+) -> List[HighLossExample]:
+    """Rank train-partition examples by cross-entropy loss (highest first)."""
+    names = [str(c) for c in classnames]
+    true_idx = np.asarray(y_true_idx, dtype=np.int64).reshape(-1)
+    losses = per_example_cross_entropy(true_idx, y_proba, len(names))
+    pred_idx, _ = predictions_from_model_output(np.asarray(y_proba), len(names))
+    true_labels = [names[int(i)] if 0 <= int(i) < len(names) else str(i) for i in true_idx]
+    pred_labels = [names[int(i)] if 0 <= int(i) < len(names) else str(i) for i in pred_idx]
+    return rank_high_loss_examples(
+        example_ids,
+        losses,
+        true_labels,
+        pred_labels=pred_labels,
+        top_k=top_k,
+    )
