@@ -10,7 +10,17 @@ import pandas as pd
 import pytest
 
 from LabGym.training.evaluation import (
+    COMPARE_ROW_KEYS,
+    best_macro_f1_indices,
+    build_compare_row,
+    classnames_mismatch_report,
+    compare_row_from_loaded_run,
+    compare_row_from_stored_eval,
     compute_evaluation_metrics,
+    export_compare_table_csv,
+    filter_rows_matching_classnames,
+    format_dim_summary,
+    format_level_summary,
     format_taxonomy_drift_message,
     hard_labels_from_targets,
     list_evaluation_runs,
@@ -287,3 +297,143 @@ def test_model_classnames_from_parameters(tmp_path: Path):
     ).to_csv(model / "model_parameters.txt", index=False)
     assert model_classnames_from_parameters(model) == ["a", "b"]
     assert model_classnames_from_parameters(tmp_path / "missing") == []
+
+
+def test_format_level_and_dim_summaries():
+    assert format_level_summary({"level_conv": 2}) == "2"
+    assert format_level_summary({"level_tconv": 3, "level_conv": 1}) == "t3/c1"
+    assert format_dim_summary({"dim_conv": 64}) == "64"
+    assert format_dim_summary({"dim_tconv": 32, "dim_conv": 64}) == "t32/c64"
+    assert format_level_summary({}) == ""
+    assert format_dim_summary(None) == ""
+
+
+def test_build_compare_row_from_summaries():
+    row = build_compare_row(
+        model_path="/models/cat_A",
+        run_meta={"run_id": "r1", "source": "test", "macro_f1": 0.5},
+        metrics_summary={
+            "macro_f1": 0.8,
+            "n_examples": 10,
+            "n_misclassified": 2,
+            "per_class_f1_worst_first": [
+                {"label": "walk", "f1": 0.4},
+                {"label": "groom", "f1": 0.9},
+            ],
+            "classnames": ["groom", "walk"],
+        },
+        model_settings={
+            "time_step": 15,
+            "network": 2,
+            "level_tconv": 2,
+            "level_conv": 1,
+            "dim_conv": 64,
+            "label_mode": "hard_soft_aux",
+            "lambda_soft": 0.4,
+            "classnames": ["groom", "walk"],
+        },
+        metrics_mode="reeval",
+    )
+    assert row["model"] == "cat_A"
+    assert row["macro_f1"] == pytest.approx(0.8)
+    assert row["accuracy"] == pytest.approx(0.8)
+    assert row["worst_class"] == "walk"
+    assert row["worst_f1"] == pytest.approx(0.4)
+    assert row["level"] == "t2/c1"
+    assert row["dim"] == "64"
+    assert row["lambda_soft"] == 0.4
+    assert row["label_mode"] == "hard_soft_aux"
+    assert row["metrics_mode"] == "reeval"
+    assert row["classnames"] == ["groom", "walk"]
+
+
+def test_compare_row_from_stored_eval_and_export(tmp_path: Path):
+    model = tmp_path / "m1"
+    classnames = ["a", "b"]
+    m = compute_evaluation_metrics(
+        [0, 1, 0, 1], classnames, y_pred=[0, 1, 0, 0], example_ids=["e0", "e1", "e2", "e3"]
+    )
+    write_evaluation_run(
+        model,
+        m,
+        run_id="stored1",
+        source="evaluate",
+        model_settings={
+            "time_step": 10,
+            "network": 0,
+            "level_conv": 2,
+            "dim_conv": 48,
+            "label_mode": "hard_only",
+            "lambda_soft": 0.0,
+            "classnames": classnames,
+        },
+    )
+    pd.DataFrame(
+        {
+            "classnames": classnames + [None, None],
+            "time_step": [10, None, None, None],
+            "network": [0, None, None, None],
+            "level_conv": [2, None, None, None],
+            "dim_conv": [48, None, None, None],
+            "label_mode": ["hard_only", None, None, None],
+        }
+    ).to_csv(model / "model_parameters.txt", index=False)
+
+    row = compare_row_from_stored_eval(model)
+    assert row["error"] == ""
+    assert row["metrics_mode"] == "stored"
+    assert row["run_id"] == "stored1"
+    assert row["macro_f1"] is not None
+    assert row["time_step"] == 10
+    assert row["worst_class"] in classnames
+
+    loaded = load_evaluation_run(model / "eval" / "stored1")
+    row2 = compare_row_from_loaded_run(model, loaded, metrics_mode="reeval")
+    assert row2["metrics_mode"] == "reeval"
+    assert row2["macro_f1"] == row["macro_f1"]
+
+    empty = compare_row_from_stored_eval(tmp_path / "no_eval")
+    assert "No stored" in empty["error"]
+
+    csv_path = export_compare_table_csv([row, row2], tmp_path / "compare_table.csv")
+    assert csv_path.is_file()
+    df = pd.read_csv(csv_path)
+    for col in ("model", "macro_f1", "worst_class", "lambda_soft", "metrics_mode"):
+        assert col in df.columns
+    assert list(COMPARE_ROW_KEYS) == list(COMPARE_ROW_KEYS)  # sanity export keys exist
+
+
+def test_classnames_mismatch_filter_and_best_f1():
+    rows = [
+        build_compare_row(
+            model_path="a",
+            metrics_summary={"macro_f1": 0.5, "n_examples": 4, "n_misclassified": 1},
+            classnames=["x", "y"],
+        ),
+        build_compare_row(
+            model_path="b",
+            metrics_summary={"macro_f1": 0.9, "n_examples": 4, "n_misclassified": 0},
+            classnames=["x", "y"],
+        ),
+        build_compare_row(
+            model_path="c",
+            metrics_summary={"macro_f1": 0.95, "n_examples": 4, "n_misclassified": 0},
+            classnames=["x", "y", "z"],
+        ),
+        build_compare_row(
+            model_path="d",
+            error="boom",
+            classnames=["x", "y"],
+        ),
+    ]
+    report = classnames_mismatch_report(rows)
+    assert report["has_mismatch"] is True
+    assert "differ" in report["message"].lower()
+
+    same = filter_rows_matching_classnames(rows)
+    assert [r["model"] for r in same] == ["a", "b", "d"]
+
+    best = best_macro_f1_indices(rows)
+    assert best == [2]
+    best_same = best_macro_f1_indices(same)
+    assert best_same == [1]

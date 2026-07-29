@@ -1,4 +1,4 @@
-"""Manage dataset → Evaluate: run metrics, browse eval runs, light compare."""
+"""Manage dataset → Evaluate: run metrics, browse eval runs, model compare."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from PySide6.QtCore import QObject, QThread, Qt, Signal
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -20,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -61,33 +64,92 @@ class _EvalWorker(QObject):
 
 
 class _CompareWorker(QObject):
-    """Score several already-trained models on one ground-truth folder."""
+    """Build compare rows for already-trained models (re-eval or stored)."""
 
-    finished = Signal(list)  # list of (model, run_dir|None, error|None)
+    finished = Signal(list)  # list of compare row dicts
     error = Signal(str)
     progress = Signal(str)
 
-    def __init__(self, groundtruth: str, models: List[str]):
+    def __init__(
+        self,
+        models: List[str],
+        *,
+        mode: str = "reeval",
+        groundtruth: str = "",
+    ):
         super().__init__()
-        self.groundtruth = groundtruth
         self.models = models
+        self.mode = mode  # "reeval" | "stored"
+        self.groundtruth = groundtruth
 
     def run(self) -> None:
         try:
+            from LabGym.training.evaluation import (
+                compare_row_from_loaded_run,
+                compare_row_from_stored_eval,
+                load_evaluation_run,
+            )
+
+            rows: List[Dict[str, Any]] = []
+            if self.mode == "stored":
+                for i, model in enumerate(self.models, start=1):
+                    self.progress.emit(
+                        f"[{i}/{len(self.models)}] Loading stored eval for "
+                        f"{Path(model).name}…"
+                    )
+                    try:
+                        rows.append(compare_row_from_stored_eval(model))
+                    except Exception as exc:
+                        rows.append(
+                            {
+                                "model": Path(model).name,
+                                "model_path": model,
+                                "error": str(exc),
+                                "metrics_mode": "stored",
+                                "classnames": [],
+                            }
+                        )
+                self.finished.emit(rows)
+                return
+
             from LabGym.categorizer import Categorizers
 
             ca = Categorizers()
-            results: List[tuple] = []
             for i, model in enumerate(self.models, start=1):
                 self.progress.emit(
                     f"[{i}/{len(self.models)}] Evaluating {Path(model).name}…"
                 )
                 try:
                     run_dir = ca.test_categorizer(self.groundtruth, model)
-                    results.append((model, str(run_dir or ""), None))
+                    if not run_dir:
+                        rows.append(
+                            {
+                                "model": Path(model).name,
+                                "model_path": model,
+                                "error": "Evaluation returned no run directory "
+                                "(class mismatch or empty folder?)",
+                                "metrics_mode": "reeval",
+                                "classnames": [],
+                            }
+                        )
+                        continue
+                    loaded = load_evaluation_run(run_dir)
+                    rows.append(
+                        compare_row_from_loaded_run(
+                            model, loaded, metrics_mode="reeval"
+                        )
+                    )
                 except Exception as exc:
-                    results.append((model, "", str(exc)))
-            self.finished.emit(results)
+                    rows.append(
+                        {
+                            "model": Path(model).name,
+                            "model_path": model,
+                            "error": str(exc),
+                            "metrics_mode": "reeval",
+                            "classnames": [],
+                        }
+                    )
+            self.finished.emit(rows)
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -177,8 +239,8 @@ class EvaluateTab(QWidget):
 
         compare_box = QGroupBox("Compare already-trained models")
         compare_box.setToolTip(
-            "Score multiple trained categorizers on the same ground-truth folder. "
-            "Not a hyperparameter sweep."
+            "Side-by-side metrics and training settings for already-trained "
+            "categorizers. Not a hyperparameter sweep."
         )
         cb_l = QVBoxLayout(compare_box)
         self.compare_models = QListWidget()
@@ -187,13 +249,48 @@ class EvaluateTab(QWidget):
         )
         self.compare_models.setMaximumHeight(100)
         cb_l.addWidget(self.compare_models)
+
+        mode_row = QHBoxLayout()
+        self.rb_reeval = QRadioButton("Re-evaluate on ground-truth (fair)")
+        self.rb_stored = QRadioButton("Use latest stored eval (fast)")
+        self.rb_reeval.setChecked(True)
+        self.rb_reeval.setToolTip(
+            "Re-score every selected model on the ground-truth folder above "
+            "so metrics share the same declared set."
+        )
+        self.rb_stored.setToolTip(
+            "Load each model's newest run under model/eval/. Faster, but "
+            "metrics may reflect different ground-truth folders or splits."
+        )
+        self._compare_mode_group = QButtonGroup(self)
+        self._compare_mode_group.addButton(self.rb_reeval)
+        self._compare_mode_group.addButton(self.rb_stored)
+        mode_row.addWidget(self.rb_reeval)
+        mode_row.addWidget(self.rb_stored)
+        cb_l.addLayout(mode_row)
+
+        self.chk_same_classes = QCheckBox("Require identical class sets")
+        self.chk_same_classes.setChecked(True)
+        self.chk_same_classes.setToolTip(
+            "Only compare models whose model_parameters classnames match the "
+            "first selected model. Mismatched models are skipped with a warning."
+        )
+        cb_l.addWidget(self.chk_same_classes)
+
         cb_btns = QHBoxLayout()
         btn_scan = QPushButton("Scan project models")
         btn_scan.clicked.connect(self._scan_models_for_compare)
         self.btn_compare = QPushButton("Compare selected")
         self.btn_compare.clicked.connect(self._run_compare)
+        self.btn_export_compare = QPushButton("Export CSV…")
+        self.btn_export_compare.setToolTip(
+            "Write the current Compare table to compare_table.csv."
+        )
+        self.btn_export_compare.clicked.connect(self._export_compare_csv)
+        self.btn_export_compare.setEnabled(False)
         cb_btns.addWidget(btn_scan)
         cb_btns.addWidget(self.btn_compare)
+        cb_btns.addWidget(self.btn_export_compare)
         cb_l.addLayout(cb_btns)
         left_l.addWidget(compare_box)
 
@@ -231,16 +328,42 @@ class EvaluateTab(QWidget):
             ["rank", "example_id", "loss", "true_label", "pred_label"]
         )
         self.tbl_settings = self._make_table(["Setting", "Value"])
+        self._compare_col_keys = [
+            "model",
+            "macro_f1",
+            "accuracy",
+            "n_examples",
+            "n_misclassified",
+            "worst_class",
+            "worst_f1",
+            "time_step",
+            "network",
+            "level",
+            "dim",
+            "label_mode",
+            "lambda_soft",
+            "run_id",
+            "source",
+            "metrics_mode",
+        ]
         self.tbl_compare = self._make_table(
             [
                 "Model",
                 "macro_f1",
+                "accuracy",
                 "n_examples",
                 "n_misclassified",
+                "worst_class",
+                "worst_f1",
                 "time_step",
                 "network",
+                "level",
+                "dim",
                 "label_mode",
+                "lambda_soft",
                 "run_id",
+                "source",
+                "mode",
             ]
         )
         self.log = QTextEdit()
@@ -331,6 +454,7 @@ class EvaluateTab(QWidget):
     def _set_busy(self, busy: bool) -> None:
         self.btn_run.setEnabled(not busy)
         self.btn_compare.setEnabled(not busy)
+        self.btn_export_compare.setEnabled(not busy and bool(self._compare_rows))
         self.btn_refresh.setEnabled(not busy)
 
     def _run_evaluation(self) -> None:
@@ -656,18 +780,55 @@ class EvaluateTab(QWidget):
         for p in paths:
             item = QListWidgetItem(Path(p).name)
             item.setData(Qt.ItemDataRole.UserRole, p)
-            item.setToolTip(p)
+            tip = p
+            try:
+                from LabGym.training.evaluation import model_classnames_from_parameters
+
+                names = model_classnames_from_parameters(p)
+                if names:
+                    tip = f"{p}\nclasses: {', '.join(names)}"
+            except Exception:
+                pass
+            item.setToolTip(tip)
             self.compare_models.addItem(item)
+
+    def _selected_compare_models(self) -> List[str]:
+        selected = self.compare_models.selectedItems()
+        return [
+            str(i.data(Qt.ItemDataRole.UserRole))
+            for i in selected
+            if i.data(Qt.ItemDataRole.UserRole)
+        ]
+
+    def _filter_models_same_class_set(self, models: List[str]) -> List[str]:
+        """Keep models matching the first model's classnames; log skips."""
+        if not models or not self.chk_same_classes.isChecked():
+            return models
+        from LabGym.training.evaluation import model_classnames_from_parameters
+
+        ref = tuple(sorted(model_classnames_from_parameters(models[0])))
+        if not ref:
+            self.log.append(
+                "Class-set filter: first model has no classnames in "
+                "model_parameters.txt; comparing all selected."
+            )
+            return models
+        kept: List[str] = []
+        for m in models:
+            names = tuple(sorted(model_classnames_from_parameters(m)))
+            if names == ref:
+                kept.append(m)
+            else:
+                self.log.append(
+                    f"Skipping {Path(m).name}: class set differs from "
+                    f"{Path(models[0]).name} ({len(names)} vs {len(ref)} classes)."
+                )
+        return kept
 
     def _run_compare(self) -> None:
         if self._thread is not None:
             return
-        gt = self.ed_gt.text().strip()
-        if not gt or not Path(gt).is_dir():
-            QMessageBox.warning(self, "Compare", "Set a valid ground-truth examples folder.")
-            return
-        selected = self.compare_models.selectedItems()
-        models = [str(i.data(Qt.ItemDataRole.UserRole)) for i in selected if i.data(Qt.ItemDataRole.UserRole)]
+        models = self._selected_compare_models()
         if len(models) < 2:
             QMessageBox.warning(
                 self,
@@ -675,11 +836,38 @@ class EvaluateTab(QWidget):
                 "Select at least two already-trained categorizers in the compare list.",
             )
             return
+
+        mode = "stored" if self.rb_stored.isChecked() else "reeval"
+        gt = self.ed_gt.text().strip()
+        if mode == "reeval":
+            if not gt or not Path(gt).is_dir():
+                QMessageBox.warning(
+                    self,
+                    "Compare",
+                    "Set a valid ground-truth examples folder for fair re-evaluation.",
+                )
+                return
+
+        models = self._filter_models_same_class_set(models)
+        if len(models) < 2:
+            QMessageBox.warning(
+                self,
+                "Compare",
+                "Fewer than two models share an identical class set. "
+                "Uncheck “Require identical class sets” or select matching models.",
+            )
+            return
+
         self._set_busy(True)
-        self.log.append(f"Comparing {len(models)} models on {gt}…")
+        if mode == "reeval":
+            self.log.append(f"Comparing {len(models)} models on {gt} (re-eval)…")
+        else:
+            self.log.append(
+                f"Comparing {len(models)} models from stored eval runs (fast)…"
+            )
         self.detail_tabs.setCurrentWidget(self.tbl_compare)
         self._thread = QThread(self)
-        worker = _CompareWorker(gt, models)
+        worker = _CompareWorker(models, mode=mode, groundtruth=gt)
         worker.moveToThread(self._thread)
         self._thread.started.connect(worker.run)
         worker.progress.connect(lambda m: self.log.append(m))
@@ -692,70 +880,108 @@ class EvaluateTab(QWidget):
         self._thread.start()
 
     def _compare_done(self, results: list) -> None:
-        from LabGym.training.evaluation import load_evaluation_run
+        from LabGym.training.evaluation import (
+            best_macro_f1_indices,
+            classnames_mismatch_report,
+        )
 
         self.tbl_compare.setRowCount(0)
-        self._compare_rows = []
-        for model, run_dir, err in results:
-            row_data: Dict[str, Any] = {
-                "model": Path(model).name,
-                "model_path": model,
-                "run_id": "",
-                "macro_f1": "",
-                "n_examples": "",
-                "n_misclassified": "",
-                "time_step": "",
-                "network": "",
-                "label_mode": "",
-                "error": err or "",
-            }
-            if run_dir and not err:
-                try:
-                    loaded = load_evaluation_run(run_dir)
-                    meta = loaded.get("run_meta") or {}
-                    summary = loaded.get("metrics_summary") or {}
-                    settings = meta.get("model_settings") or {}
-                    row_data["run_id"] = meta.get("run_id", Path(run_dir).name)
-                    row_data["macro_f1"] = summary.get(
-                        "macro_f1", meta.get("macro_f1", "")
-                    )
-                    row_data["n_examples"] = summary.get(
-                        "n_examples", meta.get("n_examples", "")
-                    )
-                    row_data["n_misclassified"] = summary.get(
-                        "n_misclassified", meta.get("n_misclassified", "")
-                    )
-                    row_data["time_step"] = settings.get("time_step", "")
-                    row_data["network"] = settings.get("network", "")
-                    row_data["label_mode"] = settings.get("label_mode", "")
-                    self.log.append(f"  {Path(model).name} → {run_dir}")
-                except Exception as exc:
-                    row_data["error"] = str(exc)
-            elif err:
-                self.log.append(f"  {Path(model).name} ERROR: {err}")
-            self._compare_rows.append(row_data)
+        self._compare_rows = [dict(r) for r in results]
+
+        report = classnames_mismatch_report(self._compare_rows)
+        if report.get("has_mismatch") and report.get("message"):
+            self.log.append(report["message"])
+
+        for row_data in self._compare_rows:
+            name = row_data.get("model") or Path(str(row_data.get("model_path", ""))).name
+            err = row_data.get("error") or ""
+            if err:
+                self.log.append(f"  {name} ERROR: {err}")
+            else:
+                rid = row_data.get("run_id") or ""
+                f1 = row_data.get("macro_f1")
+                self.log.append(
+                    f"  {name}  macro_f1={self._fmt_f1(f1)}  run={rid}"
+                )
+
+        # Sort rows by macro_f1 descending (errors last)
+        def _sort_key(r: Dict[str, Any]) -> tuple:
+            if r.get("error"):
+                return (1, 0.0, str(r.get("model") or ""))
+            f1 = r.get("macro_f1")
+            try:
+                return (0, -float(f1), str(r.get("model") or ""))
+            except (TypeError, ValueError):
+                return (0, 0.0, str(r.get("model") or ""))
+
+        self._compare_rows.sort(key=_sort_key)
+        best_idxs = set(best_macro_f1_indices(self._compare_rows))
+        best_brush = QBrush(QColor(200, 255, 200))
+        error_brush = QBrush(QColor(255, 220, 220))
+
+        for r_i, row_data in enumerate(self._compare_rows):
             r = self.tbl_compare.rowCount()
             self.tbl_compare.insertRow(r)
             vals = [
-                row_data["model"],
-                self._fmt_f1(row_data["macro_f1"]),
-                str(row_data["n_examples"]),
-                str(row_data["n_misclassified"]),
-                str(row_data["time_step"]),
-                str(row_data["network"]),
-                str(row_data["label_mode"]),
-                str(row_data["run_id"] or row_data["error"]),
+                str(row_data.get("model") or ""),
+                self._fmt_f1(row_data.get("macro_f1")),
+                self._fmt_f1(row_data.get("accuracy")),
+                str(row_data.get("n_examples", "")),
+                str(row_data.get("n_misclassified", "")),
+                str(row_data.get("worst_class") or ""),
+                self._fmt_f1(row_data.get("worst_f1")),
+                str(row_data.get("time_step", "")),
+                str(row_data.get("network", "")),
+                str(row_data.get("level") or ""),
+                str(row_data.get("dim") or ""),
+                str(row_data.get("label_mode") or ""),
+                str(row_data.get("lambda_soft", "")),
+                str(row_data.get("run_id") or row_data.get("error") or ""),
+                str(row_data.get("source") or ""),
+                str(row_data.get("metrics_mode") or ""),
             ]
+            is_best = r_i in best_idxs
+            is_err = bool(row_data.get("error"))
             for c, v in enumerate(vals):
-                self.tbl_compare.setItem(r, c, QTableWidgetItem(v))
-        # Sort display by macro_f1 descending when possible
-        self.tbl_compare.sortItems(1, Qt.SortOrder.DescendingOrder)
+                item = QTableWidgetItem(v)
+                if is_err:
+                    item.setBackground(error_brush)
+                elif is_best and c in (0, 1):  # model + macro_f1
+                    item.setBackground(best_brush)
+                    if c == 1:
+                        item.setToolTip("Best macro F1 in this comparison")
+                self.tbl_compare.setItem(r, c, item)
+
+        self.btn_export_compare.setEnabled(bool(self._compare_rows))
         self.log.append("Compare finished.")
-        QMessageBox.information(
+        msg = f"Compared {len(self._compare_rows)} model(s). See the Compare tab."
+        if report.get("has_mismatch"):
+            msg += "\n\nWarning: classname sets differ across models."
+        QMessageBox.information(self, "Compare", msg)
+
+    def _export_compare_csv(self) -> None:
+        if not self._compare_rows:
+            QMessageBox.information(
+                self, "Export", "Run a comparison first, then export the table."
+            )
+            return
+        default_name = "compare_table.csv"
+        path, _ = QFileDialog.getSaveFileName(
             self,
-            "Compare",
-            f"Compared {len(results)} model(s). See the Compare tab.",
+            "Export compare table",
+            default_name,
+            "CSV files (*.csv);;All files (*.*)",
         )
+        if not path:
+            return
+        try:
+            from LabGym.training.evaluation import export_compare_table_csv
+
+            out = export_compare_table_csv(self._compare_rows, path)
+            self.log.append(f"Exported compare table → {out}")
+            QMessageBox.information(self, "Export", f"Wrote:\n{out}")
+        except Exception as exc:
+            QMessageBox.warning(self, "Export", str(exc))
 
     @staticmethod
     def _fmt_f1(val: Any) -> str:

@@ -400,10 +400,14 @@ def write_evaluation_run(
         encoding="utf-8",
     )
 
+    n_ex = int(metrics.n_examples)
+    n_mis = int(metrics.n_misclassified)
+    accuracy = float(n_ex - n_mis) / float(n_ex) if n_ex > 0 else None
     summary = {
         "macro_f1": metrics.macro_f1,
-        "n_examples": metrics.n_examples,
-        "n_misclassified": metrics.n_misclassified,
+        "accuracy": accuracy,
+        "n_examples": n_ex,
+        "n_misclassified": n_mis,
         "per_class_f1_worst_first": [
             {"label": lab, "f1": f1} for lab, f1 in metrics.per_class_f1_worst_first
         ],
@@ -664,6 +668,386 @@ def model_settings_from_parameters_df(parameters: pd.DataFrame) -> Dict[str, Any
                     val = str(val)
             settings[str(col)] = val
     return settings
+
+
+def model_settings_from_model_dir(model_dir: PathLike) -> Dict[str, Any]:
+    """Load training settings from ``model_parameters.txt`` under a model folder."""
+    path = Path(model_dir) / "model_parameters.txt"
+    if not path.is_file():
+        return {}
+    try:
+        params = pd.read_csv(path)
+    except Exception:
+        return {}
+    return model_settings_from_parameters_df(params)
+
+
+# Columns for side-by-side already-trained model comparison (UI + CSV export).
+COMPARE_ROW_KEYS: Tuple[str, ...] = (
+    "model",
+    "macro_f1",
+    "accuracy",
+    "n_examples",
+    "n_misclassified",
+    "worst_class",
+    "worst_f1",
+    "time_step",
+    "network",
+    "level",
+    "dim",
+    "label_mode",
+    "lambda_soft",
+    "run_id",
+    "source",
+    "metrics_mode",
+    "error",
+)
+
+
+def format_level_summary(settings: Optional[Mapping[str, Any]]) -> str:
+    """Human-readable network depth(s) from model settings."""
+    if not settings:
+        return ""
+    tconv = settings.get("level_tconv")
+    conv = settings.get("level_conv", settings.get("level"))
+    if tconv is not None and conv is not None and str(tconv) != str(conv):
+        return f"t{tconv}/c{conv}"
+    if conv is not None:
+        return str(conv)
+    if tconv is not None:
+        return str(tconv)
+    return ""
+
+
+def format_dim_summary(settings: Optional[Mapping[str, Any]]) -> str:
+    """Human-readable input dim(s) from model settings."""
+    if not settings:
+        return ""
+    tconv = settings.get("dim_tconv")
+    conv = settings.get("dim_conv", settings.get("dim"))
+    if tconv is not None and conv is not None and str(tconv) != str(conv):
+        return f"t{tconv}/c{conv}"
+    if conv is not None:
+        return str(conv)
+    if tconv is not None:
+        return str(tconv)
+    return ""
+
+
+def _as_optional_float(val: Any) -> Optional[float]:
+    if val is None or val == "":
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
+
+
+def worst_class_from_summary(
+    metrics_summary: Optional[Mapping[str, Any]],
+) -> Tuple[str, Optional[float]]:
+    """Return (worst_class_label, worst_f1) from metrics_summary, if present."""
+    if not metrics_summary:
+        return "", None
+    ranked = metrics_summary.get("per_class_f1_worst_first") or []
+    if not ranked:
+        return "", None
+    first = ranked[0]
+    if isinstance(first, Mapping):
+        lab = str(first.get("label") or first.get("class") or "")
+        return lab, _as_optional_float(first.get("f1"))
+    if isinstance(first, (list, tuple)) and len(first) >= 2:
+        return str(first[0]), _as_optional_float(first[1])
+    return "", None
+
+
+def accuracy_from_counts(
+    n_examples: Any,
+    n_misclassified: Any,
+    *,
+    explicit: Any = None,
+) -> Optional[float]:
+    """Accuracy from explicit value or (n - mis) / n."""
+    acc = _as_optional_float(explicit)
+    if acc is not None:
+        return acc
+    try:
+        n = int(n_examples)
+        mis = int(n_misclassified)
+    except (TypeError, ValueError):
+        return None
+    if n <= 0:
+        return None
+    return float(n - mis) / float(n)
+
+
+def build_compare_row(
+    *,
+    model_path: PathLike,
+    run_meta: Optional[Mapping[str, Any]] = None,
+    metrics_summary: Optional[Mapping[str, Any]] = None,
+    model_settings: Optional[Mapping[str, Any]] = None,
+    classnames: Optional[Sequence[str]] = None,
+    classification_report: Optional[Mapping[str, Any]] = None,
+    error: Optional[str] = None,
+    metrics_mode: str = "",
+    run_id: str = "",
+    source: str = "",
+) -> Dict[str, Any]:
+    """Build one side-by-side compare table row (settings + metrics).
+
+    Pure helper for UI and CSV export. Missing fields become empty strings /
+    ``None`` rather than raising.
+    """
+    meta = dict(run_meta or {})
+    summary = dict(metrics_summary or {})
+    settings = dict(model_settings or meta.get("model_settings") or {})
+    report = dict(classification_report or {})
+
+    names: List[str] = []
+    if classnames:
+        names = [str(c) for c in classnames]
+    elif isinstance(settings.get("classnames"), list):
+        names = [str(c) for c in settings["classnames"]]
+    elif isinstance(meta.get("classnames"), list):
+        names = [str(c) for c in meta["classnames"]]
+    elif isinstance(summary.get("classnames"), list):
+        names = [str(c) for c in summary["classnames"]]
+
+    macro = summary.get("macro_f1", meta.get("macro_f1"))
+    n_ex = summary.get("n_examples", meta.get("n_examples", ""))
+    n_mis = summary.get("n_misclassified", meta.get("n_misclassified", ""))
+    worst_lab, worst_f1 = worst_class_from_summary(summary)
+    acc_explicit = None
+    if "accuracy" in summary:
+        acc_explicit = summary.get("accuracy")
+    elif isinstance(report.get("accuracy"), (int, float)):
+        acc_explicit = report.get("accuracy")
+    elif isinstance(report.get("accuracy"), Mapping):
+        acc_explicit = report["accuracy"].get("f1-score")  # unlikely
+    accuracy = accuracy_from_counts(n_ex, n_mis, explicit=acc_explicit)
+
+    rid = run_id or str(meta.get("run_id") or "")
+    src = source or str(meta.get("source") or "")
+
+    row: Dict[str, Any] = {
+        "model": Path(model_path).name,
+        "model_path": str(model_path),
+        "macro_f1": _as_optional_float(macro),
+        "accuracy": accuracy,
+        "n_examples": n_ex if n_ex != "" else "",
+        "n_misclassified": n_mis if n_mis != "" else "",
+        "worst_class": worst_lab,
+        "worst_f1": worst_f1,
+        "time_step": settings.get("time_step", ""),
+        "network": settings.get("network", ""),
+        "level": format_level_summary(settings),
+        "dim": format_dim_summary(settings),
+        "label_mode": settings.get("label_mode", ""),
+        "lambda_soft": settings.get("lambda_soft", ""),
+        "run_id": rid,
+        "source": src,
+        "metrics_mode": metrics_mode,
+        "error": error or "",
+        "classnames": names,
+    }
+    return row
+
+
+def compare_row_from_loaded_run(
+    model_path: PathLike,
+    loaded: Mapping[str, Any],
+    *,
+    metrics_mode: str = "reeval",
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Build a compare row from :func:`load_evaluation_run` output."""
+    meta = loaded.get("run_meta") or {}
+    summary = loaded.get("metrics_summary") or {}
+    settings = meta.get("model_settings") if isinstance(meta, Mapping) else {}
+    if not settings:
+        settings = model_settings_from_model_dir(model_path)
+    return build_compare_row(
+        model_path=model_path,
+        run_meta=meta if isinstance(meta, Mapping) else {},
+        metrics_summary=summary if isinstance(summary, Mapping) else {},
+        model_settings=settings if isinstance(settings, Mapping) else {},
+        classification_report=loaded.get("classification_report")
+        if isinstance(loaded.get("classification_report"), Mapping)
+        else None,
+        error=error,
+        metrics_mode=metrics_mode,
+    )
+
+
+def compare_row_from_stored_eval(
+    model_dir: PathLike,
+    *,
+    prefer_sources: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Build a compare row from the newest stored eval run under a model.
+
+    Prefers runs whose ``source`` is in ``prefer_sources`` when provided
+    (still newest-first within that filter). Falls back to any listed run.
+    """
+    model_path = Path(model_dir)
+    settings = model_settings_from_model_dir(model_path)
+    classnames = model_classnames_from_parameters(model_path)
+    runs = list_evaluation_runs(model_path)
+    if not runs:
+        return build_compare_row(
+            model_path=model_path,
+            model_settings=settings,
+            classnames=classnames,
+            error="No stored evaluation runs under model/eval/",
+            metrics_mode="stored",
+        )
+
+    chosen = runs
+    if prefer_sources:
+        pref = {str(s) for s in prefer_sources}
+        filtered = [r for r in runs if r.source in pref]
+        if filtered:
+            chosen = filtered
+    info = chosen[0]
+    try:
+        loaded = load_evaluation_run(info.run_dir)
+    except Exception as exc:
+        return build_compare_row(
+            model_path=model_path,
+            model_settings=settings,
+            classnames=classnames,
+            run_id=info.run_id,
+            source=info.source,
+            error=f"Failed to load run: {exc}",
+            metrics_mode="stored",
+        )
+    row = compare_row_from_loaded_run(
+        model_path, loaded, metrics_mode="stored"
+    )
+    # Prefer on-disk parameters when run meta omitted settings
+    if not row.get("time_step") and settings:
+        filled = build_compare_row(
+            model_path=model_path,
+            run_meta=loaded.get("run_meta") or {},
+            metrics_summary=loaded.get("metrics_summary") or {},
+            model_settings=settings,
+            classnames=classnames or row.get("classnames"),
+            classification_report=loaded.get("classification_report")
+            if isinstance(loaded.get("classification_report"), Mapping)
+            else None,
+            metrics_mode="stored",
+        )
+        return filled
+    if not row.get("classnames") and classnames:
+        row["classnames"] = list(classnames)
+    return row
+
+
+def classnames_mismatch_report(
+    rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Describe classname-set differences across compare rows.
+
+    Returns::
+
+        {
+          "has_mismatch": bool,
+          "message": str,  # empty if no mismatch
+          "sets": [sorted classnames frozenset as list, ...],
+        }
+    """
+    sets: List[Tuple[str, ...]] = []
+    labels: List[str] = []
+    for row in rows:
+        if row.get("error") and not row.get("classnames"):
+            continue
+        names = row.get("classnames") or []
+        key = tuple(sorted(str(c) for c in names))
+        if not key:
+            continue
+        sets.append(key)
+        labels.append(str(row.get("model") or row.get("model_path") or "?"))
+    unique = sorted(set(sets))
+    if len(unique) <= 1:
+        return {"has_mismatch": False, "message": "", "sets": [list(s) for s in unique]}
+    parts = [
+        "Classname sets differ across models; metrics are not strictly comparable."
+    ]
+    for s in unique:
+        models = [
+            labels[i] for i, key in enumerate(sets) if key == s
+        ]
+        preview = ", ".join(s[:6]) + ("…" if len(s) > 6 else "")
+        parts.append(f"{', '.join(models)}: {{{preview}}} ({len(s)} classes).")
+    return {
+        "has_mismatch": True,
+        "message": " ".join(parts),
+        "sets": [list(s) for s in unique],
+    }
+
+
+def filter_rows_matching_classnames(
+    rows: Sequence[Mapping[str, Any]],
+    reference_classnames: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Keep rows whose classname set matches the reference (or first good row)."""
+    ref: Optional[Tuple[str, ...]] = None
+    if reference_classnames is not None:
+        ref = tuple(sorted(str(c) for c in reference_classnames))
+    else:
+        for row in rows:
+            names = row.get("classnames") or []
+            if names and not row.get("error"):
+                ref = tuple(sorted(str(c) for c in names))
+                break
+    if ref is None:
+        return [dict(r) for r in rows]
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        names = row.get("classnames") or []
+        key = tuple(sorted(str(c) for c in names))
+        if key == ref:
+            out.append(dict(row))
+    return out
+
+
+def best_macro_f1_indices(rows: Sequence[Mapping[str, Any]]) -> List[int]:
+    """Indices of rows tied for highest macro_f1 (errors / missing excluded)."""
+    best: Optional[float] = None
+    idxs: List[int] = []
+    for i, row in enumerate(rows):
+        if row.get("error"):
+            continue
+        f1 = _as_optional_float(row.get("macro_f1"))
+        if f1 is None:
+            continue
+        if best is None or f1 > best + 1e-12:
+            best = f1
+            idxs = [i]
+        elif abs(f1 - best) <= 1e-12:
+            idxs.append(i)
+    return idxs
+
+
+def export_compare_table_csv(
+    rows: Sequence[Mapping[str, Any]],
+    path: PathLike,
+    *,
+    columns: Optional[Sequence[str]] = None,
+) -> Path:
+    """Write a compare table to CSV. Returns the written path."""
+    cols = list(columns) if columns is not None else list(COMPARE_ROW_KEYS)
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    records: List[Dict[str, Any]] = []
+    for row in rows:
+        rec: Dict[str, Any] = {}
+        for c in cols:
+            rec[c] = row.get(c, "")
+        records.append(rec)
+    pd.DataFrame(records, columns=cols).to_csv(out, index=False)
+    return out
 
 
 def hard_labels_from_targets(
