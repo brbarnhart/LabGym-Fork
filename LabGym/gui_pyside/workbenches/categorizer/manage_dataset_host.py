@@ -5,32 +5,17 @@ from __future__ import annotations
 from PySide6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.workbenches.categorizer.categories_tab import CategoriesTab
 from LabGym.gui_pyside.workbenches.categorizer.evaluate_tab import EvaluateTab
 from LabGym.gui_pyside.workbenches.categorizer.review_examples_tab import (
     ReviewExamplesTab,
 )
 
 
-class _PlaceholderSubtab(QWidget):
-    """Temporary panel for Manage dataset areas not yet implemented."""
-
-    def __init__(self, title: str, body: str, parent=None):
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        head = QLabel(f"<b>{title}</b>")
-        head.setWordWrap(True)
-        layout.addWidget(head)
-        note = QLabel(body)
-        note.setWordWrap(True)
-        layout.addWidget(note)
-        layout.addStretch(1)
-
-
 class ManageDatasetHost(QWidget):
     """Nested host matching Generate training data: three Manage areas.
 
-    Phase 3: Evaluate. Phase 4: Review examples + train effective view.
-    Categories (taxonomy ops / soft projection) remains a later phase.
+    Phase 3: Evaluate. Phase 4: Review. Phase 5: Categories + soft projection.
     """
 
     def __init__(self, project: ProjectController, parent=None):
@@ -49,12 +34,7 @@ class ManageDatasetHost(QWidget):
         layout.addWidget(intro)
 
         self.inner = QTabWidget()
-        self.categories_tab = _PlaceholderSubtab(
-            "Categories",
-            "Coming next: merge / exclude categories (undoable), sealed-test "
-            "and train/validation split tooling against dataset_manifest.json. "
-            "Soft-label projection after taxonomy ops is also planned here.",
-        )
+        self.categories_tab = CategoriesTab(project)
         self.review_tab = ReviewExamplesTab(project)
         self.evaluate_tab = EvaluateTab(project)
 
@@ -70,3 +50,7 @@ class ManageDatasetHost(QWidget):
     def show_review(self) -> None:
         """Focus the Review examples subtab."""
         self.inner.setCurrentWidget(self.review_tab)
+
+    def show_categories(self) -> None:
+        """Focus the Categories subtab."""
+        self.inner.setCurrentWidget(self.categories_tab)

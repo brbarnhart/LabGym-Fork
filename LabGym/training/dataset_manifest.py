@@ -251,6 +251,10 @@ class DatasetManifest:
         elif kind == "add_example":
             rec = ExampleRecord.from_dict(op.get("record") or op)
             self.examples[rec.example_id] = rec
+        elif kind == "set_taxonomy_ops":
+            self.taxonomy_ops = list(op.get("taxonomy_ops") or [])
+        elif kind == "set_split_meta":
+            self.split_meta = dict(op.get("split_meta") or {})
 
     def _snapshot_fields(self, rec: ExampleRecord) -> Dict[str, Any]:
         return {
@@ -336,6 +340,132 @@ class DatasetManifest:
                 [str(c) for c in classnames] if classnames is not None else None
             )
         self._push_undo([before], label="soft_override")
+
+    # --- taxonomy operations ---------------------------------------------
+
+    def merge_categories(
+        self,
+        sources: Sequence[str],
+        target: str,
+    ) -> int:
+        """Map examples whose active label is in ``sources`` onto ``target``.
+
+        Records a taxonomy merge op for soft projection. Returns number of
+        examples whose label override was set. Undo restores fields + ops.
+        """
+        target = str(target).strip()
+        src = sorted({str(s).strip() for s in sources if str(s).strip() and str(s).strip() != target})
+        if not target:
+            raise ValueError("merge target must be non-empty")
+        if not src:
+            raise ValueError("merge requires at least one source category distinct from target")
+
+        reverse: List[Dict[str, Any]] = [
+            {"op": "set_taxonomy_ops", "taxonomy_ops": deepcopy(self.taxonomy_ops)}
+        ]
+        n = 0
+        for rec in self.examples.values():
+            if rec.active_label in src:
+                reverse.append(self._snapshot_fields(rec))
+                rec.label_override = target
+                n += 1
+        self.taxonomy_ops.append(
+            {
+                "op": "merge",
+                "sources": src,
+                "target": target,
+                "n_examples": n,
+                "created_utc": _utc_now(),
+            }
+        )
+        self._push_undo(reverse, label="merge_categories")
+        return n
+
+    def exclude_category(self, category: str, *, excluded: bool = True) -> int:
+        """Bulk exclude (or re-include) all examples with active label ``category``.
+
+        Also records a taxonomy exclude/include op for soft projection.
+        Returns number of examples updated.
+        """
+        cat = str(category).strip()
+        if not cat:
+            raise ValueError("category must be non-empty")
+        reverse: List[Dict[str, Any]] = [
+            {"op": "set_taxonomy_ops", "taxonomy_ops": deepcopy(self.taxonomy_ops)}
+        ]
+        n = 0
+        for rec in self.examples.values():
+            if rec.active_label == cat or (
+                rec.label_override is None and rec.original_label == cat
+            ):
+                if bool(rec.excluded) == bool(excluded):
+                    continue
+                reverse.append(self._snapshot_fields(rec))
+                rec.excluded = bool(excluded)
+                n += 1
+        self.taxonomy_ops.append(
+            {
+                "op": "exclude_category" if excluded else "include_category",
+                "category": cat,
+                "excluded": bool(excluded),
+                "n_examples": n,
+                "created_utc": _utc_now(),
+            }
+        )
+        self._push_undo(reverse, label="exclude_category" if excluded else "include_category")
+        return n
+
+    def merge_map(self) -> Dict[str, str]:
+        """Source → active category map from taxonomy merge ops."""
+        from LabGym.training.soft_projection import compose_merge_map
+
+        return compose_merge_map(self.taxonomy_ops)
+
+    def excluded_categories(self) -> List[str]:
+        """Category names excluded via taxonomy ops (sorted)."""
+        from LabGym.training.soft_projection import excluded_categories_from_ops
+
+        return sorted(excluded_categories_from_ops(self.taxonomy_ops))
+
+    def active_categories(self, *, include_excluded_examples: bool = False) -> List[str]:
+        """Sorted active labels present on examples (optionally including excluded)."""
+        names: set = set()
+        for rec in self.examples.values():
+            if rec.excluded and not include_excluded_examples:
+                continue
+            lab = rec.active_label
+            if lab:
+                names.add(lab)
+        return sorted(names)
+
+    def category_summary(self) -> List[Dict[str, Any]]:
+        """Per active_label counts (total, excluded, by split) for Categories UI."""
+        rows: Dict[str, Dict[str, Any]] = {}
+        for rec in self.examples.values():
+            lab = rec.active_label or rec.original_label or "(empty)"
+            if lab not in rows:
+                rows[lab] = {
+                    "category": lab,
+                    "n_total": 0,
+                    "n_active": 0,
+                    "n_excluded": 0,
+                    "n_train": 0,
+                    "n_validation": 0,
+                    "n_sealed_test": 0,
+                    "n_unassigned": 0,
+                }
+            row = rows[lab]
+            row["n_total"] += 1
+            if rec.excluded:
+                row["n_excluded"] += 1
+            else:
+                row["n_active"] += 1
+                key = f"n_{rec.split}" if rec.split in VALID_SPLITS else "n_unassigned"
+                if key in row:
+                    row[key] += 1
+                else:
+                    row["n_unassigned"] += 1
+        return [rows[k] for k in sorted(rows.keys())]
 
     def set_split(self, example_id: str, split: str) -> None:
         if split not in VALID_SPLITS:

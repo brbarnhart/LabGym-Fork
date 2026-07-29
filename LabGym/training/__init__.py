@@ -69,6 +69,15 @@ from .review_queue import (
     ensure_queue_in_manifest,
     normalize_example_id,
 )
+from .soft_projection import (
+    compose_merge_map,
+    effective_soft_for_basename,
+    effective_soft_matrix,
+    excluded_categories_from_ops,
+    is_usable_soft,
+    project_class_means,
+    project_soft_vector,
+)
 
 __all__ = [
     "LABEL_MODE_HARD_ONLY",
@@ -129,4 +138,11 @@ __all__ = [
     "build_review_queue",
     "ensure_queue_in_manifest",
     "normalize_example_id",
+    "compose_merge_map",
+    "effective_soft_for_basename",
+    "effective_soft_matrix",
+    "excluded_categories_from_ops",
+    "is_usable_soft",
+    "project_class_means",
+    "project_soft_vector",
 ]

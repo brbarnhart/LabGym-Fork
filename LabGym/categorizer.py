@@ -623,14 +623,42 @@ class Categorizers():
 
 
 	def _soft_matrix_for_paths(self,path_files,classnames,data_path,soft_labels_path=None):
-		'''Load soft label vectors aligned to path_files; None if unavailable.'''
+		'''Load soft label vectors aligned to path_files; None if unavailable.
+
+		When a dataset manifest exists, applies soft overrides and soft
+		projection (merge / category exclude) into the active class list.
+		'''
 		path=self._resolve_soft_labels_path(data_path,soft_labels_path)
 		if path is None:
 			return None
 		try:
 			from LabGym.training.soft_labels import SoftLabelTable
+			from LabGym.training.dataset_manifest import DatasetManifest
+			from LabGym.training.soft_projection import effective_soft_matrix
 			table=SoftLabelTable.load_csv(path)
 			basenames=[os.path.splitext(os.path.basename(p))[0] for p in path_files]
+			manifest=None
+			if DatasetManifest.exists(data_path):
+				try:
+					manifest=DatasetManifest.load(data_path)
+				except Exception:
+					manifest=None
+			if manifest is not None and (
+				manifest.taxonomy_ops
+				or any(r.soft_override is not None for r in manifest.examples.values())
+			):
+				mat,usable=effective_soft_matrix(
+					table,basenames,list(classnames),manifest=manifest)
+				n_ok=sum(1 for u in usable if u)
+				if n_ok==0:
+					print('Soft projection produced no usable vectors; soft matrix unavailable.')
+					self.log.append('Soft projection produced no usable vectors')
+					return None
+				if n_ok<len(usable):
+					msg='Soft projection usable for %d/%d examples'%(n_ok,len(usable))
+					print(msg)
+					self.log.append(msg)
+				return mat
 			return table.soft_matrix(basenames,classnames=list(classnames))
 		except Exception as exc:
 			print('Could not load soft labels from '+str(path)+': '+str(exc))
@@ -654,13 +682,27 @@ class Categorizers():
 
 
 	def _class_mean_soft(self,data_path,classnames,soft_labels_path=None):
-		'''Per-class mean soft vector from soft_labels.csv (fallback: None).'''
+		'''Per-class mean soft vector from soft_labels.csv (fallback: None).
+
+		Uses soft projection when a dataset manifest has taxonomy ops.
+		'''
 		path=self._resolve_soft_labels_path(data_path,soft_labels_path)
 		if path is None:
 			return None
 		try:
 			from LabGym.training.soft_labels import SoftLabelTable
+			from LabGym.training.dataset_manifest import DatasetManifest
+			from LabGym.training.soft_projection import project_class_means
 			table=SoftLabelTable.load_csv(path)
+			manifest=None
+			if DatasetManifest.exists(data_path):
+				try:
+					manifest=DatasetManifest.load(data_path)
+				except Exception:
+					manifest=None
+			if manifest is not None and manifest.taxonomy_ops:
+				return project_class_means(
+					table,list(classnames),manifest=manifest)
 			means={}
 			buckets={c:[] for c in classnames}
 			for hard,soft in table.rows.values():
