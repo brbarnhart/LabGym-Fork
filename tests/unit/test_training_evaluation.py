@@ -11,6 +11,7 @@ import pytest
 
 from LabGym.training.evaluation import (
     COMPARE_ROW_KEYS,
+    align_store_labels_to_model,
     best_macro_f1_indices,
     build_compare_row,
     classnames_mismatch_report,
@@ -287,6 +288,41 @@ def test_taxonomy_drift_and_store_categories(tmp_path: Path):
     msg = format_taxonomy_drift_message(drift)
     assert "climb" in msg and "rear" in msg
     assert format_taxonomy_drift_message(taxonomy_drift(cats, cats)) == ""
+
+
+def test_align_store_labels_to_model_scores_shared_categories():
+    """Taxonomy drift: score in model label space; skip store-only folders."""
+    model = ["groom", "walk", "climb"]
+    store = ["groom", "walk", "rear"]
+    plan = align_store_labels_to_model(store, model)
+    assert plan["can_score"] is True
+    assert plan["scorable_categories"] == ["groom", "walk"]
+    assert plan["only_in_store"] == ["rear"]
+    assert plan["only_in_model"] == ["climb"]
+    # Labels map into model index order
+    assert plan["label_to_index"]["groom"] == 0
+    assert plan["label_to_index"]["walk"] == 1
+    assert "rear" not in plan["label_to_index"]
+    assert "climb" not in plan["label_to_index"] or plan["label_to_index"].get("climb") == 2
+    # climb is model-only: not a scorable store folder
+    assert "climb" not in plan["scorable_categories"]
+
+
+def test_align_store_labels_to_model_no_overlap_cannot_score():
+    plan = align_store_labels_to_model(["a", "b"], ["x", "y"])
+    assert plan["can_score"] is False
+    assert plan["scorable_categories"] == []
+    assert plan["only_in_store"] == ["a", "b"]
+    assert plan["only_in_model"] == ["x", "y"]
+
+
+def test_align_store_labels_to_model_exact_match():
+    names = ["a", "b"]
+    plan = align_store_labels_to_model(names, names)
+    assert plan["can_score"] is True
+    assert plan["scorable_categories"] == ["a", "b"]
+    assert plan["only_in_store"] == []
+    assert plan["only_in_model"] == []
 
 
 def test_model_classnames_from_parameters(tmp_path: Path):

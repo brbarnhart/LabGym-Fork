@@ -2634,124 +2634,134 @@ class Categorizers():
 		classnames=[str(i) for i in classnames]
 		print('Behavior names in the Categorizer: '+str(classnames))
 		behaviornames=[i for i in os.listdir(groundtruth_path) if os.path.isdir(os.path.join(groundtruth_path,i))]
-		incorrect_behaviors=list(set(behaviornames)-set(classnames))
-		incorrect_classes=list(set(classnames)-set(behaviornames))
-		if len(incorrect_behaviors)>0:
-			print('Mismatched behavior names in testing examples: '+str(incorrect_behaviors))
-		if len(incorrect_classes)>0:
-			print('Unused behavior names in the Categorizer: '+str(incorrect_classes))
+		from LabGym.training.evaluation import (
+			align_store_labels_to_model,
+			compute_evaluation_metrics,
+			model_settings_from_parameters_df,
+			predictions_from_model_output,
+			write_evaluation_run,
+		)
+		alignment=align_store_labels_to_model(behaviornames,classnames)
+		if alignment.get('only_in_store'):
+			print('Store-only behavior folders (skipped, not remapped): '+str(alignment['only_in_store']))
+		if alignment.get('only_in_model'):
+			print('Model-only behavior names (no examples in this store): '+str(alignment['only_in_model']))
+		if not alignment.get('can_score'):
+			print('Testing aborted: no shared behavior categories between store and Categorizer.')
+			return None
+		if alignment.get('has_drift'):
+			print('Taxonomy drift: scoring in model label space on shared categories only: '
+				+str(alignment['scorable_categories']))
 
-		if len(incorrect_behaviors)==0 and len(incorrect_classes)==0:
+		example_ids=deque()
+		label_to_index=alignment['label_to_index']
+		scorable=list(alignment['scorable_categories'])
 
-			example_ids=deque()
-
-			for behavior in behaviornames:
-
-				if network!=0:
-					filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.avi')]
-				else:
-					filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.jpg')]
-
-				for i in filenames:
-
-					if network!=0:
-
-						path_to_animation=os.path.join(groundtruth_path,behavior,i)
-
-						capture=cv2.VideoCapture(path_to_animation)
-						animation=deque()
-						frames=deque(maxlen=length)
-
-						while True:
-							retval,frame=capture.read()
-							if frame is None:
-								break
-							frames.append(frame)
-
-						capture.release()
-
-						for frame in frames:
-							frame=np.uint8(exposure.rescale_intensity(frame,out_range=(0,255)))
-							if channel==1:
-								frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
-							frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
-							frame=img_to_array(frame)
-							animation.append(frame)
-
-						animations.append(np.array(animation))
-
-					if network!=1:
-
-						path_to_pattern_image=os.path.splitext(os.path.join(groundtruth_path,behavior,i))[0]+'.jpg'
-						pattern_image=cv2.imread(path_to_pattern_image)
-						if behavior_mode==3:
-							if channel==1:
-								pattern_image=cv2.cvtColor(pattern_image,cv2.COLOR_BGR2GRAY)
-						pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
-						pattern_images.append(img_to_array(pattern_image))
-
-					labels.append(classnames.index(behavior))
-					example_ids.append(os.path.join(behavior,i))
+		for behavior in scorable:
 
 			if network!=0:
-				animations=np.array(animations,dtype='float32')/255.0
-			pattern_images=np.array(pattern_images,dtype='float32')/255.0
-
-			labels=np.array(labels)
-
-			model=self.load_categorizer_model(model_path)
-
-			if network==0:
-				raw_predictions=model.predict(pattern_images,batch_size=32)
-			elif network==1:
-				raw_predictions=model.predict(animations,batch_size=32)
+				filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.avi')]
 			else:
-				raw_predictions=model.predict([animations,pattern_images],batch_size=32)
+				filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.jpg')]
 
-			from LabGym.training.evaluation import (
-				compute_evaluation_metrics,
-				model_settings_from_parameters_df,
-				predictions_from_model_output,
-				write_evaluation_run,
-			)
+			for i in filenames:
 
-			pred_idx,conf=predictions_from_model_output(
-				np.asarray(raw_predictions),len(classnames))
-			metrics=compute_evaluation_metrics(
-				labels,
-				classnames,
-				y_pred=pred_idx,
-				confidences=conf,
-				example_ids=list(example_ids),
-			)
-			print(classification_report(
-				labels,pred_idx,target_names=classnames,zero_division=0))
-			report=metrics.classification_report
+				if network!=0:
 
-			if result_path is not None:
-				pd.DataFrame(report).transpose().to_excel(
-					os.path.join(result_path,'testing_reports.xlsx'),float_format='%.2f')
+					path_to_animation=os.path.join(groundtruth_path,behavior,i)
 
-			settings=model_settings_from_parameters_df(parameters)
-			run_dir=write_evaluation_run(
-				model_path,
-				metrics,
-				source='test',
-				model_settings=settings,
-				ground_truth_snapshot={
-					'path':str(groundtruth_path),
-					'n_examples':metrics.n_examples,
-					'behavior_folders':list(behaviornames),
-				},
-			)
-			print('Evaluation run saved in: '+str(run_dir))
-			if result_path is not None:
-				# Mirror summary next to optional result folder for convenience
-				pd.DataFrame(report).transpose().to_csv(
-					os.path.join(result_path,'testing_metrics.csv'),float_format='%.4f')
+					capture=cv2.VideoCapture(path_to_animation)
+					animation=deque()
+					frames=deque(maxlen=length)
 
-			print('Testing completed!')
-			return str(run_dir)
+					while True:
+						retval,frame=capture.read()
+						if frame is None:
+							break
+						frames.append(frame)
 
-		print('Testing aborted: behavior category names do not match the Categorizer.')
-		return None
+					capture.release()
+
+					for frame in frames:
+						frame=np.uint8(exposure.rescale_intensity(frame,out_range=(0,255)))
+						if channel==1:
+							frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
+						frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
+						frame=img_to_array(frame)
+						animation.append(frame)
+
+					animations.append(np.array(animation))
+
+				if network!=1:
+
+					path_to_pattern_image=os.path.splitext(os.path.join(groundtruth_path,behavior,i))[0]+'.jpg'
+					pattern_image=cv2.imread(path_to_pattern_image)
+					if behavior_mode==3:
+						if channel==1:
+							pattern_image=cv2.cvtColor(pattern_image,cv2.COLOR_BGR2GRAY)
+					pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
+					pattern_images.append(img_to_array(pattern_image))
+
+				labels.append(int(label_to_index[behavior]))
+				example_ids.append(os.path.join(behavior,i))
+
+		if len(labels)==0:
+			print('Testing aborted: no scorable examples under shared categories.')
+			return None
+
+		if network!=0:
+			animations=np.array(animations,dtype='float32')/255.0
+		pattern_images=np.array(pattern_images,dtype='float32')/255.0
+
+		labels=np.array(labels)
+
+		model=self.load_categorizer_model(model_path)
+
+		if network==0:
+			raw_predictions=model.predict(pattern_images,batch_size=32)
+		elif network==1:
+			raw_predictions=model.predict(animations,batch_size=32)
+		else:
+			raw_predictions=model.predict([animations,pattern_images],batch_size=32)
+
+		pred_idx,conf=predictions_from_model_output(
+			np.asarray(raw_predictions),len(classnames))
+		metrics=compute_evaluation_metrics(
+			labels,
+			classnames,
+			y_pred=pred_idx,
+			confidences=conf,
+			example_ids=list(example_ids),
+		)
+		print(classification_report(
+			labels,pred_idx,target_names=classnames,zero_division=0))
+		report=metrics.classification_report
+
+		if result_path is not None:
+			pd.DataFrame(report).transpose().to_excel(
+				os.path.join(result_path,'testing_reports.xlsx'),float_format='%.2f')
+
+		settings=model_settings_from_parameters_df(parameters)
+		run_dir=write_evaluation_run(
+			model_path,
+			metrics,
+			source='test',
+			model_settings=settings,
+			ground_truth_snapshot={
+				'path':str(groundtruth_path),
+				'n_examples':metrics.n_examples,
+				'behavior_folders':list(behaviornames),
+				'scorable_categories':list(scorable),
+				'taxonomy_drift':bool(alignment.get('has_drift')),
+				'only_in_store':list(alignment.get('only_in_store') or []),
+				'only_in_model':list(alignment.get('only_in_model') or []),
+			},
+		)
+		print('Evaluation run saved in: '+str(run_dir))
+		if result_path is not None:
+			# Mirror summary next to optional result folder for convenience
+			pd.DataFrame(report).transpose().to_csv(
+				os.path.join(result_path,'testing_metrics.csv'),float_format='%.4f')
+
+		print('Testing completed!')
+		return str(run_dir)

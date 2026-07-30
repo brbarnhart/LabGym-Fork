@@ -633,6 +633,52 @@ def taxonomy_drift(
     }
 
 
+def align_store_labels_to_model(
+    store_categories: Sequence[str],
+    model_classnames: Sequence[str],
+) -> Dict[str, Any]:
+    """Plan evaluation under **model label space** when taxonomies drift.
+
+    Store folders whose names match a model classname are scorable; their
+    ground-truth index is the model's class index. Store-only folders are
+    skipped (not remapped). Model-only classes remain in the report with
+    zero support. Scoring is allowed when at least one category is shared.
+
+    Returns:
+        Dict with ``can_score``, ``scorable_categories``, ``only_in_store``,
+        ``only_in_model``, ``shared``, ``label_to_index`` (store label → model
+        index for scorable names only), and ``model_classnames``.
+    """
+    model = [str(c) for c in model_classnames]
+    store = [str(c) for c in store_categories]
+    model_set = set(model)
+    store_set = set(store)
+    only_model = sorted(model_set - store_set)
+    only_store = sorted(store_set - model_set)
+    shared = sorted(model_set & store_set)
+    # Preserve store listing order for scorable, but only shared names
+    scorable = [c for c in store if c in model_set]
+    # Deduplicate while preserving order
+    seen: set = set()
+    scorable_unique: List[str] = []
+    for c in scorable:
+        if c not in seen:
+            seen.add(c)
+            scorable_unique.append(c)
+    label_to_index = {name: model.index(name) for name in scorable_unique}
+    return {
+        "can_score": bool(scorable_unique),
+        "scorable_categories": scorable_unique,
+        "only_in_store": only_store,
+        "only_in_model": only_model,
+        "shared": shared,
+        "label_to_index": label_to_index,
+        "model_classnames": list(model),
+        "store_categories": list(store),
+        "has_drift": bool(only_model or only_store),
+    }
+
+
 def format_taxonomy_drift_message(drift: Mapping[str, Any]) -> str:
     """Human-readable taxonomy-drift banner text (empty if no drift)."""
     if not drift.get("has_drift"):
