@@ -208,8 +208,8 @@ class CategoriesTab(QWidget):
             ex = p.resolve_path(p.paths.examples_root or "examples")
             if Path(ex).is_dir():
                 self.ed_store.setText(str(ex))
-        except Exception:
-            pass
+        except Exception as exc:
+            self.status.setText(f"Could not resolve project examples path: {exc}")
         self._reload()
 
     def _require_manifest(self):

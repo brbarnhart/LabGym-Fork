@@ -221,8 +221,8 @@ class ReviewExamplesTab(QWidget):
             ex = p.resolve_path(p.paths.examples_root or "examples")
             if Path(ex).is_dir():
                 self.ed_store.setText(str(ex))
-        except Exception:
-            pass
+        except Exception as exc:
+            self.manifest_status.setText(f"Could not resolve project examples path: {exc}")
         self._refresh_runs()
         self._on_store_changed()
 
@@ -246,8 +246,10 @@ class ReviewExamplesTab(QWidget):
                     for eid, lab, hint, _p in scan_example_store(store)
                 ]
                 self._manifest.sync_from_scan(scanned)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.manifest_status.setText(
+                    f"Store scan incomplete (manifest still loaded): {exc}"
+                )
             n = len(self._manifest.examples)
             path = self._manifest.path
             exists = path.is_file()
@@ -271,7 +273,8 @@ class ReviewExamplesTab(QWidget):
             from LabGym.training.evaluation import list_evaluation_runs
 
             runs = list_evaluation_runs(model)
-        except Exception:
+        except Exception as exc:
+            self.manifest_status.setText(f"Could not list evaluation runs: {exc}")
             return
         for info in runs:
             item = QListWidgetItem(info.display_label())

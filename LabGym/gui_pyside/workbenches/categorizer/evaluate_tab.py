@@ -415,8 +415,8 @@ class EvaluateTab(QWidget):
             ex = p.resolve_path(p.paths.examples_root or "examples")
             if not self.ed_gt.text().strip() and Path(ex).is_dir():
                 self.ed_gt.setText(str(ex))
-        except Exception:
-            pass
+        except Exception as exc:
+            self.log.append(f"Could not resolve project examples path: {exc}")
         self._on_model_path_changed()
         self._scan_models_for_compare()
 
@@ -448,8 +448,9 @@ class EvaluateTab(QWidget):
                 self.drift_banner.show()
             else:
                 self.drift_banner.hide()
-        except Exception:
+        except Exception as exc:
             self.drift_banner.hide()
+            self.log.append(f"Taxonomy drift check failed: {exc}")
 
     def _set_busy(self, busy: bool) -> None:
         self.btn_run.setEnabled(not busy)
@@ -677,7 +678,8 @@ class EvaluateTab(QWidget):
             import pandas as pd
 
             df = preds if isinstance(preds, pd.DataFrame) else pd.DataFrame(preds)
-        except Exception:
+        except Exception as exc:
+            self.log.append(f"Could not load predictions table: {exc}")
             return
         if self.chk_mis_only.isChecked() and "misclassified" in df.columns:
             df = df[df["misclassified"].astype(int) != 0]
@@ -702,7 +704,8 @@ class EvaluateTab(QWidget):
             import pandas as pd
 
             df = hl if isinstance(hl, pd.DataFrame) else pd.DataFrame(hl)
-        except Exception:
+        except Exception as exc:
+            self.log.append(f"Could not load high-loss table: {exc}")
             return
         cols = ["rank", "example_id", "loss", "true_label", "pred_label"]
         for _, row in df.iterrows():
@@ -771,8 +774,9 @@ class EvaluateTab(QWidget):
             from LabGym.gui_pyside.model_paths import scan_categorizer_paths
 
             paths = scan_categorizer_paths(self.project.project)
-        except Exception:
+        except Exception as exc:
             paths = []
+            self.log.append(f"Could not scan project categorizers: {exc}")
         # Always include current model field if set
         current = self.ed_model.text().strip()
         if current and current not in paths:
@@ -787,8 +791,8 @@ class EvaluateTab(QWidget):
                 names = model_classnames_from_parameters(p)
                 if names:
                     tip = f"{p}\nclasses: {', '.join(names)}"
-            except Exception:
-                pass
+            except Exception as exc:
+                tip = f"{p}\n(classnames unavailable: {exc})"
             item.setToolTip(tip)
             self.compare_models.addItem(item)
 
@@ -883,6 +887,7 @@ class EvaluateTab(QWidget):
         from LabGym.training.evaluation import (
             best_macro_f1_indices,
             classnames_mismatch_report,
+            compare_gt_paths_mismatch_report,
         )
 
         self.tbl_compare.setRowCount(0)
@@ -891,6 +896,9 @@ class EvaluateTab(QWidget):
         report = classnames_mismatch_report(self._compare_rows)
         if report.get("has_mismatch") and report.get("message"):
             self.log.append(report["message"])
+        gt_report = compare_gt_paths_mismatch_report(self._compare_rows)
+        if gt_report.get("has_mismatch") and gt_report.get("message"):
+            self.log.append(gt_report["message"])
 
         for row_data in self._compare_rows:
             name = row_data.get("model") or Path(str(row_data.get("model_path", ""))).name
@@ -957,6 +965,11 @@ class EvaluateTab(QWidget):
         msg = f"Compared {len(self._compare_rows)} model(s). See the Compare tab."
         if report.get("has_mismatch"):
             msg += "\n\nWarning: classname sets differ across models."
+        if gt_report.get("has_mismatch"):
+            msg += (
+                "\n\nWarning: ground-truth paths differ across runs "
+                "(prefer re-evaluate on one shared folder)."
+            )
         QMessageBox.information(self, "Compare", msg)
 
     def _export_compare_csv(self) -> None:

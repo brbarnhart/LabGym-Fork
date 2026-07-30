@@ -7,6 +7,7 @@ dataset manifest (see ``DatasetManifest``), not to eval artifacts.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Union
@@ -19,6 +20,8 @@ from LabGym.training.dataset_manifest import (
     resolve_example_media_path,
     scan_example_store,
 )
+
+_log = logging.getLogger(__name__)
 
 PathLike = Union[str, Path]
 
@@ -89,7 +92,8 @@ def build_review_queue(
             continue
         try:
             loaded = load_evaluation_run(path)
-        except Exception:
+        except Exception as exc:
+            _log.warning("Skipping evaluation run %s: %s", path, exc)
             continue
         meta = loaded.get("run_meta") or {}
         run_id = str(meta.get("run_id") or path.name)
@@ -120,8 +124,8 @@ def build_review_queue(
                             path_hint=raw_id if ("/" in raw_id or "\\" in raw_id) else None,
                         )
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("High-loss rows unreadable in %s: %s", path, exc)
 
         if include_misclassified and "predictions" in loaded:
             preds = loaded["predictions"]
@@ -157,8 +161,8 @@ def build_review_queue(
                             path_hint=raw_id if ("/" in raw_id or "\\" in raw_id) else None,
                         )
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("Prediction rows unreadable in %s: %s", path, exc)
 
     if dedupe:
         items = _dedupe_items(items)
@@ -219,7 +223,8 @@ def attach_media_paths(
     try:
         for eid, _lab, _hint, path in scan_example_store(root):
             index[eid] = path
-    except Exception:
+    except Exception as exc:
+        _log.warning("Could not scan example store for media paths (%s): %s", root, exc)
         index = {}
     for it in items:
         if it.media_path and Path(it.media_path).is_file():
@@ -271,8 +276,10 @@ def available_categories(
         for _eid, lab, _hint, _path in scan_example_store(store_root):
             if lab:
                 names.add(str(lab))
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.warning(
+            "Could not scan store categories under %s: %s", store_root, exc
+        )
     if manifest is not None:
         for rec in manifest.examples.values():
             if rec.original_label:

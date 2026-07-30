@@ -15,6 +15,7 @@ from LabGym.training.evaluation import (
     best_macro_f1_indices,
     build_compare_row,
     classnames_mismatch_report,
+    compare_gt_paths_mismatch_report,
     compare_row_from_loaded_run,
     compare_row_from_stored_eval,
     compute_evaluation_metrics,
@@ -473,3 +474,23 @@ def test_classnames_mismatch_filter_and_best_f1():
     assert best == [2]
     best_same = best_macro_f1_indices(same)
     assert best_same == [1]
+
+
+def test_compare_gt_paths_mismatch_report():
+    ok = compare_gt_paths_mismatch_report(
+        [
+            build_compare_row(model_path="a", ground_truth_path="/data/test"),
+            build_compare_row(model_path="b", ground_truth_path="/data/test"),
+        ]
+    )
+    assert ok["has_mismatch"] is False
+    bad = compare_gt_paths_mismatch_report(
+        [
+            build_compare_row(model_path="a", ground_truth_path="/data/testA"),
+            build_compare_row(model_path="b", ground_truth_path="/data/testB"),
+            build_compare_row(model_path="c", error="x"),  # ignored
+        ]
+    )
+    assert bad["has_mismatch"] is True
+    assert "re-evaluate" in bad["message"].lower()
+    assert len(bad["paths"]) == 2

@@ -746,6 +746,7 @@ COMPARE_ROW_KEYS: Tuple[str, ...] = (
     "run_id",
     "source",
     "metrics_mode",
+    "ground_truth_path",
     "error",
 )
 
@@ -839,6 +840,7 @@ def build_compare_row(
     metrics_mode: str = "",
     run_id: str = "",
     source: str = "",
+    ground_truth_path: str = "",
 ) -> Dict[str, Any]:
     """Build one side-by-side compare table row (settings + metrics).
 
@@ -875,6 +877,11 @@ def build_compare_row(
 
     rid = run_id or str(meta.get("run_id") or "")
     src = source or str(meta.get("source") or "")
+    gt = ground_truth_path
+    if not gt:
+        snap = meta.get("ground_truth_snapshot") or {}
+        if isinstance(snap, Mapping):
+            gt = str(snap.get("path") or snap.get("ground_truth_path") or "")
 
     row: Dict[str, Any] = {
         "model": Path(model_path).name,
@@ -894,6 +901,7 @@ def build_compare_row(
         "run_id": rid,
         "source": src,
         "metrics_mode": metrics_mode,
+        "ground_truth_path": gt or "",
         "error": error or "",
         "classnames": names,
     }
@@ -988,6 +996,36 @@ def compare_row_from_stored_eval(
     if not row.get("classnames") and classnames:
         row["classnames"] = list(classnames)
     return row
+
+
+def compare_gt_paths_mismatch_report(
+    rows: Sequence[Mapping[str, Any]],
+) -> Dict[str, Any]:
+    """Warn when compare rows used different ground-truth paths (stored mode).
+
+    Returns ``has_mismatch``, ``message``, and sorted unique ``paths``.
+    """
+    paths: List[str] = []
+    for row in rows:
+        if row.get("error"):
+            continue
+        p = str(row.get("ground_truth_path") or "").strip()
+        if p:
+            paths.append(p)
+    unique = sorted(set(paths))
+    if len(unique) <= 1:
+        return {"has_mismatch": False, "message": "", "paths": unique}
+    preview = "; ".join(unique[:4])
+    if len(unique) > 4:
+        preview += f"; …(+{len(unique) - 4})"
+    return {
+        "has_mismatch": True,
+        "message": (
+            "Ground-truth paths differ across compared runs; metrics may not "
+            f"be fair. Prefer re-evaluate on one shared folder. Paths: {preview}"
+        ),
+        "paths": unique,
+    }
 
 
 def classnames_mismatch_report(
