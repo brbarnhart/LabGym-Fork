@@ -89,6 +89,7 @@ from .soft_projection import (
     is_usable_soft,
     project_class_means,
     project_soft_vector,
+    soft_matrix_with_hard_fallback,
 )
 
 __all__ = [
@@ -169,4 +170,5 @@ __all__ = [
     "is_usable_soft",
     "project_class_means",
     "project_soft_vector",
+    "soft_matrix_with_hard_fallback",
 ]

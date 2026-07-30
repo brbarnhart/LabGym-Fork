@@ -15,6 +15,7 @@ from LabGym.training.soft_projection import (
     effective_soft_matrix,
     excluded_categories_from_ops,
     project_soft_vector,
+    soft_matrix_with_hard_fallback,
 )
 
 
@@ -142,3 +143,56 @@ def test_category_summary(tmp_path: Path):
     names = {r["category"] for r in rows}
     assert names == {"a", "b"}
     assert sum(r["n_total"] for r in rows) == 4
+
+
+def test_soft_matrix_with_hard_fallback_fills_unusable_rows():
+    """Unusable projected soft rows become hard one-hots (hard-only soft channel)."""
+    soft = np.array(
+        [
+            [0.7, 0.3],
+            [0.0, 0.0],  # unusable
+            [0.1, 0.9],
+        ],
+        dtype=np.float32,
+    )
+    usable = [True, False, True]
+    hard_idx = np.array([0, 1, 1], dtype=np.int64)
+    filled, n_filled, warning = soft_matrix_with_hard_fallback(
+        soft, usable, hard_idx, n_classes=2
+    )
+    assert n_filled == 1
+    assert warning  # clear warning text
+    assert "1" in warning and "3" in warning
+    assert filled[0].tolist() == pytest.approx([0.7, 0.3])
+    assert filled[1].tolist() == pytest.approx([0.0, 1.0])  # hard of class 1
+    assert filled[2].tolist() == pytest.approx([0.1, 0.9])
+    # original matrix not mutated
+    assert soft[1].tolist() == pytest.approx([0.0, 0.0])
+
+
+def test_soft_matrix_with_hard_fallback_all_unusable_returns_none():
+    soft = np.zeros((2, 3), dtype=np.float32)
+    usable = [False, False]
+    hard_idx = np.array([0, 2], dtype=np.int64)
+    filled, n_filled, warning = soft_matrix_with_hard_fallback(
+        soft, usable, hard_idx, n_classes=3
+    )
+    # All unusable: caller should drop soft for the run; helper still fills
+    # but signals via n_filled == N and optional flag — we return matrix of
+    # hard one-hots and n_filled == N so caller can choose hard-only.
+    assert n_filled == 2
+    assert filled[0].tolist() == pytest.approx([1.0, 0.0, 0.0])
+    assert filled[1].tolist() == pytest.approx([0.0, 0.0, 1.0])
+    assert warning
+
+
+def test_soft_matrix_with_hard_fallback_all_usable_no_warning():
+    soft = np.array([[0.5, 0.5], [0.2, 0.8]], dtype=np.float32)
+    usable = [True, True]
+    hard_idx = np.array([0, 1], dtype=np.int64)
+    filled, n_filled, warning = soft_matrix_with_hard_fallback(
+        soft, usable, hard_idx, n_classes=2
+    )
+    assert n_filled == 0
+    assert warning == ""
+    np.testing.assert_array_equal(filled, soft)

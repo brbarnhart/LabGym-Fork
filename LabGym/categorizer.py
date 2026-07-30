@@ -647,6 +647,7 @@ class Categorizers():
 				manifest.taxonomy_ops
 				or any(r.soft_override is not None for r in manifest.examples.values())
 			):
+				from LabGym.training.soft_projection import soft_matrix_with_hard_fallback
 				mat,usable=effective_soft_matrix(
 					table,basenames,list(classnames),manifest=manifest)
 				n_ok=sum(1 for u in usable if u)
@@ -654,10 +655,27 @@ class Categorizers():
 					print('Soft projection produced no usable vectors; soft matrix unavailable.')
 					self.log.append('Soft projection produced no usable vectors')
 					return None
-				if n_ok<len(usable):
-					msg='Soft projection usable for %d/%d examples'%(n_ok,len(usable))
-					print(msg)
-					self.log.append(msg)
+				# Hard indices from active labels / filename tags for unusable rows
+				name_to_i={str(c):i for i,c in enumerate(classnames)}
+				hard_idx=[]
+				for base,path in zip(basenames,path_files):
+					lab=None
+					if getattr(self,'active_label_by_path',None):
+						lab=self.active_label_by_path.get(path) or self.active_label_by_path.get(
+							os.path.normpath(path))
+					if lab is None:
+						# Soft store hard field or filename tag
+						row=table.rows.get(base)
+						if row is not None:
+							lab=str(row[0])
+						else:
+							lab=str(base).split('_')[-1] if base else ''
+					hard_idx.append(int(name_to_i.get(str(lab),0)))
+				mat,n_filled,warn=soft_matrix_with_hard_fallback(
+					mat,usable,hard_idx,n_classes=len(classnames))
+				if warn:
+					print(warn)
+					self.log.append(warn)
 				return mat
 			return table.soft_matrix(basenames,classnames=list(classnames))
 		except Exception as exc:

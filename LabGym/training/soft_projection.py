@@ -198,6 +198,65 @@ def effective_soft_matrix(
     return out, usable
 
 
+def soft_matrix_with_hard_fallback(
+    soft_matrix: np.ndarray,
+    usable: Sequence[bool],
+    hard_labels: Sequence[int],
+    *,
+    n_classes: Optional[int] = None,
+) -> Tuple[np.ndarray, int, str]:
+    """Replace unusable soft rows with hard one-hot vectors (ADR 0005).
+
+    Does not mutate ``soft_matrix``. Unusable rows (empty projection / missing
+    soft) get a one-hot of the example's hard label so soft training modes
+    degrade to hard-only for those examples only.
+
+    Args:
+        soft_matrix: Array shape ``(N, C)``.
+        usable: Per-row flag from :func:`effective_soft_matrix`.
+        hard_labels: Per-example hard class indices (length N).
+        n_classes: Soft column count; defaults to ``soft_matrix.shape[1]``.
+
+    Returns:
+        filled: Copy of soft matrix with hard one-hots on unusable rows.
+        n_filled: Number of rows replaced.
+        warning: Non-empty human message when any row was filled; else ``""``.
+    """
+    soft = np.asarray(soft_matrix, dtype=np.float32)
+    if soft.ndim != 2:
+        raise ValueError(f"soft_matrix must be 2-D, got shape {soft.shape}")
+    n, c = soft.shape
+    if n_classes is None:
+        n_classes = int(c)
+    if int(n_classes) != c:
+        raise ValueError(f"n_classes={n_classes} does not match soft C={c}")
+    if len(usable) != n:
+        raise ValueError("usable length must match soft_matrix rows")
+    hard = np.asarray(hard_labels)
+    if hard.shape[0] != n:
+        raise ValueError("hard_labels length must match soft_matrix rows")
+
+    filled = soft.copy()
+    n_filled = 0
+    for i, ok in enumerate(usable):
+        if ok:
+            continue
+        idx = int(hard[i])
+        row = np.zeros(c, dtype=np.float32)
+        if 0 <= idx < c:
+            row[idx] = 1.0
+        filled[i] = row
+        n_filled += 1
+
+    warning = ""
+    if n_filled:
+        warning = (
+            f"Soft projection unusable for {n_filled}/{n} examples; "
+            f"using hard-only soft targets for those rows."
+        )
+    return filled, n_filled, warning
+
+
 def project_class_means(
     table: SoftLabelTable,
     target_classnames: Sequence[str],
