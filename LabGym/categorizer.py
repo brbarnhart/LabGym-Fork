@@ -490,7 +490,9 @@ class Categorizers():
 			example_ids=example_ids,
 		)
 		print(classification_report(
-			true_idx,pred_idx,target_names=classnames,zero_division=0))
+			true_idx,pred_idx,
+			labels=list(range(len(classnames))),
+			target_names=classnames,zero_division=0))
 		report=metrics.classification_report
 		pd.DataFrame(report).transpose().to_csv(
 			os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
@@ -2751,8 +2753,12 @@ class Categorizers():
 			confidences=conf,
 			example_ids=list(example_ids),
 		)
+		# Always pass labels= so model-only classes (zero support under drift)
+		# do not crash sklearn when target_names length exceeds observed classes.
 		print(classification_report(
-			labels,pred_idx,target_names=classnames,zero_division=0))
+			labels,pred_idx,
+			labels=list(range(len(classnames))),
+			target_names=classnames,zero_division=0))
 		report=metrics.classification_report
 
 		if result_path is not None:
