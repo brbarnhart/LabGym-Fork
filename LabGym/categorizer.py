@@ -95,6 +95,7 @@ class DatasetFromPath_AA(Sequence):
 		self.channel=channel
 		self.label_mode=label_mode
 		self.class_means=class_means
+		self.active_label_by_path={}
 		self.pattern_image_paths,self.classmapping=self.load_info()
 		self.classnames=list(self.classmapping.keys())
 
@@ -121,6 +122,19 @@ class DatasetFromPath_AA(Sequence):
 		classmapping={name:labels[i] for i,name in enumerate(classnames)}
 
 		return pattern_image_paths,classmapping
+
+
+	def label_for_path(self,path_to_pattern_image):
+		'''Active hard label: manifest override when set, else filename tag.'''
+		if self.active_label_by_path:
+			lab=self.active_label_by_path.get(path_to_pattern_image)
+			if lab is not None:
+				return lab
+			# Windows path key variants
+			lab=self.active_label_by_path.get(os.path.normpath(path_to_pattern_image))
+			if lab is not None:
+				return lab
+		return path_to_pattern_image.split('.jpg')[0].split('_')[-1]
 
 
 	def __len__(self):
@@ -153,7 +167,7 @@ class DatasetFromPath_AA(Sequence):
 			pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
 			pattern_images.append(img_to_array(pattern_image))
 
-			labels.append(np.array(self.classmapping[path_to_pattern_image.split('.jpg')[0].split('_')[-1]]))
+			labels.append(np.array(self.classmapping[self.label_for_path(path_to_pattern_image)]))
 
 		animations=np.array(animations)
 		animations=animations.astype('float32')/255.0
@@ -181,6 +195,7 @@ class DatasetFromPath(Sequence):
 		self.channel=channel
 		self.label_mode=label_mode
 		self.class_means=class_means
+		self.active_label_by_path={}
 		self.pattern_image_paths,self.classmapping=self.load_info()
 		self.classnames=list(self.classmapping.keys())
 
@@ -209,6 +224,18 @@ class DatasetFromPath(Sequence):
 		return pattern_image_paths,classmapping
 
 
+	def label_for_path(self,path_to_pattern_image):
+		'''Active hard label: manifest override when set, else filename tag.'''
+		if self.active_label_by_path:
+			lab=self.active_label_by_path.get(path_to_pattern_image)
+			if lab is not None:
+				return lab
+			lab=self.active_label_by_path.get(os.path.normpath(path_to_pattern_image))
+			if lab is not None:
+				return lab
+		return path_to_pattern_image.split('.jpg')[0].split('_')[-1]
+
+
 	def __len__(self):
 
 		return int(np.floor(len(self.pattern_image_paths)/self.batch_size))
@@ -228,7 +255,7 @@ class DatasetFromPath(Sequence):
 			pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
 			pattern_images.append(img_to_array(pattern_image))
 
-			labels.append(np.array(self.classmapping[path_to_pattern_image.split('.jpg')[0].split('_')[-1]]))
+			labels.append(np.array(self.classmapping[self.label_for_path(path_to_pattern_image)]))
 
 		pattern_images=np.array(pattern_images)
 		pattern_images=pattern_images.astype('float32')/255.0
@@ -294,15 +321,364 @@ class Categorizers():
 		return None
 
 
+	def _filter_sequence_by_manifest(self,sequence,store_root):
+		'''Apply dataset manifest effective view to an onfly Sequence.
+
+		Drops excluded and sealed-test examples, attaches active (override)
+		labels, and rebuilds ``classmapping`` / ``classnames`` so training
+		uses the effective training set rather than raw filenames only.
+		'''
+		from LabGym.training.dataset_manifest import (
+			DatasetManifest,
+			apply_manifest_to_path_list,
+			example_id_from_path,
+			rebuild_classmapping,
+		)
+
+		if sequence is None or not DatasetManifest.exists(store_root):
+			return 0
+		manifest=DatasetManifest.load(store_root)
+		paths=list(getattr(sequence,'pattern_image_paths',[]) or [])
+		if not paths:
+			return 0
+		kept,active_by_path,n_drop=apply_manifest_to_path_list(paths,manifest)
+		sequence.pattern_image_paths=kept
+		sequence.active_label_by_path=dict(active_by_path)
+		# Rebuild class space from active labels (overrides may rename classes)
+		if kept:
+			classnames,classmapping=rebuild_classmapping(active_by_path.values())
+			if classnames:
+				sequence.classmapping=classmapping
+				sequence.classnames=list(classnames)
+		n_over=0
+		for p in kept:
+			rec=manifest.examples.get(example_id_from_path(p))
+			if rec is not None and rec.label_override:
+				n_over+=1
+		if n_drop or n_over:
+			msg=(
+				'Manifest effective view on %s: dropped %d excluded/sealed; '
+				'%d label overrides active; %d examples remain'
+				%(getattr(sequence,'path_to_examples',store_root),n_drop,n_over,len(kept))
+			)
+			print(msg)
+			self.log.append(msg)
+		return n_drop
+
+
+	def _split_train_val_files(
+		self,
+		data_path,
+		path_files,
+		labels,
+		*,
+		val_fraction=0.2,
+		seed=42,
+		ignore_manifest=False,
+	):
+		'''Persist and reuse train/validation membership via dataset manifest.
+
+		Sealed-test and excluded examples never enter train or validation.
+		Falls back to sklearn ``train_test_split`` when ``ignore_manifest`` is True.
+		'''
+		from LabGym.training.dataset_manifest import resolve_train_val_paths
+
+		# labels may be one-hot arrays from LabelBinarizer — prefer string names
+		str_labels=[]
+		for i,lab in enumerate(labels):
+			if isinstance(lab,(list,tuple,np.ndarray)):
+				arr=np.asarray(lab)
+				if arr.ndim>0 and arr.size>1:
+					# one-hot: recover from parallel path filename
+					str_labels.append(
+						os.path.splitext(os.path.basename(path_files[i]))[0].split('_')[-1])
+				else:
+					str_labels.append(str(lab))
+			else:
+				str_labels.append(str(lab))
+
+		train_files,val_files,train_labs,val_labs,manifest=resolve_train_val_paths(
+			data_path,
+			path_files,
+			str_labels,
+			ignore_manifest=ignore_manifest,
+			val_fraction=val_fraction,
+			seed=seed,
+			persist=not ignore_manifest,
+		)
+		if manifest is not None:
+			counts=manifest.counts_by_split()
+			msg=(
+				'Dataset manifest split: train=%s validation=%s sealed_test=%s excluded filtered'
+				%(counts.get('train',0),counts.get('validation',0),counts.get('sealed_test',0))
+			)
+			print(msg)
+			self.log.append(msg)
+			if manifest.path.is_file():
+				self.log.append('Manifest: '+str(manifest.path))
+		return train_files,val_files,train_labs,val_labs,manifest
+
+
+	def _high_loss_from_model(
+		self,
+		model,
+		x,
+		y,
+		*,
+		example_ids=None,
+		top_k=100,
+		batch_size=32,
+	):
+		'''End-of-train high-loss ranking on the train-for-weights partition.'''
+		from LabGym.training.evaluation import (
+			hard_labels_from_targets,
+			high_loss_from_predictions,
+		)
+
+		classnames=list(self.classnames)
+		C=len(classnames)
+		raw=model.predict(x,batch_size=batch_size,verbose=0)
+		true_idx=hard_labels_from_targets(np.asarray(y),C)
+		n=int(true_idx.shape[0])
+		if example_ids is None:
+			ids=[f'train_{i}' for i in range(n)]
+		else:
+			ids=[str(e) for e in example_ids]
+			if len(ids)!=n:
+				# Augmentation expanded the batch — fall back to synthetic ids
+				ids=[f'train_{i}' for i in range(n)]
+		return high_loss_from_predictions(
+			ids,true_idx,np.asarray(raw),classnames,top_k=top_k)
+
+
+	def _record_holdout_evaluation(
+		self,
+		model_path,
+		raw_predictions,
+		testY,
+		*,
+		out_path=None,
+		source='train_holdout',
+		example_ids=None,
+		ground_truth_snapshot=None,
+		model_settings=None,
+		high_loss=None,
+	):
+		'''Score hold-out predictions via the shared evaluation engine.
+
+		Writes legacy ``training_metrics.csv`` (and optional xlsx) plus a durable
+		run under ``<model_path>/eval/<run_id>/``. Optional ``high_loss`` is the
+		end-of-train train-partition ranking (not validation).
+		'''
+		from LabGym.training.evaluation import (
+			compute_evaluation_metrics,
+			hard_labels_from_targets,
+			model_settings_from_parameters_df,
+			predictions_from_model_output,
+			write_evaluation_run,
+		)
+
+		classnames=list(self.classnames)
+		C=len(classnames)
+		true_idx=hard_labels_from_targets(np.asarray(testY),C)
+		pred_idx,conf=predictions_from_model_output(np.asarray(raw_predictions),C)
+		metrics=compute_evaluation_metrics(
+			true_idx,
+			classnames,
+			y_pred=pred_idx,
+			confidences=conf,
+			example_ids=example_ids,
+		)
+		print(classification_report(
+			true_idx,pred_idx,
+			labels=list(range(len(classnames))),
+			target_names=classnames,zero_division=0))
+		report=metrics.classification_report
+		pd.DataFrame(report).transpose().to_csv(
+			os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
+		if out_path is not None:
+			pd.DataFrame(report).transpose().to_excel(
+				os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+
+		settings=dict(model_settings or {})
+		params_path=os.path.join(model_path,'model_parameters.txt')
+		if not settings and os.path.isfile(params_path):
+			try:
+				settings=model_settings_from_parameters_df(pd.read_csv(params_path))
+			except Exception:
+				settings={}
+		gt_snap=dict(ground_truth_snapshot or {})
+		gt_snap.setdefault('partition','validation')
+		gt_snap.setdefault('n_examples',metrics.n_examples)
+		if high_loss is not None:
+			gt_snap['high_loss_top_k']=len(high_loss)
+			gt_snap['high_loss_partition']='train'
+		run_dir=write_evaluation_run(
+			model_path,
+			metrics,
+			source=source,
+			model_settings=settings,
+			ground_truth_snapshot=gt_snap,
+			high_loss=high_loss,
+		)
+		print('Evaluation run saved in: '+str(run_dir))
+		self.log.append('Evaluation run saved in: '+str(run_dir))
+		if high_loss:
+			print('High-loss train examples ranked: %d (see high_loss.csv)'%len(high_loss))
+			self.log.append('High-loss train examples ranked: %d'%len(high_loss))
+		return metrics
+
+
+	def _predict_sequence(self,model,sequence,input_mode='x'):
+		'''Run model.predict over a Keras Sequence; return y, proba, ids.'''
+		from LabGym.training.evaluation import hard_labels_from_targets
+
+		all_y=[]
+		all_pred=[]
+		example_ids=[]
+		bs=int(getattr(sequence,'batch_size',32))
+		paths=list(getattr(sequence,'pattern_image_paths',[]) or [])
+		classnames=list(self.classnames or getattr(sequence,'classnames',[]) or [])
+		C=max(len(classnames),1)
+
+		for idx in range(len(sequence)):
+			batch_x,batch_y=sequence[idx]
+			if input_mode=='aa':
+				if isinstance(batch_x,(list,tuple)):
+					batch_x=batch_x[0]
+			raw=model.predict(batch_x,verbose=0)
+			all_pred.append(np.asarray(raw))
+			all_y.append(np.asarray(batch_y))
+			if paths:
+				start=idx*bs
+				example_ids.extend(
+					[os.path.basename(p) for p in paths[start:start+bs]])
+
+		if not all_y:
+			return None,None,None
+		y=np.concatenate(all_y,axis=0)
+		preds=np.concatenate(all_pred,axis=0)
+		ids=example_ids if example_ids else [f'idx_{i}' for i in range(len(y))]
+		# Ensure hard indices available for high-loss
+		_ = hard_labels_from_targets(y,C)
+		return y,preds,ids
+
+
+	def _evaluate_sequence_holdout(
+		self,
+		model,
+		validation_data,
+		model_path,
+		*,
+		out_path=None,
+		ground_truth_snapshot=None,
+		input_mode='x',
+		train_data=None,
+		high_loss_top_k=100,
+	):
+		'''Predict over a Keras Sequence validation set and record metrics.
+
+		Args:
+			input_mode: ``x`` for single tensor batches; ``aa`` for
+				Animation Analyzer (animations only from AA dual output);
+				``comb`` for combined net ([animations, pattern_images]).
+			train_data: optional train Sequence for end-of-train high-loss ranking.
+		'''
+		if validation_data is None or len(validation_data)==0:
+			print('No validation batches for hold-out metrics.')
+			self.log.append('No validation batches for hold-out metrics.')
+			return None
+
+		if self.classnames is None:
+			self.classnames=list(getattr(validation_data,'classnames',[]) or [])
+
+		y,preds,ids=self._predict_sequence(model,validation_data,input_mode=input_mode)
+		if y is None:
+			print('No validation batches for hold-out metrics.')
+			return None
+
+		high_loss=None
+		if train_data is not None and len(train_data)>0:
+			from LabGym.training.evaluation import (
+				hard_labels_from_targets,
+				high_loss_from_predictions,
+			)
+			ty,tpred,tids=self._predict_sequence(model,train_data,input_mode=input_mode)
+			if ty is not None:
+				C=len(list(self.classnames))
+				true_idx=hard_labels_from_targets(ty,C)
+				high_loss=high_loss_from_predictions(
+					tids,true_idx,tpred,list(self.classnames),top_k=high_loss_top_k)
+
+		snap=dict(ground_truth_snapshot or {})
+		snap.setdefault('source','onfly_validation_sequence')
+		return self._record_holdout_evaluation(
+			model_path,
+			preds,
+			y,
+			out_path=out_path,
+			example_ids=ids,
+			ground_truth_snapshot=snap,
+			source='train_holdout',
+			high_loss=high_loss,
+		)
+
+
 	def _soft_matrix_for_paths(self,path_files,classnames,data_path,soft_labels_path=None):
-		'''Load soft label vectors aligned to path_files; None if unavailable.'''
+		'''Load soft label vectors aligned to path_files; None if unavailable.
+
+		When a dataset manifest exists, applies soft overrides and soft
+		projection (merge / category exclude) into the active class list.
+		'''
 		path=self._resolve_soft_labels_path(data_path,soft_labels_path)
 		if path is None:
 			return None
 		try:
 			from LabGym.training.soft_labels import SoftLabelTable
+			from LabGym.training.dataset_manifest import DatasetManifest
+			from LabGym.training.soft_projection import effective_soft_matrix
 			table=SoftLabelTable.load_csv(path)
 			basenames=[os.path.splitext(os.path.basename(p))[0] for p in path_files]
+			manifest=None
+			if DatasetManifest.exists(data_path):
+				try:
+					manifest=DatasetManifest.load(data_path)
+				except Exception:
+					manifest=None
+			if manifest is not None and (
+				manifest.taxonomy_ops
+				or any(r.soft_override is not None for r in manifest.examples.values())
+			):
+				from LabGym.training.soft_projection import soft_matrix_with_hard_fallback
+				mat,usable=effective_soft_matrix(
+					table,basenames,list(classnames),manifest=manifest)
+				n_ok=sum(1 for u in usable if u)
+				if n_ok==0:
+					print('Soft projection produced no usable vectors; soft matrix unavailable.')
+					self.log.append('Soft projection produced no usable vectors')
+					return None
+				# Hard indices from active labels / filename tags for unusable rows
+				name_to_i={str(c):i for i,c in enumerate(classnames)}
+				hard_idx=[]
+				for base,path in zip(basenames,path_files):
+					lab=None
+					if getattr(self,'active_label_by_path',None):
+						lab=self.active_label_by_path.get(path) or self.active_label_by_path.get(
+							os.path.normpath(path))
+					if lab is None:
+						# Soft store hard field or filename tag
+						row=table.rows.get(base)
+						if row is not None:
+							lab=str(row[0])
+						else:
+							lab=str(base).split('_')[-1] if base else ''
+					hard_idx.append(int(name_to_i.get(str(lab),0)))
+				mat,n_filled,warn=soft_matrix_with_hard_fallback(
+					mat,usable,hard_idx,n_classes=len(classnames))
+				if warn:
+					print(warn)
+					self.log.append(warn)
+				return mat
 			return table.soft_matrix(basenames,classnames=list(classnames))
 		except Exception as exc:
 			print('Could not load soft labels from '+str(path)+': '+str(exc))
@@ -326,13 +702,27 @@ class Categorizers():
 
 
 	def _class_mean_soft(self,data_path,classnames,soft_labels_path=None):
-		'''Per-class mean soft vector from soft_labels.csv (fallback: None).'''
+		'''Per-class mean soft vector from soft_labels.csv (fallback: None).
+
+		Uses soft projection when a dataset manifest has taxonomy ops.
+		'''
 		path=self._resolve_soft_labels_path(data_path,soft_labels_path)
 		if path is None:
 			return None
 		try:
 			from LabGym.training.soft_labels import SoftLabelTable
+			from LabGym.training.dataset_manifest import DatasetManifest
+			from LabGym.training.soft_projection import project_class_means
 			table=SoftLabelTable.load_csv(path)
+			manifest=None
+			if DatasetManifest.exists(data_path):
+				try:
+					manifest=DatasetManifest.load(data_path)
+				except Exception:
+					manifest=None
+			if manifest is not None and manifest.taxonomy_ops:
+				return project_class_means(
+					table,list(classnames),manifest=manifest)
 			means={}
 			buckets={c:[] for c in classnames}
 			for hard,soft in table.rows.values():
@@ -1157,7 +1547,8 @@ class Categorizers():
 				pd_parameters=pd.DataFrame.from_dict(parameters)
 				pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-				(train_files,test_files,y1,y2)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
 				class_means=None
@@ -1231,26 +1622,16 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict(testX,batch_size=batch_size)
-
-				# Metrics use hard half of stacked targets when present
-				testY_hard=np.asarray(testY)
-				C=len(self.classnames)
-				if testY_hard.ndim==2 and testY_hard.shape[1]==2*C:
-					testY_hard=testY_hard[:,:C]
-				elif testY_hard.ndim==2 and C==2 and testY_hard.shape[1]==2:
-					testY_hard=testY_hard[:,:1]
-
-				if len(self.classnames)==2:
-					predictions=[round(i[0]) for i in predictions]
-					print(classification_report(testY_hard,predictions,target_names=self.classnames))
-					report=classification_report(testY_hard,predictions,target_names=self.classnames,output_dict=True)
-				else:
-					print(classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames))
-					report=classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames,output_dict=True)
-
-				pd.DataFrame(report).transpose().to_csv(os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
-				if out_path is not None:
-					pd.DataFrame(report).transpose().to_excel(os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+				hl=self._high_loss_from_model(
+					model,trainX,trainY,
+					example_ids=[os.path.basename(p) for p in train_files],
+					batch_size=batch_size)
+				self._record_holdout_evaluation(
+					model_path,predictions,testY,out_path=out_path,
+					ground_truth_snapshot={
+						'data_path':str(data_path),'network':0,
+						'split_source':'dataset_manifest'},
+					high_loss=hl)
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1273,7 +1654,8 @@ class Categorizers():
 
 			else:
 
-				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
@@ -1421,7 +1803,8 @@ class Categorizers():
 				pd_parameters=pd.DataFrame.from_dict(parameters)
 				pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-				(train_files,test_files,y1,y2)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				print('Perform augmentation for the behavior examples...')
 				self.log.append('Perform augmentation for the behavior examples...')
@@ -1482,18 +1865,16 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict(testX,batch_size=batch_size)
-
-				if len(self.classnames)==2:
-					predictions=[round(i[0]) for i in predictions]
-					print(classification_report(testY,predictions,target_names=self.classnames))
-					report=classification_report(testY,predictions,target_names=self.classnames,output_dict=True)
-				else:
-					print(classification_report(testY.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames))
-					report=classification_report(testY.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames,output_dict=True)
-
-				pd.DataFrame(report).transpose().to_csv(os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
-				if out_path is not None:
-					pd.DataFrame(report).transpose().to_excel(os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+				hl=self._high_loss_from_model(
+					model,trainX,trainY,
+					example_ids=[os.path.basename(p) for p in train_files],
+					batch_size=batch_size)
+				self._record_holdout_evaluation(
+					model_path,predictions,testY,out_path=out_path,
+					ground_truth_snapshot={
+						'data_path':str(data_path),'network':1,
+						'split_source':'dataset_manifest'},
+					high_loss=hl)
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1516,7 +1897,8 @@ class Categorizers():
 
 			else:
 
-				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				reuse=bool(skip_augment) and self.has_exported_aug_data(out_folder)
 				if reuse:
@@ -1643,7 +2025,8 @@ class Categorizers():
 				pd_parameters=pd.DataFrame.from_dict(parameters)
 				pd_parameters.to_csv(os.path.join(model_path,'model_parameters.txt'),index=False)
 
-				(train_files,test_files,y1,y2)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
 				class_means=None
@@ -1717,25 +2100,16 @@ class Categorizers():
 				self.log.append('Trained Categorizer saved in: '+str(model_path))
 
 				predictions=model.predict([test_animations,test_pattern_images],batch_size=batch_size)
-
-				testY_hard=np.asarray(testY)
-				C=len(self.classnames)
-				if testY_hard.ndim==2 and testY_hard.shape[1]==2*C:
-					testY_hard=testY_hard[:,:C]
-				elif testY_hard.ndim==2 and C==2 and testY_hard.shape[1]==2:
-					testY_hard=testY_hard[:,:1]
-
-				if len(self.classnames)==2:
-					predictions=[round(i[0]) for i in predictions]
-					print(classification_report(testY_hard,predictions,target_names=self.classnames))
-					report=classification_report(testY_hard,predictions,target_names=self.classnames,output_dict=True)
-				else:
-					print(classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames))
-					report=classification_report(testY_hard.argmax(axis=1),predictions.argmax(axis=1),target_names=self.classnames,output_dict=True)
-
-				pd.DataFrame(report).transpose().to_csv(os.path.join(model_path,'training_metrics.csv'),float_format='%.2f')
-				if out_path is not None:
-					pd.DataFrame(report).transpose().to_excel(os.path.join(out_path,'training_metrics.xlsx'),float_format='%.2f')
+				hl=self._high_loss_from_model(
+					model,[train_animations,train_pattern_images],trainY,
+					example_ids=[os.path.basename(p) for p in train_files],
+					batch_size=batch_size)
+				self._record_holdout_evaluation(
+					model_path,predictions,testY,out_path=out_path,
+					ground_truth_snapshot={
+						'data_path':str(data_path),'network':2,
+						'split_source':'dataset_manifest'},
+					high_loss=hl)
 
 				plt.style.use('classic')
 				plt.figure()
@@ -1758,7 +2132,8 @@ class Categorizers():
 
 			else:
 
-				(train_files,test_files,_,_)=train_test_split(path_files,labels,test_size=0.2,stratify=labels)
+				train_files,test_files,_,_,_=self._split_train_val_files(
+					data_path,path_files,labels)
 
 				self.label_mode=label_mode
 				self.lambda_soft=lambda_soft
@@ -1891,7 +2266,8 @@ class Categorizers():
 
 			train_data=DatasetFromPath(train_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 			validation_data=DatasetFromPath(validation_folder,batch_size=batch_size,dim_conv=dim,channel=channel,label_mode=effective_label_mode,class_means=class_means)
-
+			self._filter_sequence_by_manifest(train_data,data_path)
+			self._filter_sequence_by_manifest(validation_data,data_path)
 
 			if include_bodyparts:
 				inner_code=0
@@ -1931,6 +2307,11 @@ class Categorizers():
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
 			self.log.append(str(datetime.datetime.now()))
+
+			self._evaluate_sequence_holdout(
+				model,validation_data,model_path,out_path=out_path,
+				ground_truth_snapshot={'data_path':str(data_path),'network':0},
+				input_mode='x',train_data=train_data)
 
 			plt.style.use('classic')
 			plt.figure()
@@ -2001,6 +2382,8 @@ class Categorizers():
 
 			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
 			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel)
+			self._filter_sequence_by_manifest(train_data,data_path)
+			self._filter_sequence_by_manifest(validation_data,data_path)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2044,6 +2427,12 @@ class Categorizers():
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
 			self.log.append(str(datetime.datetime.now()))
+
+			self.classnames=list(train_data.classmapping.keys())
+			self._evaluate_sequence_holdout(
+				model,validation_data,model_path,out_path=out_path,
+				ground_truth_snapshot={'data_path':str(data_path),'network':1},
+				input_mode='aa',train_data=train_data)
 
 			plt.style.use('classic')
 			plt.figure()
@@ -2125,6 +2514,8 @@ class Categorizers():
 
 			train_data=DatasetFromPath_AA(train_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
 			validation_data=DatasetFromPath_AA(validation_folder,length=time_step,batch_size=batch_size,dim_tconv=dim_tconv,dim_conv=dim_conv,channel=channel,label_mode=effective_label_mode,class_means=class_means)
+			self._filter_sequence_by_manifest(train_data,data_path)
+			self._filter_sequence_by_manifest(validation_data,data_path)
 
 			if include_bodyparts:
 				inner_code=0
@@ -2162,6 +2553,11 @@ class Categorizers():
 			self.log.append('Trained Categorizer saved in: '+str(model_path))
 			print(datetime.datetime.now())
 			self.log.append(str(datetime.datetime.now()))
+
+			self._evaluate_sequence_holdout(
+				model,validation_data,model_path,out_path=out_path,
+				ground_truth_snapshot={'data_path':str(data_path),'network':2},
+				input_mode='comb',train_data=train_data)
 
 			plt.style.use('classic')
 			plt.figure()
@@ -2258,86 +2654,138 @@ class Categorizers():
 		classnames=[str(i) for i in classnames]
 		print('Behavior names in the Categorizer: '+str(classnames))
 		behaviornames=[i for i in os.listdir(groundtruth_path) if os.path.isdir(os.path.join(groundtruth_path,i))]
-		incorrect_behaviors=list(set(behaviornames)-set(classnames))
-		incorrect_classes=list(set(classnames)-set(behaviornames))
-		if len(incorrect_behaviors)>0:
-			print('Mismatched behavior names in testing examples: '+str(incorrect_behaviors))
-		if len(incorrect_classes)>0:
-			print('Unused behavior names in the Categorizer: '+str(incorrect_classes))
+		from LabGym.training.evaluation import (
+			align_store_labels_to_model,
+			compute_evaluation_metrics,
+			model_settings_from_parameters_df,
+			predictions_from_model_output,
+			write_evaluation_run,
+		)
+		alignment=align_store_labels_to_model(behaviornames,classnames)
+		if alignment.get('only_in_store'):
+			print('Store-only behavior folders (skipped, not remapped): '+str(alignment['only_in_store']))
+		if alignment.get('only_in_model'):
+			print('Model-only behavior names (no examples in this store): '+str(alignment['only_in_model']))
+		if not alignment.get('can_score'):
+			print('Testing aborted: no shared behavior categories between store and Categorizer.')
+			return None
+		if alignment.get('has_drift'):
+			print('Taxonomy drift: scoring in model label space on shared categories only: '
+				+str(alignment['scorable_categories']))
 
-		if len(incorrect_behaviors)==0 and len(incorrect_classes)==0:
+		example_ids=deque()
+		label_to_index=alignment['label_to_index']
+		scorable=list(alignment['scorable_categories'])
 
-			for behavior in behaviornames:
-
-				if network!=0:
-					filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.avi')]
-				else:
-					filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.jpg')]
-
-				for i in filenames:
-
-					if network!=0:
-
-						path_to_animation=os.path.join(groundtruth_path,behavior,i)
-
-						capture=cv2.VideoCapture(path_to_animation)
-						animation=deque()
-						frames=deque(maxlen=length)
-
-						while True:
-							retval,frame=capture.read()
-							if frame is None:
-								break
-							frames.append(frame)
-
-						capture.release()
-
-						for frame in frames:
-							frame=np.uint8(exposure.rescale_intensity(frame,out_range=(0,255)))
-							if channel==1:
-								frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
-							frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
-							frame=img_to_array(frame)
-							animation.append(frame)
-
-						animations.append(np.array(animation))
-
-					if network!=1:
-
-						path_to_pattern_image=os.path.splitext(os.path.join(groundtruth_path,behavior,i))[0]+'.jpg'
-						pattern_image=cv2.imread(path_to_pattern_image)
-						if behavior_mode==3:
-							if channel==1:
-								pattern_image=cv2.cvtColor(pattern_image,cv2.COLOR_BGR2GRAY)
-						pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
-						pattern_images.append(img_to_array(pattern_image))
-
-					labels.append(classnames.index(behavior))
+		for behavior in scorable:
 
 			if network!=0:
-				animations=np.array(animations,dtype='float32')/255.0
-			pattern_images=np.array(pattern_images,dtype='float32')/255.0
-
-			labels=np.array(labels)
-
-			model=self.load_categorizer_model(model_path)
-
-			if network==0:
-				predictions=model.predict(pattern_images,batch_size=32)
-			elif network==1:
-				predictions=model.predict(animations,batch_size=32)
+				filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.avi')]
 			else:
-				predictions=model.predict([animations,pattern_images],batch_size=32)
+				filenames=[i for i in os.listdir(os.path.join(groundtruth_path,behavior)) if i.endswith('.jpg')]
 
-			if len(classnames)==2:
-				predictions=[round(i[0]) for i in predictions]
-				print(classification_report(labels,predictions,target_names=classnames))
-				report=classification_report(labels,predictions,target_names=classnames,output_dict=True)
-			else:
-				print(classification_report(labels,predictions.argmax(axis=1),target_names=classnames))
-				report=classification_report(labels,predictions.argmax(axis=1),target_names=classnames,output_dict=True)
+			for i in filenames:
 
-			if result_path is not None:
-				pd.DataFrame(report).transpose().to_excel(os.path.join(result_path,'testing_reports.xlsx'),float_format='%.2f')
+				if network!=0:
 
-			print('Testing completed!')
+					path_to_animation=os.path.join(groundtruth_path,behavior,i)
+
+					capture=cv2.VideoCapture(path_to_animation)
+					animation=deque()
+					frames=deque(maxlen=length)
+
+					while True:
+						retval,frame=capture.read()
+						if frame is None:
+							break
+						frames.append(frame)
+
+					capture.release()
+
+					for frame in frames:
+						frame=np.uint8(exposure.rescale_intensity(frame,out_range=(0,255)))
+						if channel==1:
+							frame=cv2.cvtColor(np.uint8(frame),cv2.COLOR_BGR2GRAY)
+						frame=cv2.resize(frame,(dim_tconv,dim_tconv),interpolation=cv2.INTER_AREA)
+						frame=img_to_array(frame)
+						animation.append(frame)
+
+					animations.append(np.array(animation))
+
+				if network!=1:
+
+					path_to_pattern_image=os.path.splitext(os.path.join(groundtruth_path,behavior,i))[0]+'.jpg'
+					pattern_image=cv2.imread(path_to_pattern_image)
+					if behavior_mode==3:
+						if channel==1:
+							pattern_image=cv2.cvtColor(pattern_image,cv2.COLOR_BGR2GRAY)
+					pattern_image=cv2.resize(pattern_image,(dim_conv,dim_conv),interpolation=cv2.INTER_AREA)
+					pattern_images.append(img_to_array(pattern_image))
+
+				labels.append(int(label_to_index[behavior]))
+				example_ids.append(os.path.join(behavior,i))
+
+		if len(labels)==0:
+			print('Testing aborted: no scorable examples under shared categories.')
+			return None
+
+		if network!=0:
+			animations=np.array(animations,dtype='float32')/255.0
+		pattern_images=np.array(pattern_images,dtype='float32')/255.0
+
+		labels=np.array(labels)
+
+		model=self.load_categorizer_model(model_path)
+
+		if network==0:
+			raw_predictions=model.predict(pattern_images,batch_size=32)
+		elif network==1:
+			raw_predictions=model.predict(animations,batch_size=32)
+		else:
+			raw_predictions=model.predict([animations,pattern_images],batch_size=32)
+
+		pred_idx,conf=predictions_from_model_output(
+			np.asarray(raw_predictions),len(classnames))
+		metrics=compute_evaluation_metrics(
+			labels,
+			classnames,
+			y_pred=pred_idx,
+			confidences=conf,
+			example_ids=list(example_ids),
+		)
+		# Always pass labels= so model-only classes (zero support under drift)
+		# do not crash sklearn when target_names length exceeds observed classes.
+		print(classification_report(
+			labels,pred_idx,
+			labels=list(range(len(classnames))),
+			target_names=classnames,zero_division=0))
+		report=metrics.classification_report
+
+		if result_path is not None:
+			pd.DataFrame(report).transpose().to_excel(
+				os.path.join(result_path,'testing_reports.xlsx'),float_format='%.2f')
+
+		settings=model_settings_from_parameters_df(parameters)
+		run_dir=write_evaluation_run(
+			model_path,
+			metrics,
+			source='test',
+			model_settings=settings,
+			ground_truth_snapshot={
+				'path':str(groundtruth_path),
+				'n_examples':metrics.n_examples,
+				'behavior_folders':list(behaviornames),
+				'scorable_categories':list(scorable),
+				'taxonomy_drift':bool(alignment.get('has_drift')),
+				'only_in_store':list(alignment.get('only_in_store') or []),
+				'only_in_model':list(alignment.get('only_in_model') or []),
+			},
+		)
+		print('Evaluation run saved in: '+str(run_dir))
+		if result_path is not None:
+			# Mirror summary next to optional result folder for convenience
+			pd.DataFrame(report).transpose().to_csv(
+				os.path.join(result_path,'testing_metrics.csv'),float_format='%.4f')
+
+		print('Testing completed!')
+		return str(run_dir)

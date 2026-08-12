@@ -1,4 +1,4 @@
-"""Categorizer workbench — Generate training data + Train/Test (Phases 2 & 6)."""
+"""Categorizer workbench — Generate training data + Manage + Train/Test."""
 
 from __future__ import annotations
 
@@ -12,6 +12,9 @@ from LabGym.gui_pyside.workbenches.categorizer.annotate_ethogram_tab import (
 )
 from LabGym.gui_pyside.workbenches.categorizer.generate_examples_tab import (
     GenerateExamplesTab,
+)
+from LabGym.gui_pyside.workbenches.categorizer.manage_dataset_host import (
+    ManageDatasetHost,
 )
 from LabGym.gui_pyside.workbenches.categorizer.process_videos_tab import (
     ProcessVideosTab,
@@ -68,11 +71,13 @@ class CategorizerWorkbench(Workbench):
         super().__init__(project, parent)
 
         self.generate_host = GenerateTrainingHost(project)
+        self.manage_host = ManageDatasetHost(project)
         self.train_tab = TrainCategorizerTab(project)
         self.test_tab = TestCategorizerTab(project)
         self.process_tab = ProcessVideosTab(project)
 
         self.add_subtab("generate_training", "Generate training data", self.generate_host)
+        self.add_subtab("manage_dataset", "Manage dataset", self.manage_host)
         self.add_subtab("train", "Train categorizer", self.train_tab)
         self.add_subtab("test", "Test categorizer", self.test_tab)
         self.add_subtab("process", "Process videos", self.process_tab)
