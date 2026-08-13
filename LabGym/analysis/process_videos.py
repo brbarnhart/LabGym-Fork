@@ -142,7 +142,16 @@ def process_video(
     *,
     progress: ProgressCb = None,
 ) -> ProcessVideoResult:
-    """Categorize a video from accepted remapped tracklets (no re-detect)."""
+    """Categorize a video from accepted remapped tracklets (no re-detect).
+
+    Args:
+        config: Video, remapped identity package, categorizer, and export paths.
+        progress: Optional text callback; if it has ``.frame(current, total)``,
+            that is invoked during hydrate rebuild.
+
+    Returns:
+        Structured result. ``ok`` is false when identities, kinds, or I/O fail.
+    """
     log: List[str] = []
 
     def _prog(msg: str) -> None:
@@ -178,12 +187,12 @@ def process_video(
         )
 
     try:
-        from LabGym.analyzebehavior_dt import AnalyzeAnimalDetector
         from LabGym.analysis.hydrate_from_tracklets import (
             fill_geometry_from_stores,
             kinds_and_counts,
             load_remapped_stores,
             rebuild_categorizer_inputs,
+            resolve_package_kinds,
         )
     except Exception as exc:
         return ProcessVideoResult(
@@ -216,12 +225,15 @@ def process_video(
                 error=f"No remapped tracklets in {config.id_review_dir}",
                 log=log,
             )
+        kinds = resolve_package_kinds(stores, config.animal_kinds or None)
         counts = kinds_and_counts(stores)
-        kinds = list(config.animal_kinds) or list(counts.keys())
-        numbers = dict(config.animal_number) if config.animal_number else dict(counts)
-        for k in kinds:
-            if k not in numbers:
-                numbers[k] = counts.get(k, 1)
+        numbers = {k: counts[k] for k in kinds}
+        if config.animal_number:
+            for k in kinds:
+                if k in config.animal_number:
+                    numbers[k] = int(config.animal_number[k])
+
+        from LabGym.analyzebehavior_dt import AnalyzeAnimalDetector
 
         dim_conv = int(meta.get("dim_conv", 32) or 32)
         dim_tconv = int(meta.get("dim_tconv", 32) or 32)
@@ -296,9 +308,8 @@ def process_video(
                 background_free=background_free,
                 black_background=black_background,
                 progress=_prog,
+                frame_progress=frame_progress,
             )
-            if frame_progress:
-                frame_progress(int(first_store.n_frames), int(first_store.n_frames))
 
             _prog("Categorizing behaviors…")
             aad.categorize_behaviors(

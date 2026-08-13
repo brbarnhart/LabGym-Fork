@@ -160,9 +160,119 @@ def test_process_video_mocked(tmp_path: Path):
 
     assert r.ok is True, r.error
     assert r.results_path == str(results)
+    assert fake_aad.prepare_analysis.call_args[0][0] is None
     fake_aad.categorize_behaviors.assert_called_once()
     fake_aad.export_results.assert_called_once()
     assert (results / "process_video_job.json").is_file()
+
+
+def _accepted_review(tmp_path: Path, kinds: list[str]):
+    from LabGym.id_review.apply import write_tracklets_identity_status
+    from LabGym.id_review.tracklets import save_tracklets
+    from LabGym.id_review.types import SCHEMA_VERSION, TrackletStore
+    import numpy as np
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    n = 4
+    for kind in kinds:
+        ids = [] if kind.endswith("_empty") else [0]
+        real_kind = kind.replace("_empty", "")
+        n_ids = len(ids)
+        store = TrackletStore(
+            schema_version=SCHEMA_VERSION,
+            animal_kind=real_kind,
+            ids=ids,
+            n_frames=n,
+            centers=np.zeros((n_ids, n, 2)),
+            valid=np.ones((n_ids, n), dtype=bool) if n_ids else np.zeros((0, n), dtype=bool),
+            heights=np.ones((n_ids, n)) if n_ids else np.zeros((0, n)),
+            contours=[[None] * n] if n_ids else [],
+            meta={"fps": 10},
+        )
+        save_tracklets(store, str(review))
+    write_tracklets_identity_status(str(review), corrected=True, accepted=True)
+    return review
+
+
+def _minimal_categorizer(tmp_path: Path):
+    cat = tmp_path / "cat"
+    cat.mkdir()
+    pd.DataFrame(
+        {
+            "classnames": ["beh"],
+            "dim_conv": [32],
+            "dim_tconv": [32],
+            "channel": [1],
+            "time_step": [15],
+            "network": [0],
+            "inner_code": [1],
+            "std": [0],
+            "background_free": [0],
+            "black_background": [0],
+            "behavior_kind": [0],
+            "social_distance": [0],
+        }
+    ).to_csv(cat / "model_parameters.txt", index=False)
+    return cat
+
+
+def test_process_video_missing_kind_fails(tmp_path: Path):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    review = _accepted_review(tmp_path, ["mouse"])
+    cat = _minimal_categorizer(tmp_path)
+    cfg = ProcessVideoConfig(
+        video_path=str(video),
+        categorizer_path=str(cat),
+        results_root=str(tmp_path / "out"),
+        animal_kinds=["mouse", "fly"],
+        id_review_dir=str(review),
+    )
+    r = process_video(cfg)
+    assert r.ok is False
+    assert "missing kind" in r.error.lower()
+
+
+def test_process_video_keeps_package_kinds(tmp_path: Path):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    review = _accepted_review(tmp_path, ["mouse", "object_empty"])
+    cat = _minimal_categorizer(tmp_path)
+    out = tmp_path / "analysis"
+    out.mkdir()
+    results = out / "clip"
+    results.mkdir()
+    fake_aad = MagicMock()
+    fake_aad.results_path = str(results)
+    fake_mod = types.ModuleType("LabGym.analyzebehavior_dt")
+    fake_mod.AnalyzeAnimalDetector = MagicMock(return_value=fake_aad)
+    prev = sys.modules.get("LabGym.analyzebehavior_dt")
+    sys.modules["LabGym.analyzebehavior_dt"] = fake_mod
+    try:
+        with patch(
+            "LabGym.analysis.hydrate_from_tracklets.fill_geometry_from_stores"
+        ), patch(
+            "LabGym.analysis.hydrate_from_tracklets.rebuild_categorizer_inputs"
+        ):
+            cfg = ProcessVideoConfig(
+                video_path=str(video),
+                categorizer_path=str(cat),
+                results_root=str(out),
+                animal_kinds=["mouse"],
+                animal_number={"mouse": 1},
+                id_review_dir=str(review),
+            )
+            r = process_video(cfg)
+    finally:
+        if prev is None:
+            sys.modules.pop("LabGym.analyzebehavior_dt", None)
+        else:
+            sys.modules["LabGym.analyzebehavior_dt"] = prev
+    assert r.ok is True, r.error
+    prepared_kinds = fake_aad.prepare_analysis.call_args[0][4]
+    assert "mouse" in prepared_kinds
+    assert "object" in prepared_kinds
 
 
 def test_process_tab_constructs():
