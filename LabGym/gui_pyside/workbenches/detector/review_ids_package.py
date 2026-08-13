@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+from LabGym.gui_pyside.project.model import Project
+from LabGym.gui_pyside.project.paths import (
+    annotations_path_for,
+    current_video_path,
+    examples_out_dir_for,
+)
 from LabGym.id_review.dataset import (
     finalize_switch_annotations,
     load_events,
@@ -28,6 +36,8 @@ from LabGym.identity.package import (
     save_subjects,
     subjects_from_track_ids,
 )
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -60,6 +70,87 @@ class SavePackageResult:
     accepted: bool = False
     stores: Dict[str, Any] = field(default_factory=dict)
     baseline_stores: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class DownstreamArtifactCheck:
+    """Outcome of looking up ethogram / example-store files before remap save.
+
+    ``check_failed`` is the fail-closed signal: the caller must confirm save
+    and must not treat the result as “nothing downstream.”
+    """
+
+    check_failed: bool
+    error: str = ""
+    ethogram_path: Optional[str] = None
+    examples_path: Optional[str] = None
+
+    @property
+    def requires_confirm(self) -> bool:
+        """True when artifacts exist or the lookup failed (never an all-clear)."""
+        return bool(self.check_failed or self.ethogram_path or self.examples_path)
+
+    def note_lines(self) -> List[str]:
+        """Human-readable artifact paths or the lookup error (not dialog copy)."""
+        if self.check_failed:
+            return [
+                "Could not check for an existing ethogram or example store: "
+                f"{self.error or 'unknown error'}"
+            ]
+        lines: List[str] = []
+        if self.ethogram_path:
+            lines.append(f"Ethogram: {self.ethogram_path}")
+        if self.examples_path:
+            lines.append(f"Examples: {self.examples_path}")
+        return lines
+
+
+def check_downstream_artifacts(
+    project: Optional[Project] = None,
+    *,
+    annotations_path: Optional[Union[str, PathLike]] = None,
+    examples_dir: Optional[Union[str, PathLike]] = None,
+) -> DownstreamArtifactCheck:
+    """Look up an ethogram or example store that may go stale after remap.
+
+    Args:
+        project: Open project used to resolve the current video's paths when
+            explicit paths are not supplied.
+        annotations_path: Optional ethogram path override.
+        examples_dir: Optional example-store directory override.
+
+    Returns:
+        A result whose ``check_failed`` flag is True if lookup/stat raises.
+        That case is never an all-clear: ``requires_confirm`` is True.
+    """
+    try:
+        if (
+            annotations_path is None
+            and examples_dir is None
+            and project is not None
+        ):
+            video = current_video_path(project)
+            if video:
+                annotations_path = annotations_path_for(project, video)
+                examples_dir = examples_out_dir_for(project, video)
+        ethogram: Optional[str] = None
+        examples: Optional[str] = None
+        if annotations_path:
+            p = Path(annotations_path)
+            if p.is_file():
+                ethogram = str(p)
+        if examples_dir:
+            d = Path(examples_dir)
+            if d.is_dir() and any(d.iterdir()):
+                examples = str(d)
+        return DownstreamArtifactCheck(
+            check_failed=False,
+            ethogram_path=ethogram,
+            examples_path=examples,
+        )
+    except Exception as exc:
+        _log.exception("Ethogram/example-store lookup failed")
+        return DownstreamArtifactCheck(check_failed=True, error=str(exc))
 
 
 def load_review_package(review_dir: str) -> LoadedReviewPackage:

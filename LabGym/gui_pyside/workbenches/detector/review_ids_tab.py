@@ -45,6 +45,8 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
 )
 from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+    DownstreamArtifactCheck,
+    check_downstream_artifacts,
     clone_markers,
     events_for_kind,
     load_review_package,
@@ -1166,24 +1168,14 @@ class ReviewIdsTab(QWidget):
     # --- save ---
 
     def save_package(self) -> None:
+        """Publish remapped tracklets after a fail-closed stale-file check."""
         if not self.review_dir:
             QMessageBox.information(self, "Save", "Load a package first.")
             return
         self._stop_play()
-        downstream = self._downstream_artifact_note()
-        if downstream:
-            reply = QMessageBox.question(
-                self,
-                "Existing annotations or examples",
-                downstream
-                + "\n\nSaving will rebuild remapped tracklets. Those files "
-                "will not be updated and may now describe the wrong animals.\n\n"
-                "Save anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply != QMessageBox.StandardButton.Yes:
-                return
+        downstream = check_downstream_artifacts(self.project.project)
+        if not self._confirm_stale_downstream(downstream):
+            return
         result = save_review_package(
             self.review_dir,
             self.markers,
@@ -1209,7 +1201,8 @@ class ReviewIdsTab(QWidget):
 
         clear_tracklets_discovery_cache()
         self.package_saved.emit(self.review_dir)
-        extra = f"\n\n{downstream}" if downstream else ""
+        extra_lines = downstream.note_lines()
+        extra = ("\n\n" + "\n".join(extra_lines)) if extra_lines else ""
         QMessageBox.information(
             self,
             "Saved",
@@ -1222,27 +1215,34 @@ class ReviewIdsTab(QWidget):
         )
         self._render()
 
-    def _downstream_artifact_note(self) -> str:
-        """Describe ethogram/examples that may go stale after a remap rebuild."""
-        bits: List[str] = []
-        try:
-            from LabGym.gui_pyside.project.paths import (
-                annotations_path_for,
-                current_video_path,
+    def _confirm_stale_downstream(self, check: DownstreamArtifactCheck) -> bool:
+        """Ask before save when artifacts exist or the lookup failed (default No)."""
+        if not check.requires_confirm:
+            return True
+        notes = "\n".join(check.note_lines())
+        if check.check_failed:
+            detail = (
+                f"{notes}\n\n"
+                "Saving will rebuild remapped tracklets. Existing ethogram "
+                "or example-store files, if any, will not be updated and "
+                "may now describe the wrong animals.\n\n"
+                "Save anyway?"
             )
-
-            video = current_video_path(self.project.project)
-            if video:
-                ann = annotations_path_for(self.project.project, video)
-                if ann and Path(ann).is_file():
-                    bits.append(f"Ethogram: {ann}")
-                ctx = self.project.resolve_context(video)
-                ex = Path(ctx.examples_out_dir) if ctx.examples_out_dir else None
-                if ex is not None and ex.is_dir() and any(ex.iterdir()):
-                    bits.append(f"Examples: {ex}")
-        except Exception:
-            return ""
-        return "\n".join(bits)
+        else:
+            detail = (
+                f"{notes}\n\n"
+                "Saving will rebuild remapped tracklets. Those files "
+                "will not be updated and may now describe the wrong animals.\n\n"
+                "Save anyway?"
+            )
+        reply = QMessageBox.question(
+            self,
+            "Existing annotations or examples",
+            detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def closeEvent(self, event) -> None:
         self._stop_play()
