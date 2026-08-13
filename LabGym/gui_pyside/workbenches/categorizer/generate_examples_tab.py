@@ -297,8 +297,10 @@ class GenerateExamplesTab(QWidget):
             warnings.append("Video file missing on disk")
         if ctx.video_path and not ctx.annotations_exists:
             warnings.append("Annotations missing — annotate and save first")
-        if ctx.video_path and not ctx.tracklets_exists:
-            warnings.append("Tracklets folder not found — need post–ID-review tracklets")
+        if ctx.video_path and not ctx.accepted_identities:
+            warnings.append(
+                "Accepted identities missing — save Review IDs before generating"
+            )
         if warnings:
             html += "<br><br><span style='color:#f6a'>" + " · ".join(warnings) + "</span>"
         self.lbl_summary.setText(html)
@@ -323,15 +325,14 @@ class GenerateExamplesTab(QWidget):
             )
             self.request_annotate.emit()
             return
-        if not ctx.tracklets_exists:
+        if not ctx.accepted_identities:
             QMessageBox.warning(
                 self,
                 "Generate",
-                "Tracklets folder not found.\n"
-                "Point detection_dir on the video in Edit project, or place "
-                "id_review tracklets next to the video / under the project "
-                "detection root.\n\n"
-                f"Searched relative to:\n{ctx.video_path}",
+                "Accepted identities are required.\n"
+                "Open Detector → Review IDs, review or accept the detector "
+                "IDs, and save.\n\n"
+                f"Package:\n{ctx.tracklets_dir or '(none found)'}",
             )
             return
 

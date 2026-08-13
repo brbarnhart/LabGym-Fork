@@ -54,24 +54,55 @@ def test_load_categorizer_metadata(tmp_path: Path):
 def test_process_video_missing_paths(tmp_path: Path):
     cfg = ProcessVideoConfig(
         video_path=str(tmp_path / "no.avi"),
-        detector_path=str(tmp_path / "det"),
         categorizer_path=str(tmp_path / "cat"),
         results_root=str(tmp_path / "out"),
+        id_review_dir=str(tmp_path / "id_review"),
     )
     r = process_video(cfg)
     assert r.ok is False
     assert "not found" in r.error.lower()
 
 
+def test_process_video_requires_accepted_identities(tmp_path: Path):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    cat = tmp_path / "cat"
+    cat.mkdir()
+    cfg = ProcessVideoConfig(
+        video_path=str(video),
+        categorizer_path=str(cat),
+        results_root=str(tmp_path / "out"),
+        id_review_dir="",
+    )
+    r = process_video(cfg)
+    assert r.ok is False
+    assert "Review IDs" in r.error
+
+
 def test_process_video_mocked(tmp_path: Path):
     video = tmp_path / "clip.avi"
     video.write_bytes(b"x")
-    det = tmp_path / "det"
-    det.mkdir()
-    (det / "model_parameters.txt").write_text(
-        '{"animal_names":["mouse"],"inferencing_framesize":100}',
-        encoding="utf-8",
+    review = tmp_path / "id_review"
+    review.mkdir()
+    from LabGym.id_review.apply import write_tracklets_identity_status
+    from LabGym.id_review.tracklets import save_tracklets
+    from LabGym.id_review.types import SCHEMA_VERSION, TrackletStore
+    import numpy as np
+
+    n = 4
+    store = TrackletStore(
+        schema_version=SCHEMA_VERSION,
+        animal_kind="mouse",
+        ids=[0],
+        n_frames=n,
+        centers=np.zeros((1, n, 2)),
+        valid=np.ones((1, n), dtype=bool),
+        heights=np.ones((1, n)),
+        contours=[[None] * n],
+        meta={"fps": 10},
     )
+    save_tracklets(store, str(review))
+    write_tracklets_identity_status(str(review), corrected=True, accepted=True)
     cat = tmp_path / "cat"
     cat.mkdir()
     pd.DataFrame(
@@ -98,8 +129,6 @@ def test_process_video_mocked(tmp_path: Path):
     fake_aad = MagicMock()
     fake_aad.results_path = str(results)
     fake_aad.prepare_analysis = MagicMock()
-    fake_aad.acquire_information = MagicMock()
-    fake_aad.craft_data = MagicMock()
     fake_aad.categorize_behaviors = MagicMock()
     fake_aad.annotate_video = MagicMock()
     fake_aad.export_results = MagicMock()
@@ -109,15 +138,20 @@ def test_process_video_mocked(tmp_path: Path):
     prev = sys.modules.get("LabGym.analyzebehavior_dt")
     sys.modules["LabGym.analyzebehavior_dt"] = fake_mod
     try:
-        cfg = ProcessVideoConfig(
-            video_path=str(video),
-            detector_path=str(det),
-            categorizer_path=str(cat),
-            results_root=str(out),
-            animal_kinds=["mouse"],
-            animal_number={"mouse": 1},
-        )
-        r = process_video(cfg)
+        with patch(
+            "LabGym.analysis.hydrate_from_tracklets.fill_geometry_from_stores"
+        ), patch(
+            "LabGym.analysis.hydrate_from_tracklets.rebuild_categorizer_inputs"
+        ):
+            cfg = ProcessVideoConfig(
+                video_path=str(video),
+                categorizer_path=str(cat),
+                results_root=str(out),
+                animal_kinds=["mouse"],
+                animal_number={"mouse": 1},
+                id_review_dir=str(review),
+            )
+            r = process_video(cfg)
     finally:
         if prev is None:
             sys.modules.pop("LabGym.analyzebehavior_dt", None)

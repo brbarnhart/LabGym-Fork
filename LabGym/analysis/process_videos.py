@@ -1,7 +1,6 @@
-"""Headless: detect/track + categorize + export LabGym analysis products.
+"""Headless: categorize + export LabGym analysis products from accepted identities.
 
-Uses AnalyzeAnimalDetector (detector path). Optionally applies ID remaps from
-an existing id_review package after craft_data so Review IDs corrections stick.
+Requires remapped tracklets published by Review IDs. Does not run the detector.
 """
 
 from __future__ import annotations
@@ -31,12 +30,12 @@ _DEFAULT_ID_COLORS = [
 @dataclass
 class ProcessVideoConfig:
     video_path: str
-    detector_path: str
-    categorizer_path: str
-    results_root: str
+    detector_path: str = ""
+    categorizer_path: str = ""
+    results_root: str = ""
     animal_kinds: List[str] = field(default_factory=list)
     animal_number: Dict[str, int] = field(default_factory=dict)
-    # If set, apply remaps from this id_review folder after tracking
+    # Identity package with accepted (published remapped) tracklets
     id_review_dir: str = ""
     framewidth: Optional[int] = None
     t: float = 0.0
@@ -138,33 +137,12 @@ def _behavior_colors(classnames: Sequence[str]) -> Dict[str, List[str]]:
     return out
 
 
-def _apply_existing_id_review(analyzer, id_review_dir: str, prog: Callable[[str], None]) -> int:
-    """Apply switches/decisions from a prior Review IDs package to the analyzer."""
-    from LabGym.id_review.apply import apply_decisions_to_analyzer, load_decisions
-    from LabGym.id_review.dataset import load_switches, switches_to_decisions
-
-    review = Path(id_review_dir)
-    if not review.is_dir():
-        return 0
-    markers = load_switches(str(review))
-    if markers:
-        decisions = switches_to_decisions(markers)
-    else:
-        decisions = load_decisions(str(review / "decisions.jsonl"))
-    if not decisions:
-        prog("No ID remaps found in id_review package.")
-        return 0
-    applied = apply_decisions_to_analyzer(analyzer, decisions)
-    prog(f"Applied {len(applied)} ID remap decision(s) from {review}")
-    return len(applied)
-
-
 def process_video(
     config: ProcessVideoConfig,
     *,
     progress: ProgressCb = None,
 ) -> ProcessVideoResult:
-    """Run detector tracking + categorizer + export for one video."""
+    """Categorize a video from accepted remapped tracklets (no re-detect)."""
     log: List[str] = []
 
     def _prog(msg: str) -> None:
@@ -177,12 +155,17 @@ def process_video(
         return ProcessVideoResult(
             video_path=str(video), results_path="", ok=False, error=f"Video not found: {video}", log=log
         )
-    if not Path(config.detector_path).is_dir():
+    from LabGym.id_review.raw_store import has_accepted_identities
+
+    if not config.id_review_dir or not has_accepted_identities(config.id_review_dir):
         return ProcessVideoResult(
             video_path=str(video),
             results_path="",
             ok=False,
-            error=f"Detector not found: {config.detector_path}",
+            error=(
+                "Accepted identities are required. Open Detector → Review IDs, "
+                "review or accept the detector IDs, and save before Process videos."
+            ),
             log=log,
         )
     if not Path(config.categorizer_path).is_dir():
@@ -196,7 +179,12 @@ def process_video(
 
     try:
         from LabGym.analyzebehavior_dt import AnalyzeAnimalDetector
-        from LabGym.detection.batch_detect import load_detector_animal_kinds
+        from LabGym.analysis.hydrate_from_tracklets import (
+            fill_geometry_from_stores,
+            kinds_and_counts,
+            load_remapped_stores,
+            rebuild_categorizer_inputs,
+        )
     except Exception as exc:
         return ProcessVideoResult(
             video_path=str(video),
@@ -219,13 +207,21 @@ def process_video(
             )
         names_and_colors = _behavior_colors(classnames)
 
-        kinds = list(config.animal_kinds) or load_detector_animal_kinds(config.detector_path)
-        numbers = dict(config.animal_number)
-        if not numbers:
-            numbers = {k: 1 for k in kinds}
-        elif len(numbers) == 1 and not all(k in numbers for k in kinds):
-            n = max(1, int(next(iter(numbers.values()))))
-            numbers = {k: n for k in kinds}
+        stores = load_remapped_stores(config.id_review_dir)
+        if not stores:
+            return ProcessVideoResult(
+                video_path=str(video),
+                results_path="",
+                ok=False,
+                error=f"No remapped tracklets in {config.id_review_dir}",
+                log=log,
+            )
+        counts = kinds_and_counts(stores)
+        kinds = list(config.animal_kinds) or list(counts.keys())
+        numbers = dict(config.animal_number) if config.animal_number else dict(counts)
+        for k in kinds:
+            if k not in numbers:
+                numbers[k] = counts.get(k, 1)
 
         dim_conv = int(meta.get("dim_conv", 32) or 32)
         dim_tconv = int(meta.get("dim_tconv", 32) or 32)
@@ -253,8 +249,6 @@ def process_video(
             if config.social_distance
             else meta.get("social_distance", 0) or 0
         )
-        color_costar = int(meta.get("color_code", 1) or 1) == 0 or bool(config.color_costar)
-
         results_root = Path(config.results_root)
         results_root.mkdir(parents=True, exist_ok=True)
 
@@ -263,7 +257,7 @@ def process_video(
         try:
             aad = AnalyzeAnimalDetector()
             aad.prepare_analysis(
-                str(Path(config.detector_path).resolve()),
+                None,
                 str(video.resolve()),
                 str(results_root.resolve()),
                 numbers,
@@ -288,29 +282,23 @@ def process_video(
             _frame = getattr(progress, "frame", None) if progress is not None else None
             frame_progress = _frame if callable(_frame) else None
 
-            _prog("Detect + track…")
-            if behavior_mode == 1:
-                aad.acquire_information_interact_basic(
-                    batch_size=int(config.detector_batch),
-                    background_free=background_free,
-                    black_background=black_background,
-                    frame_progress=frame_progress,
-                    status_progress=_prog,
-                )
-            else:
-                aad.acquire_information(
-                    batch_size=int(config.detector_batch),
-                    background_free=background_free,
-                    black_background=black_background,
-                    color_costar=color_costar,
-                    frame_progress=frame_progress,
-                    status_progress=_prog,
-                )
-            if behavior_mode != 1:
-                _prog("Crafting track data…")
-                aad.craft_data()
-                if config.id_review_dir:
-                    _apply_existing_id_review(aad, config.id_review_dir, _prog)
+            _prog("Loading remapped tracklets…")
+            first_store = next(iter(stores.values()))
+            # Prefer tracklet length so we do not scan unused video tail.
+            if first_store.n_frames > 0:
+                aad.total_analysis_framecount = int(first_store.n_frames)
+            fill_geometry_from_stores(aad, stores)
+            _prog("Rebuilding categorizer inputs from outlines…")
+            rebuild_categorizer_inputs(
+                aad,
+                video_path=str(video.resolve()),
+                store_meta=dict(first_store.meta or {}),
+                background_free=background_free,
+                black_background=black_background,
+                progress=_prog,
+            )
+            if frame_progress:
+                frame_progress(int(first_store.n_frames), int(first_store.n_frames))
 
             _prog("Categorizing behaviors…")
             aad.categorize_behaviors(

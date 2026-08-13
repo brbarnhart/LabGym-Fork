@@ -123,3 +123,29 @@ _Avoid_: edited soft_labels row (implementation)
 **Soft projection**:
 Deriving an effective soft vector in the active taxonomy from an original or overridden soft vector (e.g. summing mass of merged categories, dropping excluded categories and renormalizing). Deterministic and reversible by re-reading originals after undoing taxonomy operations.
 _Avoid_: remapped soft labels (ambiguous with permanent rewrite)
+
+## Identity review
+
+**Raw tracklets**:
+The detector’s per-video track geometry before any human identity corrections. They are not overwritten when switch markers change.
+_Avoid_: original mappings, uncorrected tracks (ok casually)
+
+**Switch marker**:
+A user-recorded identity swap at one analysis frame. The current list of switch markers is the source of truth for identity corrections.
+_Avoid_: mapping (alone), updated mappings, original mappings
+
+**Remapped tracklets**:
+Track geometry derived by applying the current switch-marker list to raw tracklets. Created or regenerated only when Review IDs is saved; this is what later annotation and analysis consume.
+_Avoid_: updated mappings, corrected tracklets (ok in UI copy)
+
+**Accepted identities**:
+The user-confirmed identity layer for a video that has per-animal tracks, created by saving in Review IDs (the switch-marker list may be empty). Required before annotate, generate examples, or Process videos for those videos. Interactive basic has no per-animal tracks and does not use this gate.
+_Avoid_: knowingly accept raw, corrected package (ok casually)
+
+**Empty kind**:
+An animal kind that is in that video’s accepted remapped tracklets but has no valid tracks. The kind was reviewed; no animal of that kind was present.
+_Avoid_: missing kind, absent kind (ambiguous)
+
+**Missing kind**:
+An animal kind someone asked to analyze that is not in that video’s accepted remapped tracklets at all.
+_Avoid_: empty kind, absent kind (ambiguous)

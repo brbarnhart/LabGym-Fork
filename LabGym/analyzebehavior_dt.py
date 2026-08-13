@@ -149,9 +149,13 @@ class AnalyzeAnimalDetector():
 		print(datetime.datetime.now())
 		self.log.append(str(datetime.datetime.now()))
 
-		self.detector=Detector()
-		self.detector.load(path_to_detector,animal_kinds)
-		self.animal_mapping=self.detector.animal_mapping
+		if path_to_detector:
+			self.detector=Detector()
+			self.detector.load(path_to_detector,animal_kinds)
+			self.animal_mapping=self.detector.animal_mapping
+		else:
+			self.detector=None
+			self.animal_mapping={i: name for i, name in enumerate(animal_kinds)}
 		self.path_to_video=path_to_video
 		self.basename=os.path.basename(self.path_to_video)
 		self.framewidth=framewidth

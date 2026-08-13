@@ -207,11 +207,21 @@ class AnnotateEthogramTab(QWidget):
             prefer_sidecar=prefer_sidecar,
         )
         if ok and ctx.tracklets_dir and window._loaded_tracklets is None:
-            window.load_tracklets_from_path(ctx.tracklets_dir)
+            if not ctx.accepted_identities:
+                QMessageBox.warning(
+                    window,
+                    "Review IDs required",
+                    "Save Review IDs (Detector workbench) before annotating.\n"
+                    "That step publishes accepted identities (you may accept "
+                    "detector IDs with no swaps).\n\n"
+                    f"Package:\n{ctx.tracklets_dir}",
+                )
+            else:
+                window.load_tracklets_from_path(ctx.tracklets_dir)
         if ok:
             note = ""
-            if not ctx.tracklets_exists:
-                note = "  ·  No tracklets found (ID dots optional; Detect/Review later)."
+            if not ctx.accepted_identities:
+                note = "  ·  No accepted identities (save Review IDs first)."
             window.statusBar().showMessage(
                 f"Loaded project video{note}  ·  mode={ctx.behavior_mode}"
             )

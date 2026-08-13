@@ -277,8 +277,6 @@ def detect_and_track_video(
             save_subjects,
             subjects_from_track_ids,
         )
-        from LabGym.id_review.tracklets import load_tracklets
-        from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
         from LabGym.id_review.apply import write_tracklets_identity_status
     except Exception as exc:
         return DetectTrackResult(
@@ -356,14 +354,18 @@ def detect_and_track_video(
             write_tracklets_identity_status(
                 out_dir,
                 corrected=False,
+                accepted=False,
+                has_raw=True,
                 n_decisions=0,
                 source="batch_detect",
             )
             if config.write_default_subjects:
                 try:
+                    from LabGym.id_review.raw_store import load_raw_tracklets
+
                     kind_ids: Dict[str, List[int]] = {}
-                    for kind in discover_tracklet_kinds(out_dir):
-                        store = load_tracklets(out_dir, kind)
+                    raw_stores = load_raw_tracklets(out_dir)
+                    for kind, store in raw_stores.items():
                         kind_ids[kind] = list(store.ids)
                     if kind_ids:
                         save_subjects(out_dir, subjects_from_track_ids(kind_ids))

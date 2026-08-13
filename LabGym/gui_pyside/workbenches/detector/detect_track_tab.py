@@ -79,8 +79,9 @@ class DetectTrackTab(QWidget):
 
         intro = QLabel(
             "Run the LabGym detector to <b>detect and track</b> animals on project "
-            "videos. Writes identity packages (<code>id_review/</code> with tracklets "
-            "+ contact-risk events) for later Review IDs. One video at a time."
+            "videos. Writes <b>raw tracklets</b> under <code>id_review/raw/</code> "
+            "plus contact-risk events. Save Review IDs before annotate / process. "
+            "One video at a time."
         )
         intro.setWordWrap(True)
         intro.setTextFormat(Qt.TextFormat.RichText)
@@ -525,6 +526,8 @@ class DetectTrackTab(QWidget):
                 self, "Detect + track", "Select at least one project video."
             )
             return
+        if not self._confirm_overwrite_identity_packages(videos):
+            return
 
         # Block table rebuilds for the whole batch (including mark_dirty below).
         self._batch_active = True
@@ -583,6 +586,35 @@ class DetectTrackTab(QWidget):
         dlg = self._ensure_progress_dialog()
         dlg.begin_batch(len(items))
         self.queue.start(items, runner)
+
+    def _confirm_overwrite_identity_packages(self, videos: List[str]) -> bool:
+        """Warn when re-detect would replace accepted identities or switches."""
+        from LabGym.id_review.dataset import load_switches
+        from LabGym.id_review.raw_store import has_accepted_identities
+
+        at_risk: List[str] = []
+        for path in videos:
+            pkg = discover_tracklets_dir(self.project.project, path)
+            if not pkg:
+                continue
+            if has_accepted_identities(pkg) or load_switches(pkg):
+                at_risk.append(Path(path).name)
+        if not at_risk:
+            return True
+        names = "\n".join(f"  • {n}" for n in at_risk[:12])
+        extra = "" if len(at_risk) <= 12 else f"\n  … and {len(at_risk) - 12} more"
+        reply = QMessageBox.question(
+            self,
+            "Replace identity review?",
+            "Re-running Detect + track is a new tracking world. For:\n"
+            f"{names}{extra}\n\n"
+            "raw tracklets will be replaced, remapped tracklets unpublished, "
+            "and switch markers cleared. Annotate / generate / Process videos "
+            "will be blocked until you save Review IDs again.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _ensure_progress_dialog(self) -> DetectTrackProgressDialog:
         if self._progress_dlg is None:

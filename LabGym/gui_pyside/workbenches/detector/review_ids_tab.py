@@ -140,6 +140,7 @@ class ReviewIdsTab(QWidget):
         self.min_risk = 0.0
         self._dirty = False
         self._already_corrected = False
+        self._has_raw = False
         self._training_ranges: List[AnalysisFrameRange] = []
         self._range_start: Optional[int] = None
         self._extract_thread: Optional[QThread] = None
@@ -414,8 +415,8 @@ class ReviewIdsTab(QWidget):
             "Save package (switches + remapped tracklets + subjects)"
         )
         self.btn_save.setToolTip(
-            "Finalize switch markers, re-save corrected tracklets from original "
-            "geometry, write subjects.json"
+            "Finalize switch markers, rebuild remapped tracklets from the raw "
+            "snapshot, write subjects.json. Required before annotate / process."
         )
         self.btn_save.clicked.connect(self.save_package)
         save_row.addWidget(self.btn_save)
@@ -555,6 +556,7 @@ class ReviewIdsTab(QWidget):
         self._stores = pkg.stores
         self._baseline_stores = pkg.baseline_stores
         self._already_corrected = pkg.already_corrected
+        self._has_raw = bool(pkg.has_raw)
         self.animal_kind = pkg.animal_kind
         self.n_frames = pkg.n_frames
         store = self._stores[self.animal_kind]
@@ -577,8 +579,13 @@ class ReviewIdsTab(QWidget):
         self.subjects_table.set_subjects(pkg.subjects)
         self.slider.setMaximum(max(0, self.n_frames - 1))
         self.setEnabled_controls(True)
-        corr = "corrected" if self._already_corrected else "not yet remapped on disk"
-        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  tracklets: {corr}")
+        if pkg.accepted:
+            state = "accepted identities"
+        elif self._has_raw:
+            state = "raw only — save to accept"
+        else:
+            state = "legacy remapped (switches locked)"
+        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  {state}")
         self._seek(0)
         self._refresh_marker_list()
         self._update_undo_button()
@@ -699,7 +706,7 @@ class ReviewIdsTab(QWidget):
             markers=self.markers,
             animal_kind=self.animal_kind,
             analysis_frame=self.frame,
-            already_corrected=self._already_corrected,
+            already_corrected=not self._has_raw,
             highlight_ids=self._selected_swap_ids(),
         )
         n_risk = sum(
@@ -1003,14 +1010,15 @@ class ReviewIdsTab(QWidget):
     def _mark_swap(self) -> None:
         if not self.review_dir:
             return
-        if self._already_corrected:
+        if not self._has_raw:
             QMessageBox.information(
                 self,
-                "Tracklets already corrected",
-                "This package’s tracklets were already remapped on disk.\n"
+                "No raw tracklets",
+                "This package has no raw snapshot, so switch markers cannot "
+                "be changed (legacy remapped file).\n"
                 "You can still edit names/roles and save subjects.json.\n\n"
-                "To mark new ID swaps against raw tracks, re-export tracklets "
-                "from Detect + track (or restore an uncorrected package).",
+                "To mark new ID swaps, re-run Detect + track (a new tracking "
+                "world) and review again.",
             )
             return
         ids = self._selected_swap_ids()
@@ -1057,6 +1065,8 @@ class ReviewIdsTab(QWidget):
                 "Select a marker in the list, or move to a marked frame and remove.",
             )
             return
+        if not self._confirm_nontail_marker_edit(mid):
+            return
         self._push_undo()
         self.markers = [m for m in self.markers if m.marker_id != mid]
         self._apply_marker_change()
@@ -1073,11 +1083,35 @@ class ReviewIdsTab(QWidget):
                     self, "Nothing to remove", f"No switch marker at frame {self.frame}."
                 )
             return False
+        if any(not self._marker_is_last(m.marker_id) for m in to_remove):
+            if not self._warn_nontail_edit():
+                return False
         self._push_undo()
         ids = {m.marker_id for m in to_remove}
         self.markers = [m for m in self.markers if m.marker_id not in ids]
         self._apply_marker_change()
         return True
+
+    def _marker_is_last(self, marker_id: str) -> bool:
+        ordered = sorted(self.markers, key=lambda x: (x.frame, x.marker_id))
+        return bool(ordered) and ordered[-1].marker_id == marker_id
+
+    def _warn_nontail_edit(self) -> bool:
+        reply = QMessageBox.question(
+            self,
+            "Earlier switch marker",
+            "This marker is not the last one on the timeline. Later switches "
+            "were set while it was applied and may now be wrong.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _confirm_nontail_marker_edit(self, marker_id: str) -> bool:
+        if self._marker_is_last(marker_id):
+            return True
+        return self._warn_nontail_edit()
 
     def _undo(self) -> None:
         if not self._undo_stack:
@@ -1136,6 +1170,20 @@ class ReviewIdsTab(QWidget):
             QMessageBox.information(self, "Save", "Load a package first.")
             return
         self._stop_play()
+        downstream = self._downstream_artifact_note()
+        if downstream:
+            reply = QMessageBox.question(
+                self,
+                "Existing annotations or examples",
+                downstream
+                + "\n\nSaving will rebuild remapped tracklets. Those files "
+                "will not be updated and may now describe the wrong animals.\n\n"
+                "Save anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
         result = save_review_package(
             self.review_dir,
             self.markers,
@@ -1143,27 +1191,58 @@ class ReviewIdsTab(QWidget):
             self.subjects_table.get_subjects(),
             already_corrected=self._already_corrected,
             baseline_stores=self._baseline_stores,
+            has_raw=self._has_raw,
         )
         if not result.ok:
             QMessageBox.critical(self, "Save failed", result.error)
             return
-        self._already_corrected = result.already_corrected
+        self._already_corrected = bool(result.already_corrected)
+        self._has_raw = bool(result.has_raw)
         if result.stores:
             self._stores = result.stores
             self._baseline_stores = result.baseline_stores
         self._dirty = False
-        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  tracklets: corrected")
+        self.lbl_pkg.setText(
+            f"Package: {self.review_dir}  ·  accepted identities"
+        )
+        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
+
+        clear_tracklets_discovery_cache()
         self.package_saved.emit(self.review_dir)
+        extra = f"\n\n{downstream}" if downstream else ""
         QMessageBox.information(
             self,
             "Saved",
-            f"Saved identity package:\n{self.review_dir}\n\n"
+            f"Saved accepted identities:\n{self.review_dir}\n\n"
             f"Switches: {len(self.markers)}\n"
             f"{result.remap_note}"
             f"Subjects: {result.n_subjects}\n\n"
-            "Annotate ethogram will pick up names/colors on next load.",
+            "Annotate ethogram, generate examples, and Process videos can "
+            f"use this package.{extra}",
         )
         self._render()
+
+    def _downstream_artifact_note(self) -> str:
+        """Describe ethogram/examples that may go stale after a remap rebuild."""
+        bits: List[str] = []
+        try:
+            from LabGym.gui_pyside.project.paths import (
+                annotations_path_for,
+                current_video_path,
+            )
+
+            video = current_video_path(self.project.project)
+            if video:
+                ann = annotations_path_for(self.project.project, video)
+                if ann and Path(ann).is_file():
+                    bits.append(f"Ethogram: {ann}")
+                ctx = self.project.resolve_context(video)
+                ex = Path(ctx.examples_out_dir) if ctx.examples_out_dir else None
+                if ex is not None and ex.is_dir() and any(ex.iterdir()):
+                    bits.append(f"Examples: {ex}")
+        except Exception:
+            return ""
+        return "\n".join(bits)
 
     def closeEvent(self, event) -> None:
         self._stop_play()
