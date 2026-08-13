@@ -67,7 +67,11 @@ def test_load_review_package_happy(tmp_path: Path):
     assert pkg.n_frames == 8
     assert pkg.fps == 10.0
     assert pkg.already_corrected is False
+    assert pkg.has_raw is True
+    assert pkg.accepted is False
     assert len(pkg.subjects) >= 1
+    assert not (review / "mouse_tracklets.npz").is_file()
+    assert (review / "raw" / "mouse_tracklets.npz").is_file()
 
 
 def test_load_review_package_missing_dir():
@@ -88,3 +92,47 @@ def test_load_review_package_no_tracklets(tmp_path: Path):
     empty.mkdir()
     with pytest.raises(ValueError, match="tracklets"):
         load_review_package(str(empty))
+
+
+def test_save_review_package_publishes_from_raw(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_package,
+        save_review_package,
+    )
+    from LabGym.id_review.dataset import make_swap_marker
+    from LabGym.id_review.raw_store import has_accepted_identities, save_raw_tracklets
+    from LabGym.id_review.tracklets import load_tracklets
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    raw = _minimal_store(n_frames=10)
+    save_raw_tracklets(review, {"mouse": raw})
+    pkg = load_review_package(str(review))
+    marker = make_swap_marker(4, "mouse", [0, 1], fps=10.0)
+    result = save_review_package(
+        str(review),
+        [marker],
+        pkg.events,
+        pkg.subjects,
+        already_corrected=False,
+        baseline_stores=pkg.baseline_stores,
+        has_raw=True,
+    )
+    assert result.ok, result.error
+    assert result.accepted is True
+    assert has_accepted_identities(review) is True
+    published = load_tracklets(str(review), "mouse")
+    assert published.centers[0, 4, 0] == raw.centers[1, 4, 0]
+    # second save must not invert
+    result2 = save_review_package(
+        str(review),
+        [marker],
+        pkg.events,
+        pkg.subjects,
+        already_corrected=False,
+        baseline_stores=pkg.baseline_stores,
+        has_raw=True,
+    )
+    assert result2.ok, result2.error
+    published2 = load_tracklets(str(review), "mouse")
+    assert published2.centers[0, 4, 0] == raw.centers[1, 4, 0]

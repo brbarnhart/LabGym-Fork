@@ -7,11 +7,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
-from LabGym.id_review.apply import read_tracklets_identity_status
 from LabGym.id_review.dataset import (
     finalize_switch_annotations,
     load_events,
     load_switches,
+)
+from LabGym.id_review.raw_store import (
+    has_accepted_identities,
+    has_raw_snapshot,
+    load_raw_tracklets,
+    snapshot_uncorrected_root_to_raw,
 )
 from LabGym.id_review.tracklets import load_tracklets
 from LabGym.id_review.types import ContactEvent, SwitchMarker
@@ -35,6 +40,8 @@ class LoadedReviewPackage:
     stores: Dict[str, Any]
     baseline_stores: Dict[str, Any]
     already_corrected: bool
+    has_raw: bool
+    accepted: bool
     animal_kind: str
     n_frames: int
     fps: float
@@ -49,6 +56,8 @@ class SavePackageResult:
     remap_note: str = ""
     n_subjects: int = 0
     already_corrected: bool = False
+    has_raw: bool = False
+    accepted: bool = False
     stores: Dict[str, Any] = field(default_factory=dict)
     baseline_stores: Dict[str, Any] = field(default_factory=dict)
 
@@ -64,19 +73,29 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
 
     events = load_events(review_dir)
     markers = load_switches(review_dir)
-    kinds = discover_tracklet_kinds(review_dir)
-    if not kinds:
-        raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
+    accepted = has_accepted_identities(review_dir)
+    if not has_raw_snapshot(review_dir) and discover_tracklet_kinds(review_dir) and not accepted:
+        snapshot_uncorrected_root_to_raw(review_dir)
 
-    status = read_tracklets_identity_status(review_dir)
-    already_corrected = bool(status.get("corrected"))
-
+    has_raw = has_raw_snapshot(review_dir)
     stores: Dict[str, Any] = {}
     baseline: Dict[str, Any] = {}
-    for kind in kinds:
-        store = load_tracklets(review_dir, kind)
-        stores[kind] = store
-        baseline[kind] = clone_store(store)
+    if has_raw:
+        raw = load_raw_tracklets(review_dir)
+        for kind, store in raw.items():
+            baseline[kind] = store
+            stores[kind] = clone_store(store)
+    else:
+        kinds = discover_tracklet_kinds(review_dir)
+        if not kinds:
+            raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
+        for kind in kinds:
+            store = load_tracklets(review_dir, kind)
+            stores[kind] = store
+            baseline[kind] = clone_store(store)
+
+    if not stores:
+        raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
 
     animal_kind = max(
         stores.keys(),
@@ -95,6 +114,9 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
         kind_ids = {k: list(s.ids) for k, s in stores.items()}
         recs = subjects_from_track_ids(kind_ids)
 
+    # Legacy baked packs have remapped geometry and no raw — freeze switch edits.
+    already_corrected = bool(accepted and not has_raw)
+
     return LoadedReviewPackage(
         review_dir=review_dir,
         events=events,
@@ -102,6 +124,8 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
         stores=stores,
         baseline_stores=baseline,
         already_corrected=already_corrected,
+        has_raw=has_raw,
+        accepted=accepted,
         animal_kind=animal_kind,
         n_frames=n_frames,
         fps=fps,
@@ -144,8 +168,9 @@ def save_review_package(
     *,
     already_corrected: bool,
     baseline_stores: Dict[str, Any],
+    has_raw: Optional[bool] = None,
 ) -> SavePackageResult:
-    """Finalize switches, optionally remap tracklets, write subjects.json."""
+    """Finalize switches, publish remapped tracklets from raw, write subjects."""
     try:
         decisions = finalize_switch_annotations(
             review_dir,
@@ -154,26 +179,23 @@ def save_review_package(
             export_samples=True,
         )
         n = 0
-        stores = dict(baseline_stores)
+        can_rebuild = has_raw if has_raw is not None else (not already_corrected)
+        stores = {k: clone_store(s) for k, s in baseline_stores.items()}
         baselines = dict(baseline_stores)
         corrected = already_corrected
-        if not already_corrected:
+        accepted = False
+        if can_rebuild:
             n = apply_decisions_and_save_tracklets(
                 review_dir,
                 decisions,
-                baseline_stores=baseline_stores,
                 source="pyside_id_review",
             )
-            corrected = True
-            stores = {}
-            baselines = {}
-            for kind in list(baseline_stores.keys()):
-                stores[kind] = load_tracklets(review_dir, kind)
-                baselines[kind] = clone_store(stores[kind])
+            accepted = True
+            # Keep editor baselines as raw; preview applies markers live.
             remap_note = f"Remap applications: {n}\n"
         else:
             remap_note = (
-                "Tracklets already corrected — skipped re-apply "
+                "No raw snapshot — skipped rebuild "
                 "(subjects + switches updated).\n"
             )
         save_subjects(review_dir, list(subjects))
@@ -183,6 +205,8 @@ def save_review_package(
             remap_note=remap_note,
             n_subjects=len(subjects),
             already_corrected=corrected,
+            has_raw=bool(can_rebuild) or has_raw_snapshot(review_dir),
+            accepted=accepted or has_accepted_identities(review_dir),
             stores=stores,
             baseline_stores=baselines,
         )

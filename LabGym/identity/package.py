@@ -175,13 +175,13 @@ def apply_decisions_and_save_tracklets(
     directory: str | Path,
     decisions: Sequence,
     *,
-    baseline_stores: Optional[Dict[str, Any]] = None,
     source: str = "pyside_id_review",
 ) -> int:
-    """Apply remap decisions to tracklets and write corrected npz + identity status.
+    """Publish remapped tracklets from raw plus the current switch decisions.
 
-    If ``baseline_stores`` is provided (pre-remap geometry), those are used as the
-    starting point so re-saving never double-applies. Otherwise loads from disk.
+    Rebuilds every kind in the raw snapshot. Empty decisions still write public
+    remapped files equal to raw and record accepted identities. Refuses when
+    raw is missing — public remapped files are never the remap baseline.
 
     Returns number of decision applications that remapped geometry.
     """
@@ -189,27 +189,26 @@ def apply_decisions_and_save_tracklets(
         apply_decisions_to_store,
         write_tracklets_identity_status,
     )
-    from LabGym.id_review.tracklets import load_tracklets, save_tracklets
-    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_raw_snapshot, load_raw_tracklets
+    from LabGym.id_review.tracklets import save_tracklets
 
     directory = Path(directory)
-    kinds = discover_tracklet_kinds(directory)
-    if not kinds and baseline_stores:
-        kinds = sorted(baseline_stores.keys())
+    if not has_raw_snapshot(directory):
+        raise FileNotFoundError(
+            f"Cannot rebuild remapped tracklets without raw tracklets in {directory}"
+        )
 
     n_total = 0
-    for kind in kinds:
-        if baseline_stores and kind in baseline_stores:
-            store = clone_store(baseline_stores[kind])
-        else:
-            store = load_tracklets(str(directory), kind)
-        n = apply_decisions_to_store(store, decisions, animal_kind=kind)
-        n_total += n
+    for kind, raw_store in load_raw_tracklets(directory).items():
+        store = clone_store(raw_store)
+        n_total += apply_decisions_to_store(store, decisions, animal_kind=kind)
         save_tracklets(store, str(directory))
 
     write_tracklets_identity_status(
         str(directory),
         corrected=True,
+        accepted=True,
+        has_raw=True,
         n_decisions=n_total,
         source=source,
     )

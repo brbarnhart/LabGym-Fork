@@ -5,18 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from LabGym.identity.package import (
     SUBJECTS_FILENAME,
     SubjectRecord,
     apply_decisions_and_save_tracklets,
-    clone_store,
     load_subjects,
     save_subjects,
     subjects_from_track_ids,
 )
 from LabGym.id_review.apply import read_tracklets_identity_status
 from LabGym.id_review.dataset import make_swap_marker, switches_to_decisions
+from LabGym.id_review.raw_store import has_accepted_identities, save_raw_tracklets
 from LabGym.id_review.tracklets import load_tracklets, save_tracklets
 from LabGym.id_review.types import SCHEMA_VERSION, TrackletStore
 
@@ -76,37 +77,95 @@ def test_subjects_from_track_ids():
     assert recs[0].display_name == "mouse_0"
 
 
-def test_apply_decisions_from_baseline(tmp_path: Path):
+def test_empty_switch_save_publishes_remapped_equal_to_raw(tmp_path: Path):
+    raw = _store(n_frames=12)
+    save_raw_tracklets(tmp_path, {"mouse": raw})
+    n = apply_decisions_and_save_tracklets(tmp_path, [])
+    assert n == 0
+    published = load_tracklets(str(tmp_path), "mouse")
+    assert np.allclose(published.centers, raw.centers)
+    assert np.array_equal(published.valid, raw.valid)
+    status = read_tracklets_identity_status(str(tmp_path))
+    assert status["accepted"] is True
+    assert has_accepted_identities(tmp_path) is True
+
+
+def test_second_save_same_switch_markers_does_not_double_apply(tmp_path: Path):
+    raw = _store(n_frames=15)
+    save_raw_tracklets(tmp_path, {"mouse": raw})
+    marker = make_swap_marker(5, "mouse", [0, 1], fps=30.0)
+    decisions = switches_to_decisions([marker])
+    apply_decisions_and_save_tracklets(tmp_path, decisions)
+    apply_decisions_and_save_tracklets(tmp_path, decisions)
+    published = load_tracklets(str(tmp_path), "mouse")
+    assert np.allclose(published.centers[0, 5:], raw.centers[1, 5:])
+    assert np.allclose(published.centers[1, 5:], raw.centers[0, 5:])
+    assert np.allclose(published.centers[0, :5], raw.centers[0, :5])
+
+
+def test_publish_without_raw_refuses_and_does_not_use_public_files(tmp_path: Path):
+    public = _store(n_frames=15)
+    save_tracklets(public, str(tmp_path))
+    before = load_tracklets(str(tmp_path), "mouse")
+    marker = make_swap_marker(5, "mouse", [0, 1], fps=30.0)
+    decisions = switches_to_decisions([marker])
+    with pytest.raises(FileNotFoundError, match="raw"):
+        apply_decisions_and_save_tracklets(tmp_path, decisions)
+    after = load_tracklets(str(tmp_path), "mouse")
+    assert np.allclose(after.centers, before.centers)
+    status = read_tracklets_identity_status(str(tmp_path))
+    assert status["accepted"] is False
+
+
+def test_apply_decisions_from_raw_writes_swapped_geometry(tmp_path: Path):
     store = _store(n_frames=15)
-    save_tracklets(store, str(tmp_path))
-    baseline = {"mouse": clone_store(store)}
+    save_raw_tracklets(tmp_path, {"mouse": store})
     marker = make_swap_marker(8, "mouse", [0, 1], fps=30.0)
     decisions = switches_to_decisions([marker])
-    n = apply_decisions_and_save_tracklets(
-        tmp_path, decisions, baseline_stores=baseline
-    )
+    n = apply_decisions_and_save_tracklets(tmp_path, decisions)
     assert n >= 1
     status = read_tracklets_identity_status(str(tmp_path))
-    assert status["corrected"] is True
+    assert status["accepted"] is True
     loaded = load_tracklets(str(tmp_path), "mouse")
-    # after frame 8, ids swapped relative to original
     assert np.allclose(loaded.centers[0, 8:], store.centers[1, 8:])
     assert np.allclose(loaded.centers[1, 8:], store.centers[0, 8:])
-    # before unchanged
     assert np.allclose(loaded.centers[0, :8], store.centers[0, :8])
 
 
-def test_no_double_apply_when_using_baseline(tmp_path: Path):
-    store = _store(n_frames=15)
-    save_tracklets(store, str(tmp_path))
-    baseline = {"mouse": clone_store(store)}
-    marker = make_swap_marker(5, "mouse", [0, 1], fps=30.0)
-    decisions = switches_to_decisions([marker])
-    apply_decisions_and_save_tracklets(tmp_path, decisions, baseline_stores=baseline)
-    # re-apply from same baseline → same result (not double)
-    apply_decisions_and_save_tracklets(tmp_path, decisions, baseline_stores=baseline)
-    loaded = load_tracklets(str(tmp_path), "mouse")
-    assert np.allclose(loaded.centers[0, 5:], store.centers[1, 5:])
+def test_analyzer_resave_publishes_empty_switch_accept(tmp_path: Path):
+    from types import SimpleNamespace
+
+    from LabGym.id_review.dataset import run_id_review_pipeline
+    from LabGym.id_review.raw_store import load_raw_tracklets
+
+    n = 8
+    kind = "mouse"
+    analyzer = SimpleNamespace(
+        results_path=str(tmp_path / "clip"),
+        animal_kinds=[kind],
+        animal_centers={kind: {0: [(0.0, 0.0)] * n, 1: [(10.0, 0.0)] * n}},
+        animal_heights={kind: {0: [8.0] * n, 1: [8.0] * n}},
+        animal_contours={kind: {0: [None] * n, 1: [None] * n}},
+        animal_area={kind: 10.0},
+        fps=10,
+        t=0,
+        length=0,
+        path_to_video="clip.avi",
+        framewidth=None,
+        frameheight=None,
+        duration=0,
+        all_time=list(range(n)),
+    )
+    out_dir, _events, decisions = run_id_review_pipeline(
+        analyzer, extract_samples=False, auto_load_existing_decisions=False
+    )
+    assert decisions == []
+    raw = load_raw_tracklets(out_dir)["mouse"]
+    published = load_tracklets(out_dir, "mouse")
+    assert np.allclose(published.centers, raw.centers)
+    assert has_accepted_identities(out_dir) is True
+    status = read_tracklets_identity_status(out_dir)
+    assert status["accepted"] is True
 
 
 def test_merge_subjects_into_loaded(tmp_path: Path):
@@ -114,6 +173,9 @@ def test_merge_subjects_into_loaded(tmp_path: Path):
 
     store = _store()
     save_tracklets(store, str(tmp_path))
+    from LabGym.id_review.apply import write_tracklets_identity_status
+
+    write_tracklets_identity_status(str(tmp_path), corrected=True, accepted=True)
     save_subjects(
         tmp_path,
         [
