@@ -34,7 +34,7 @@ class DetectTrackConfig:
     black_background: bool = True
     color_costar: bool = False
     social_distance: float = 0.0
-    # Contact risk pack for later ID review
+    # Ignored: modes 0/2 always write the identity package; mode 1 never does.
     export_id_review: bool = True
     extract_contact_samples: bool = False
     contact_distance_factor: float = 1.0
@@ -271,11 +271,12 @@ def detect_and_track_video(
 
     try:
         from LabGym.analyzebehavior_dt import AnalyzeAnimalDetector
-        from LabGym.id_review.dataset import export_review_pack, review_dir
+        from LabGym.id_review.dataset import export_review_pack
         from LabGym.id_review.types import ContactDetectorConfig
         from LabGym.identity.package import (
             save_subjects,
             subjects_from_track_ids,
+            writes_identity_package,
         )
         from LabGym.id_review.apply import write_tracklets_identity_status
     except Exception as exc:
@@ -337,7 +338,7 @@ def detect_and_track_video(
 
         id_review_path = ""
         n_events = 0
-        if config.export_id_review and int(config.behavior_mode) != 1:
+        if writes_identity_package(int(config.behavior_mode)):
             _prog("Exporting id_review identity package…")
             cfg = ContactDetectorConfig(
                 contact_distance_factor=float(config.contact_distance_factor),
@@ -385,9 +386,6 @@ def detect_and_track_video(
             Path(out_dir).joinpath("detect_track_job.json").write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8"
             )
-        else:
-            id_review_path = review_dir(results_path)
-            os.makedirs(id_review_path, exist_ok=True)
 
         _prog(f"Done: {id_review_path or results_path}")
         return DetectTrackResult(

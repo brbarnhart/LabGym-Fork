@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -137,8 +136,8 @@ class DetectTrackTab(QWidget):
         # Params
         p_box = QGroupBox("Tracking parameters")
         p_box.setToolTip(
-            "Controls how far/how long tracking runs and how identity packages "
-            "are exported for later ID review."
+            "Controls how far/how long tracking runs. Per-animal modes write "
+            "an identity package (raw tracklets) for later ID review."
         )
         p_form = QFormLayout(p_box)
         self.spin_animals = QSpinBox()
@@ -162,7 +161,8 @@ class DetectTrackTab(QWidget):
             "tracking; recommended for most ID-review work).\n"
             "• 2 Interactive advanced — tracking suited to social/interaction "
             "setups (main animal + nearby others / costars).\n"
-            "Mode 1 (interactive basic) is not used here for batch package export."
+            "Mode 1 (interactive basic) is not used here: it has no per-animal "
+            "IDs and writes no identity package."
         )
         self.combo_mode.setToolTip(tip_mode)
         p_form.addRow(self._lab("Behavior mode:", tip_mode), self.combo_mode)
@@ -238,17 +238,6 @@ class DetectTrackTab(QWidget):
         )
         self.spin_fw.setToolTip(tip_fw)
         p_form.addRow(self._lab("Frame width (resize):", tip_fw), self.spin_fw)
-
-        self.chk_export = QCheckBox("Export id_review package (tracklets + contact risk)")
-        self.chk_export.setChecked(True)
-        tip_export = (
-            "When checked (recommended), writes an identity package under "
-            "detection/<video_stem>/id_review/ with tracklets, contact-risk "
-            "events, and default subjects.json for Review IDs and annotation. "
-            "Uncheck only if you only want intermediate analysis folders."
-        )
-        self.chk_export.setToolTip(tip_export)
-        p_form.addRow(self.chk_export)
 
         self.spin_contact = QDoubleSpinBox()
         self.spin_contact.setRange(0.1, 20.0)
@@ -568,7 +557,6 @@ class DetectTrackTab(QWidget):
                 duration=float(self.spin_duration.value()),
                 length=int(self.spin_length.value()),
                 detector_batch=int(self.spin_batch.value()),
-                export_id_review=self.chk_export.isChecked(),
                 contact_distance_factor=float(self.spin_contact.value()),
             )
             # Expand animal_number to each kind

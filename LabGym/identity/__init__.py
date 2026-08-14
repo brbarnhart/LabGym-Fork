@@ -11,6 +11,7 @@ from .package import (
     save_subjects,
     subjects_from_track_ids,
     switch_edits_allowed,
+    writes_identity_package,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "save_subjects",
     "subjects_from_track_ids",
     "switch_edits_allowed",
+    "writes_identity_package",
 ]

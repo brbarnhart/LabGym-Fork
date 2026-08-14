@@ -17,6 +17,7 @@ from LabGym.identity.package import (
     save_subjects,
     subjects_from_track_ids,
     switch_edits_allowed,
+    writes_identity_package,
 )
 from LabGym.id_review.apply import (
     read_tracklets_identity_status,
@@ -61,6 +62,12 @@ def _store(n_frames=20, kind="mouse"):
         contours=contours,
         meta={"video": "x.mp4", "fps": 30},
     )
+
+
+def test_writes_identity_package_for_per_animal_modes_only():
+    assert writes_identity_package(0) is True
+    assert writes_identity_package(2) is True
+    assert writes_identity_package(1) is False
 
 
 def test_subjects_roundtrip(tmp_path: Path):

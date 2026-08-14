@@ -127,7 +127,20 @@ def clear_switch_records(directory: PathLike) -> None:
             path.unlink()
 
 
+def clear_raw_snapshot(directory: PathLike) -> None:
+    """Remove raw tracklet files so a new detect can replace the snapshot."""
+    dest = raw_dir(directory)
+    if not dest.is_dir():
+        return
+    for kind in discover_tracklet_kinds(dest):
+        for suffix in ("_tracklets.npz", "_tracklets_meta.json"):
+            path = dest / f"{kind}{suffix}"
+            if path.is_file():
+                path.unlink()
+
+
 def reset_identity_package_for_new_detect(directory: PathLike) -> None:
-    """Unpublish remapped tracklets and clear switches for a new tracking run."""
+    """Replace raw, unpublish remapped, and clear switches for a new detect."""
     unpublish_remapped_tracklets(directory)
     clear_switch_records(directory)
+    clear_raw_snapshot(directory)

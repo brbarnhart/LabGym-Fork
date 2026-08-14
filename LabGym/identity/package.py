@@ -12,6 +12,20 @@ from LabGym.annotator.core.tracklets_bridge import subject_color_for_index
 
 SUBJECTS_FILENAME = "subjects.json"
 
+# Behavior modes that produce per-animal tracks (see ADR 0006).
+_PER_ANIMAL_BEHAVIOR_MODES = frozenset({0, 2})
+
+
+def writes_identity_package(behavior_mode: int) -> bool:
+    """True when Detect + track must write an identity package (raw tracklets).
+
+    Non-interactive (0) and interactive advanced (2) produce per-animal tracks
+    and always write raw. Interactive basic (1) is a group blob and writes no
+    package.
+    """
+    return int(behavior_mode) in _PER_ANIMAL_BEHAVIOR_MODES
+
+
 
 @dataclass
 class SubjectRecord:
