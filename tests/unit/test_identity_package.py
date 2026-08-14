@@ -12,10 +12,16 @@ from LabGym.identity.package import (
     SubjectRecord,
     apply_decisions_and_save_tracklets,
     load_subjects,
+    migrate_uncorrected_public_to_raw,
+    needs_uncorrected_raw_migrate,
     save_subjects,
     subjects_from_track_ids,
+    switch_edits_allowed,
 )
-from LabGym.id_review.apply import read_tracklets_identity_status
+from LabGym.id_review.apply import (
+    read_tracklets_identity_status,
+    write_tracklets_identity_status,
+)
 from LabGym.id_review.dataset import make_swap_marker, switches_to_decisions
 from LabGym.id_review.raw_store import has_accepted_identities, save_raw_tracklets
 from LabGym.id_review.tracklets import load_tracklets, save_tracklets
@@ -189,3 +195,90 @@ def test_merge_subjects_into_loaded(tmp_path: Path):
     assert names[1] == "Bob"
     colors = {s.subject_id: s.color for s in loaded.subjects}
     assert colors[0] == "#112233"
+
+
+def test_switch_edits_not_allowed_without_raw(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    assert switch_edits_allowed(tmp_path) is False
+
+
+def test_switch_edits_allowed_with_raw(tmp_path: Path):
+    save_raw_tracklets(tmp_path, {"mouse": _store()})
+    assert switch_edits_allowed(tmp_path) is True
+
+
+def test_uncorrected_public_pack_offers_migrate_without_moving_files(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    write_tracklets_identity_status(str(tmp_path), corrected=False)
+    public = tmp_path / "mouse_tracklets.npz"
+    assert public.is_file()
+    assert needs_uncorrected_raw_migrate(tmp_path) is True
+    assert public.is_file()
+    assert not (tmp_path / "raw" / "mouse_tracklets.npz").is_file()
+    assert switch_edits_allowed(tmp_path) is False
+
+
+def test_declining_migrate_leaves_files_and_status_unchanged(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    write_tracklets_identity_status(str(tmp_path), corrected=False, accepted=False)
+    public = tmp_path / "mouse_tracklets.npz"
+    meta = tmp_path / "mouse_tracklets_meta.json"
+    public_bytes = public.read_bytes()
+    meta_text = meta.read_text(encoding="utf-8")
+    status_before = read_tracklets_identity_status(str(tmp_path))
+    assert needs_uncorrected_raw_migrate(tmp_path) is True
+    # Decline: do not call migrate. Pack must be unchanged.
+    assert public.read_bytes() == public_bytes
+    assert meta.read_text(encoding="utf-8") == meta_text
+    assert read_tracklets_identity_status(str(tmp_path)) == status_before
+    assert switch_edits_allowed(tmp_path) is False
+    assert not (tmp_path / "raw" / "mouse_tracklets.npz").is_file()
+
+
+def test_accepting_migrate_moves_public_tracklets_into_raw(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    write_tracklets_identity_status(str(tmp_path), corrected=False)
+    assert migrate_uncorrected_public_to_raw(tmp_path) is True
+    assert needs_uncorrected_raw_migrate(tmp_path) is False
+    assert switch_edits_allowed(tmp_path) is True
+    assert not (tmp_path / "mouse_tracklets.npz").is_file()
+    assert (tmp_path / "raw" / "mouse_tracklets.npz").is_file()
+    assert has_accepted_identities(tmp_path) is False
+
+
+def test_accepted_pack_is_not_offered_migrate(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    write_tracklets_identity_status(
+        str(tmp_path), corrected=True, accepted=True, n_decisions=1
+    )
+    public = tmp_path / "mouse_tracklets.npz"
+    assert needs_uncorrected_raw_migrate(tmp_path) is False
+    assert migrate_uncorrected_public_to_raw(tmp_path) is False
+    assert public.is_file()
+    assert not (tmp_path / "raw" / "mouse_tracklets.npz").is_file()
+    assert switch_edits_allowed(tmp_path) is False
+
+
+def test_legacy_corrected_pack_is_not_offered_migrate(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    write_tracklets_identity_status(str(tmp_path), corrected=True, n_decisions=2)
+    public = tmp_path / "mouse_tracklets.npz"
+    assert needs_uncorrected_raw_migrate(tmp_path) is False
+    assert migrate_uncorrected_public_to_raw(tmp_path) is False
+    assert public.is_file()
+    assert not (tmp_path / "raw" / "mouse_tracklets.npz").is_file()
+    assert switch_edits_allowed(tmp_path) is False
+
+
+def test_names_and_roles_save_without_raw(tmp_path: Path):
+    save_tracklets(_store(), str(tmp_path))
+    write_tracklets_identity_status(str(tmp_path), corrected=True)
+    assert switch_edits_allowed(tmp_path) is False
+    recs = [
+        SubjectRecord(0, "mouse", "resident", "R", "#ff0000", track_id=0),
+        SubjectRecord(1, "mouse", "intruder", "I", "#00ff00", track_id=1),
+    ]
+    save_subjects(tmp_path, recs)
+    loaded = load_subjects(tmp_path)
+    assert loaded[0].display_name == "resident"
+    assert loaded[1].role == "I"

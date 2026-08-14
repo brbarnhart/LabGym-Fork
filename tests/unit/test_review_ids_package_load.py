@@ -51,10 +51,11 @@ def test_load_review_package_happy(tmp_path: Path):
     from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
         load_review_package,
     )
+    from LabGym.id_review.raw_store import save_raw_tracklets
 
     review = tmp_path / "id_review"
     review.mkdir()
-    save_tracklets(_minimal_store(), str(review))
+    save_raw_tracklets(review, {"mouse": _minimal_store()})
     # empty events/switches optional files — load_events/load_switches tolerate missing
     (review / "events.json").write_text("[]", encoding="utf-8")
     (review / "switches.json").write_text("[]", encoding="utf-8")
@@ -70,8 +71,56 @@ def test_load_review_package_happy(tmp_path: Path):
     assert pkg.has_raw is True
     assert pkg.accepted is False
     assert len(pkg.subjects) >= 1
-    assert not (review / "mouse_tracklets.npz").is_file()
     assert (review / "raw" / "mouse_tracklets.npz").is_file()
+
+
+def test_load_review_package_does_not_migrate_uncorrected_public(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_package,
+    )
+    from LabGym.identity.package import needs_uncorrected_raw_migrate
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    save_tracklets(_minimal_store(), str(review))
+
+    pkg = load_review_package(str(review))
+    assert needs_uncorrected_raw_migrate(review) is True
+    assert pkg.has_raw is False
+    assert pkg.accepted is False
+    assert (review / "mouse_tracklets.npz").is_file()
+    assert not (review / "raw" / "mouse_tracklets.npz").is_file()
+
+
+def test_save_review_package_writes_names_without_raw(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_package,
+        save_review_package,
+    )
+    from LabGym.identity.package import load_subjects
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    save_tracklets(_minimal_store(), str(review))
+    pkg = load_review_package(str(review))
+    pkg.subjects[0].display_name = "resident"
+    pkg.subjects[0].role = "R"
+    result = save_review_package(
+        str(review),
+        pkg.markers,
+        pkg.events,
+        pkg.subjects,
+        already_corrected=pkg.already_corrected,
+        baseline_stores=pkg.baseline_stores,
+        has_raw=False,
+    )
+    assert result.ok, result.error
+    assert result.accepted is False
+    assert (review / "mouse_tracklets.npz").is_file()
+    assert not (review / "raw" / "mouse_tracklets.npz").is_file()
+    loaded = load_subjects(review)
+    assert loaded[0].display_name == "resident"
+    assert loaded[0].role == "R"
 
 
 def test_load_review_package_missing_dir():

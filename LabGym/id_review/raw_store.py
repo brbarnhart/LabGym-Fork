@@ -64,9 +64,12 @@ def snapshot_uncorrected_root_to_raw(directory: PathLike) -> bool:
     """Move unpublished root tracklets into ``raw/``.
 
     Used for legacy detect-only packs whose canonical npz is still raw.
-    Returns True if any files were moved.
+    Returns True if any files were moved. Accepted / legacy corrected
+    packs are refused so remapped geometry is never copied in as raw.
     """
     directory = Path(directory)
+    if has_accepted_identities(directory):
+        return False
     kinds = discover_tracklet_kinds(directory)
     if not kinds:
         return False

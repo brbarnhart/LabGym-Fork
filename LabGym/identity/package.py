@@ -171,6 +171,48 @@ def clone_store(store):
     )
 
 
+def switch_edits_allowed(directory: str | Path) -> bool:
+    """True when the switch-marker list may be mutated.
+
+    Add, delete, remove-at-frame, undo, and reorder all require raw tracklets
+    so remapped geometry can be rebuilt. Names and roles do not use this gate.
+    """
+    from LabGym.id_review.raw_store import has_raw_snapshot
+
+    return has_raw_snapshot(directory)
+
+
+def needs_uncorrected_raw_migrate(directory: str | Path) -> bool:
+    """True when opening should ask before moving public tracklets into raw.
+
+    Offered only for an uncorrected pack that has public tracklets and no raw.
+    Accepted identities (including legacy corrected packs) are never offered.
+    """
+    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_accepted_identities, has_raw_snapshot
+
+    directory = Path(directory)
+    if has_raw_snapshot(directory):
+        return False
+    if has_accepted_identities(directory):
+        return False
+    return bool(discover_tracklet_kinds(directory))
+
+
+def migrate_uncorrected_public_to_raw(directory: str | Path) -> bool:
+    """Move unpublished public tracklets into raw after the caller confirmed.
+
+    Returns True if files were moved. No-op (False) when migrate is not
+    offered — including accepted / legacy corrected packs, so remapped
+    geometry is never copied in as raw.
+    """
+    from LabGym.id_review.raw_store import snapshot_uncorrected_root_to_raw
+
+    if not needs_uncorrected_raw_migrate(directory):
+        return False
+    return bool(snapshot_uncorrected_root_to_raw(directory))
+
+
 def apply_decisions_and_save_tracklets(
     directory: str | Path,
     decisions: Sequence,

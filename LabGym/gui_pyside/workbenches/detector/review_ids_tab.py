@@ -64,6 +64,11 @@ from LabGym.gui_pyside.workbenches.detector.risk_timeline import RiskTimeline
 from LabGym.gui_pyside.workbenches.detector.subjects_table import SubjectsTable
 from LabGym.id_review.dataset import make_swap_marker
 from LabGym.id_review.types import ContactEvent, SwitchMarker
+from LabGym.identity.package import (
+    migrate_uncorrected_public_to_raw,
+    needs_uncorrected_raw_migrate,
+    switch_edits_allowed,
+)
 
 
 class _HardCaseExtractWorker(QObject):
@@ -544,6 +549,20 @@ class ReviewIdsTab(QWidget):
 
     def load_package(self, review_dir: str) -> bool:
         self._release_cap()
+        if needs_uncorrected_raw_migrate(review_dir):
+            reply = QMessageBox.question(
+                self,
+                "Move tracklets into raw?",
+                "This package has public tracklets but no raw snapshot. "
+                "That can mean the data is in a bad state.\n\n"
+                "Move the public tracklets into raw so switch edits can be "
+                "rebuilt later? Declining leaves the files unchanged and "
+                "keeps switch edits locked.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                migrate_uncorrected_public_to_raw(review_dir)
         try:
             pkg = load_review_package(review_dir)
         except (FileNotFoundError, ValueError) as exc:
@@ -581,17 +600,25 @@ class ReviewIdsTab(QWidget):
         self.subjects_table.set_subjects(pkg.subjects)
         self.slider.setMaximum(max(0, self.n_frames - 1))
         self.setEnabled_controls(True)
-        if pkg.accepted:
-            state = "accepted identities"
-        elif self._has_raw:
-            state = "raw only — save to accept"
-        else:
-            state = "legacy remapped (switches locked)"
-        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  {state}")
+        self._set_switch_edits_enabled(switch_edits_allowed(self.review_dir))
+        self._set_package_label(accepted=pkg.accepted, has_raw=self._has_raw)
         self._seek(0)
         self._refresh_marker_list()
         self._update_undo_button()
         return True
+
+    def _set_switch_edits_enabled(self, on: bool) -> None:
+        for w in (self.btn_mark, self.btn_remove, self.btn_del, self.btn_undo):
+            w.setEnabled(on)
+
+    def _set_package_label(self, *, accepted: bool, has_raw: bool) -> None:
+        if accepted:
+            state = "accepted identities"
+        elif has_raw:
+            state = "raw only — save to accept"
+        else:
+            state = "no raw — switch edits locked"
+        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  {state}")
 
     def _refresh_id_combos(self) -> None:
         store = self._stores.get(self.animal_kind)
@@ -708,7 +735,7 @@ class ReviewIdsTab(QWidget):
             markers=self.markers,
             animal_kind=self.animal_kind,
             analysis_frame=self.frame,
-            already_corrected=not self._has_raw,
+            already_corrected=self._already_corrected,
             highlight_ids=self._selected_swap_ids(),
         )
         n_risk = sum(
@@ -993,7 +1020,8 @@ class ReviewIdsTab(QWidget):
         self._update_undo_button()
 
     def _update_undo_button(self) -> None:
-        self.btn_undo.setEnabled(bool(self._undo_stack))
+        allowed = bool(self.review_dir) and switch_edits_allowed(self.review_dir)
+        self.btn_undo.setEnabled(allowed and bool(self._undo_stack))
 
     def _mark_dirty(self) -> None:
         self._dirty = True
@@ -1009,19 +1037,27 @@ class ReviewIdsTab(QWidget):
     def _refresh_marker_list(self) -> None:
         self.markers_panel.set_markers(self.markers)
 
+    def _switch_edits_blocked_message(self) -> bool:
+        """Return True when switch-list mutations are locked (no raw)."""
+        if not self.review_dir:
+            return True
+        if switch_edits_allowed(self.review_dir):
+            return False
+        QMessageBox.information(
+            self,
+            "No raw tracklets",
+            "This package has no raw snapshot, so switch markers cannot "
+            "be changed (add, delete, or undo).\n"
+            "You can still edit names/roles and save subjects.json.\n\n"
+            "To mark new ID swaps, re-run Detect + track (a new tracking "
+            "world) and review again.",
+        )
+        return True
+
     def _mark_swap(self) -> None:
         if not self.review_dir:
             return
-        if not self._has_raw:
-            QMessageBox.information(
-                self,
-                "No raw tracklets",
-                "This package has no raw snapshot, so switch markers cannot "
-                "be changed (legacy remapped file).\n"
-                "You can still edit names/roles and save subjects.json.\n\n"
-                "To mark new ID swaps, re-run Detect + track (a new tracking "
-                "world) and review again.",
-            )
+        if self._switch_edits_blocked_message():
             return
         ids = self._selected_swap_ids()
         if len(ids) != 2 or ids[0] == ids[1]:
@@ -1057,6 +1093,8 @@ class ReviewIdsTab(QWidget):
         self._apply_marker_change()
 
     def _delete_selected_marker(self) -> None:
+        if self._switch_edits_blocked_message():
+            return
         mid = self.markers_panel.selected_marker_id()
         if not mid:
             if self._remove_at_current_frame(silent_if_none=True):
@@ -1074,6 +1112,8 @@ class ReviewIdsTab(QWidget):
         self._apply_marker_change()
 
     def _remove_at_current_frame(self, silent_if_none: bool = False) -> bool:
+        if self._switch_edits_blocked_message():
+            return False
         to_remove = [
             m
             for m in self.markers
@@ -1116,6 +1156,8 @@ class ReviewIdsTab(QWidget):
         return self._warn_nontail_edit()
 
     def _undo(self) -> None:
+        if self._switch_edits_blocked_message():
+            return
         if not self._undo_stack:
             QMessageBox.information(self, "Undo", "Nothing to undo.")
             return
@@ -1194,25 +1236,29 @@ class ReviewIdsTab(QWidget):
             self._stores = result.stores
             self._baseline_stores = result.baseline_stores
         self._dirty = False
-        self.lbl_pkg.setText(
-            f"Package: {self.review_dir}  ·  accepted identities"
-        )
+        self._set_package_label(accepted=result.accepted, has_raw=self._has_raw)
         from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
 
         clear_tracklets_discovery_cache()
         self.package_saved.emit(self.review_dir)
         extra_lines = downstream.note_lines()
         extra = ("\n\n" + "\n".join(extra_lines)) if extra_lines else ""
-        QMessageBox.information(
-            self,
-            "Saved",
-            f"Saved accepted identities:\n{self.review_dir}\n\n"
-            f"Switches: {len(self.markers)}\n"
-            f"{result.remap_note}"
-            f"Subjects: {result.n_subjects}\n\n"
-            "Annotate ethogram, generate examples, and Process videos can "
-            f"use this package.{extra}",
-        )
+        if result.accepted:
+            body = (
+                f"Saved accepted identities:\n{self.review_dir}\n\n"
+                f"Switches: {len(self.markers)}\n"
+                f"{result.remap_note}"
+                f"Subjects: {result.n_subjects}\n\n"
+                "Annotate ethogram, generate examples, and Process videos can "
+                f"use this package.{extra}"
+            )
+        else:
+            body = (
+                f"Saved names/roles (no remapped publish):\n{self.review_dir}\n\n"
+                f"{result.remap_note}"
+                f"Subjects: {result.n_subjects}.{extra}"
+            )
+        QMessageBox.information(self, "Saved", body)
         self._render()
 
     def _confirm_stale_downstream(self, check: DownstreamArtifactCheck) -> bool:

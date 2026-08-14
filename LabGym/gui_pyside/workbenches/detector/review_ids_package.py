@@ -24,7 +24,6 @@ from LabGym.id_review.raw_store import (
     has_accepted_identities,
     has_raw_snapshot,
     load_raw_tracklets,
-    snapshot_uncorrected_root_to_raw,
 )
 from LabGym.id_review.tracklets import load_tracklets
 from LabGym.id_review.types import ContactEvent, SwitchMarker
@@ -156,6 +155,9 @@ def check_downstream_artifacts(
 def load_review_package(review_dir: str) -> LoadedReviewPackage:
     """Load events, switches, tracklets, and subjects from *review_dir*.
 
+    Does not migrate public tracklets into raw. Callers that want that
+    must confirm and call ``migrate_uncorrected_public_to_raw`` first.
+
     Raises ``FileNotFoundError`` / ``ValueError`` with user-facing messages.
     """
     review_dir = str(Path(review_dir).resolve())
@@ -165,9 +167,6 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
     events = load_events(review_dir)
     markers = load_switches(review_dir)
     accepted = has_accepted_identities(review_dir)
-    if not has_raw_snapshot(review_dir) and discover_tracklet_kinds(review_dir) and not accepted:
-        snapshot_uncorrected_root_to_raw(review_dir)
-
     has_raw = has_raw_snapshot(review_dir)
     stores: Dict[str, Any] = {}
     baseline: Dict[str, Any] = {}

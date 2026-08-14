@@ -6,8 +6,11 @@ from .package import (
     apply_decisions_and_save_tracklets,
     load_subjects,
     merge_subjects_into_loaded,
+    migrate_uncorrected_public_to_raw,
+    needs_uncorrected_raw_migrate,
     save_subjects,
     subjects_from_track_ids,
+    switch_edits_allowed,
 )
 
 __all__ = [
@@ -16,6 +19,9 @@ __all__ = [
     "apply_decisions_and_save_tracklets",
     "load_subjects",
     "merge_subjects_into_loaded",
+    "migrate_uncorrected_public_to_raw",
+    "needs_uncorrected_raw_migrate",
     "save_subjects",
     "subjects_from_track_ids",
+    "switch_edits_allowed",
 ]
