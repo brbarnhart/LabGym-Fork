@@ -585,12 +585,30 @@ def generate_examples_from_ethogram(
         data = json.loads(Path(config.annotations_path).read_text(encoding="utf-8"))
         session = AnnotationSession.from_dict(data)
 
+    from LabGym.id_review.raw_store import has_accepted_identities
+    from LabGym.identity.downstream import may_use_downstream
+
+    mode = int(session.behavior_mode)
     if loaded_tracklets is None:
-        loaded_tracklets = load_tracklets_for_annotator(
-            config.tracklets_dir,
-            analysis_start_frame=config.analysis_start_frame,
-            video_total_frames=session.total_frames,
+        accepted = bool(config.tracklets_dir) and has_accepted_identities(
+            config.tracklets_dir
         )
+        if not may_use_downstream(mode, accepted):
+            raise ValueError(
+                "Accepted identities are required. Open Detector → Review IDs, "
+                "review or accept the detector IDs, and save before annotating "
+                "or generating examples."
+            )
+        if accepted:
+            loaded_tracklets = load_tracklets_for_annotator(
+                config.tracklets_dir,
+                analysis_start_frame=config.analysis_start_frame,
+                video_total_frames=session.total_frames,
+            )
+        else:
+            loaded_tracklets = LoadedTracklets(
+                directory=str(config.tracklets_dir or "")
+            )
     analysis_start = int(
         config.analysis_start_frame
         if config.analysis_start_frame is not None

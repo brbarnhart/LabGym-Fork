@@ -48,6 +48,7 @@ from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
     set_line_edit_directory,
 )
+from LabGym.identity.downstream import may_use_downstream
 
 
 class ProcessVideosTab(QWidget):
@@ -337,8 +338,10 @@ class ProcessVideosTab(QWidget):
                 tracks = discover_tracklets_dir(self.project.project, path)
                 from LabGym.id_review.raw_store import has_accepted_identities
 
-                if tracks and has_accepted_identities(tracks):
-                    status, note = ("pending", tracks)
+                accepted = bool(tracks) and has_accepted_identities(tracks)
+                mode = int(self.project.project.defaults.behavior_mode)
+                if may_use_downstream(mode, accepted):
+                    status, note = ("pending", tracks or "")
                 elif tracks:
                     status, note = (
                         "blocked",
@@ -398,10 +401,12 @@ class ProcessVideosTab(QWidget):
         from LabGym.id_review.raw_store import has_accepted_identities
 
         project = self.project.project
+        mode = int(project.defaults.behavior_mode)
         missing = []
         for path in videos:
             pkg = discover_tracklets_dir(project, path) or ""
-            if not pkg or not has_accepted_identities(pkg):
+            accepted = bool(pkg) and has_accepted_identities(pkg)
+            if not may_use_downstream(mode, accepted):
                 missing.append(Path(path).name)
         if missing:
             QMessageBox.warning(
@@ -446,6 +451,7 @@ class ProcessVideosTab(QWidget):
                 duration=float(self.spin_duration.value()),
                 uncertain=float(self.spin_uncertain.value()),
                 show_legend=self.chk_legend.isChecked(),
+                behavior_mode=mode,
             )
             return process_video(cfg, progress=prog)
 

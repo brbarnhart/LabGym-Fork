@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from LabGym.annotator.ui.main_window import MainWindow
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.identity.downstream import apply_context_to_annotator, may_use_downstream
 
 
 class AnnotateEthogramTab(QWidget):
@@ -193,37 +194,18 @@ class AnnotateEthogramTab(QWidget):
         ctx = self.project.resolve_context(video)
         self.project.set_current_video(video, dirty=True)
 
-        ann = ctx.annotations_path if ctx.annotations_path else None
-        # Only pass annotations_path if file exists; otherwise prefer sidecar search
-        ann_arg = ann if (ann and Path(ann).is_file()) else None
-        prefer_sidecar = ann_arg is None
-
-        ok = window.load_video_from_path(
-            video,
-            annotations_path=ann_arg,
-            tracklets_dir=ctx.tracklets_dir or None,
-            behavior_mode=int(ctx.behavior_mode),
-            exclusive_mode=bool(ctx.exclusive_mode),
-            prefer_sidecar=prefer_sidecar,
-        )
-        if ok and ctx.tracklets_dir and window._loaded_tracklets is None:
-            if not ctx.accepted_identities:
-                QMessageBox.warning(
-                    window,
-                    "Review IDs required",
-                    "Save Review IDs (Detector workbench) before annotating.\n"
-                    "That step publishes accepted identities (you may accept "
-                    "detector IDs with no swaps).\n\n"
-                    f"Package:\n{ctx.tracklets_dir}",
-                )
-            else:
-                window.load_tracklets_from_path(ctx.tracklets_dir)
-        if ok:
-            note = ""
-            if not ctx.accepted_identities:
-                note = "  ·  No accepted identities (save Review IDs first)."
-            window.statusBar().showMessage(
-                f"Loaded project video{note}  ·  mode={ctx.behavior_mode}"
+        if not may_use_downstream(int(ctx.behavior_mode), bool(ctx.accepted_identities)):
+            QMessageBox.warning(
+                self,
+                "Review IDs required",
+                "Save Review IDs (Detector workbench) before annotating.\n"
+                "That step publishes accepted identities (you may accept "
+                "detector IDs with no swaps).\n\n"
+                f"Package:\n{ctx.tracklets_dir or '(none found)'}",
             )
+            return False
+
+        ok = apply_context_to_annotator(window, ctx)
+        if ok:
             self._update_status_banner()
         return ok

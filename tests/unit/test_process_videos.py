@@ -79,6 +79,45 @@ def test_process_video_requires_accepted_identities(tmp_path: Path):
     assert "Review IDs" in r.error
 
 
+def test_process_video_interactive_basic_skips_identity_gate(tmp_path: Path):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    cat = tmp_path / "cat"
+    cat.mkdir()
+    cfg = ProcessVideoConfig(
+        video_path=str(video),
+        categorizer_path=str(cat),
+        results_root=str(tmp_path / "out"),
+        id_review_dir="",
+        behavior_mode=1,
+    )
+    r = process_video(cfg)
+    assert r.ok is False
+    assert "Review IDs" not in r.error
+
+
+def test_process_video_mode_from_categorizer_skips_identity_gate(tmp_path: Path):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    cat = tmp_path / "cat"
+    cat.mkdir()
+    pd.DataFrame(
+        {
+            "classnames": ["beh"],
+            "behavior_kind": [1],
+        }
+    ).to_csv(cat / "model_parameters.txt", index=False)
+    cfg = ProcessVideoConfig(
+        video_path=str(video),
+        categorizer_path=str(cat),
+        results_root=str(tmp_path / "out"),
+        id_review_dir="",
+    )
+    r = process_video(cfg)
+    assert r.ok is False
+    assert "Review IDs" not in r.error
+
+
 def test_process_video_mocked(tmp_path: Path):
     video = tmp_path / "clip.avi"
     video.write_bytes(b"x")

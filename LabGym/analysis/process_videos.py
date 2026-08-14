@@ -165,8 +165,22 @@ def process_video(
             video_path=str(video), results_path="", ok=False, error=f"Video not found: {video}", log=log
         )
     from LabGym.id_review.raw_store import has_accepted_identities
+    from LabGym.identity.downstream import may_use_downstream
 
-    if not config.id_review_dir or not has_accepted_identities(config.id_review_dir):
+    mode = config.behavior_mode
+    if mode is None and Path(config.categorizer_path).is_dir():
+        try:
+            peeked = load_categorizer_metadata(config.categorizer_path)
+            if peeked.get("behavior_kind") is not None:
+                mode = int(peeked.get("behavior_kind") or 0)
+        except (OSError, ValueError, FileNotFoundError):
+            mode = None
+    if mode is None:
+        mode = 0
+    accepted = bool(config.id_review_dir) and has_accepted_identities(
+        config.id_review_dir
+    )
+    if not may_use_downstream(int(mode), accepted):
         return ProcessVideoResult(
             video_path=str(video),
             results_path="",
