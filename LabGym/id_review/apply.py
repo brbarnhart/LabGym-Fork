@@ -227,6 +227,19 @@ def write_tracklets_identity_status(
 
 
 def read_tracklets_identity_status(directory: str) -> Dict[str, Any]:
+	'''Read published remapped / accepted-identities status for a package.
+
+	Missing or unreadable files fail closed: ``accepted`` and ``has_raw``
+	are False.
+
+	Args:
+		directory: Identity package directory that may contain
+			``tracklets_identity_status.json``.
+
+	Returns:
+		Dict with ``accepted``, ``corrected`` (alias of accepted),
+		``n_decisions``, ``source``, and ``has_raw``.
+	'''
 	path = os.path.join(directory, 'tracklets_identity_status.json')
 	empty = {
 		'corrected': False,

@@ -118,6 +118,13 @@ def fill_geometry_from_stores(analyzer: Any, stores: Dict[str, Any]) -> None:
 
 
 def _allocate_id_slot(analyzer: Any, kind: str, tid: int) -> None:
+    """Create empty per-frame series for a remapped track ID missing from prepare.
+
+    Args:
+        analyzer: Prepared analyzer whose kind slot already exists.
+        kind: Animal kind already present on the analyzer.
+        tid: Track ID to allocate.
+    """
     n = int(analyzer.total_analysis_framecount)
     analyzer.animal_centers[kind][tid] = [None] * n
     analyzer.animal_contours[kind][tid] = [None] * n
@@ -225,6 +232,16 @@ def rebuild_categorizer_inputs(
 def _empty_inner_rolls(
     analyzer: Any, length: int
 ) -> Dict[Tuple[str, int], Deque[Any]]:
+    """Allocate rolling inner windows when the categorizer uses body parts.
+
+    Args:
+        analyzer: Prepared analyzer with kinds and track IDs already filled.
+        length: Animation / pattern window length (deque maxlen).
+
+    Returns:
+        Map of ``(kind, track_id)`` to an empty deque, or empty if body parts
+        are off.
+    """
     rolls: Dict[Tuple[str, int], Deque[Any]] = {}
     if not getattr(analyzer, "include_bodyparts", False):
         return rolls
@@ -251,6 +268,16 @@ def _normalized_blob(
     dim: int,
     channel: int,
 ) -> np.ndarray:
+    """Resize a cropped blob to the categorizer animation tensor shape.
+
+    Args:
+        blob: Extracted animal crop (gray or BGR).
+        dim: Target spatial size (``dim_tconv``).
+        channel: 1 for gray, 3 for BGR.
+
+    Returns:
+        ``uint8`` array of shape ``(dim, dim, channel)``.
+    """
     blob = np.asarray(blob, dtype="uint8")
     if blob.ndim == 2:
         blob = blob[:, :, None]
@@ -274,6 +301,17 @@ def _fill_frame_features(
     frame_roll: Deque[np.ndarray],
     inner_rolls: Dict[Tuple[str, int], Deque[Any]],
 ) -> None:
+    """Write one analysis frame of pattern images and rolling animation clips.
+
+    Args:
+        analyzer: Prepared analyzer with remapped outlines already filled.
+        frame: Video frame corresponding to ``frame_idx``.
+        frame_idx: Analysis-frame index being written.
+        background_free: Whether blob extraction strips background pixels.
+        black_background: Whether stripped background is black (else white).
+        frame_roll: Last ``length`` video frames for blob extraction.
+        inner_rolls: Per-ID rolling inners when body parts are enabled.
+    """
     length = int(getattr(analyzer, "length", 15) or 15)
     mode = int(getattr(analyzer, "behavior_mode", 0) or 0)
     dt = int(getattr(analyzer, "dim_tconv", 32) or 32)

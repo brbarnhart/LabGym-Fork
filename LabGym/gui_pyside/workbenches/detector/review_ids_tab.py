@@ -548,6 +548,18 @@ class ReviewIdsTab(QWidget):
         self.load_package(tracks)
 
     def load_package(self, review_dir: str) -> bool:
+        """Open an identity package for preview and switch-marker edits.
+
+        Offers migrate-to-raw when an uncorrected public pack has no raw
+        snapshot. Declining leaves files unchanged and keeps switch edits
+        locked.
+
+        Args:
+            review_dir: Path to the ``id_review`` package directory.
+
+        Returns:
+            True if the package loaded; False if load failed after a warning.
+        """
         self._release_cap()
         if needs_uncorrected_raw_migrate(review_dir):
             reply = QMessageBox.question(

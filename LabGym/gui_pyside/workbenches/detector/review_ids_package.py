@@ -58,6 +58,13 @@ class LoadedReviewPackage:
 
 @dataclass
 class SavePackageResult:
+    """Outcome of writing remapped tracklets and subjects from Review IDs.
+
+    ``ok`` is False when save refused (no raw, I/O error). ``n_remap`` counts
+    switch decisions that changed geometry; empty-switch accept still sets
+    ``accepted`` when the write succeeded.
+    """
+
     ok: bool
     error: str = ""
     n_remap: int = 0

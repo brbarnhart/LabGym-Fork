@@ -34,14 +34,25 @@ def review_dir(results_path: str) -> str:
 
 
 def export_review_pack(
-	analyzer,
+	analyzer: Any,
 	config: Optional[ContactDetectorConfig] = None,
 	extract_samples: bool = True,
 ) -> Tuple[str, List[ContactEvent]]:
-	'''
-	After craft_data: save tracklets, detect contacts, write events.jsonl + samples.
+	'''Write raw tracklets and contact events after Detect + track.
 
-	Returns (id_review_directory, events).
+	If the package already has accepted identities or a raw snapshot,
+	resets it (unpublish remapped, clear switches) before writing the new
+	raw snapshot. Public remapped files are not written here.
+
+	Args:
+		analyzer: Detector analyzer after ``craft_data`` (needs
+			``results_path`` and per-kind track geometry).
+		config: Contact-event detector settings. Defaults are used when omitted.
+		extract_samples: When True, write per-event sample clips if a video path
+			is available.
+
+	Returns:
+		Tuple of ``(id_review_directory, events)``.
 	'''
 	config = config or ContactDetectorConfig()
 	out_dir = review_dir(analyzer.results_path)

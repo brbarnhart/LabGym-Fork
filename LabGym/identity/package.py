@@ -6,7 +6,11 @@ import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    from LabGym.annotator.core.tracklets_bridge import LoadedTracklets
+    from LabGym.id_review.types import TrackletStore
 
 from LabGym.annotator.core.tracklets_bridge import subject_color_for_index
 
@@ -130,10 +134,17 @@ def save_subjects(directory: str | Path, subjects: Sequence[SubjectRecord]) -> P
     return path
 
 
-def merge_subjects_into_loaded(loaded, subjects: Sequence[SubjectRecord]) -> None:
+def merge_subjects_into_loaded(
+    loaded: "LoadedTracklets",
+    subjects: Sequence[SubjectRecord],
+) -> None:
     """Update LoadedTracklets.subjects display_name / role / color from subjects.json.
 
     Matches by (animal_kind, track_id) when multi-kind; else by subject_id == track_id.
+
+    Args:
+        loaded: Annotator tracklet bundle whose subjects will be rewritten.
+        subjects: Records from ``subjects.json`` (or equivalent in-memory list).
     """
     if not subjects:
         return
@@ -168,8 +179,15 @@ def merge_subjects_into_loaded(loaded, subjects: Sequence[SubjectRecord]) -> Non
     loaded.subjects = new_subjects
 
 
-def clone_store(store):
-    """Deep-ish copy of a TrackletStore for remap baselines."""
+def clone_store(store: "TrackletStore") -> "TrackletStore":
+    """Copy a TrackletStore so remap can mutate the copy, not raw.
+
+    Args:
+        store: Source store (typically a raw snapshot).
+
+    Returns:
+        Independent ``TrackletStore`` with copied arrays and contours.
+    """
     from LabGym.id_review.types import TrackletStore
 
     return TrackletStore(
