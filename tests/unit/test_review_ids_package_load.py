@@ -112,7 +112,6 @@ def test_save_review_package_writes_names_without_raw(tmp_path: Path):
         pkg.subjects,
         already_corrected=pkg.already_corrected,
         baseline_stores=pkg.baseline_stores,
-        has_raw=False,
     )
     assert result.ok, result.error
     assert result.accepted is False
@@ -165,7 +164,6 @@ def test_save_review_package_publishes_from_raw(tmp_path: Path):
         pkg.subjects,
         already_corrected=False,
         baseline_stores=pkg.baseline_stores,
-        has_raw=True,
     )
     assert result.ok, result.error
     assert result.accepted is True
@@ -180,7 +178,6 @@ def test_save_review_package_publishes_from_raw(tmp_path: Path):
         pkg.subjects,
         already_corrected=False,
         baseline_stores=pkg.baseline_stores,
-        has_raw=True,
     )
     assert result2.ok, result2.error
     published2 = load_tracklets(str(review), "mouse")

@@ -67,6 +67,17 @@ def test_legacy_corrected_pack_is_accepted(tmp_path: Path):
     assert has_accepted_identities(tmp_path) is True
 
 
+def test_accepted_false_is_not_rescued_by_legacy_corrected(tmp_path: Path):
+    import json
+
+    save_tracklets(_store(), str(tmp_path))
+    (tmp_path / "tracklets_identity_status.json").write_text(
+        json.dumps({"corrected": True, "accepted": False, "n_decisions": 0}),
+        encoding="utf-8",
+    )
+    assert has_accepted_identities(tmp_path) is False
+
+
 def test_raw_snapshot_is_not_a_discovered_kind(tmp_path: Path):
     store = _store()
     save_raw_tracklets(tmp_path, {"mouse": store})

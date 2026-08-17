@@ -1225,7 +1225,6 @@ class ReviewIdsTab(QWidget):
             self.subjects_table.get_subjects(),
             already_corrected=self._already_corrected,
             baseline_stores=self._baseline_stores,
-            has_raw=self._has_raw,
         )
         if not result.ok:
             QMessageBox.critical(self, "Save failed", result.error)

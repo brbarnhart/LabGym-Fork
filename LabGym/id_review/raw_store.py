@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Union
+from typing import Any, Dict, Iterable, Iterator, Union
 
 from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
 
@@ -11,8 +11,19 @@ from .apply import read_tracklets_identity_status, write_tracklets_identity_stat
 from .tracklets import load_tracklets, save_tracklets
 
 RAW_SUBDIR = "raw"
+_TRACKLET_SUFFIXES = ("_tracklets.npz", "_tracklets_meta.json")
 
 PathLike = Union[str, Path]
+
+
+def _tracklet_kind_files(
+    directory: PathLike, kinds: Iterable[str]
+) -> Iterator[Path]:
+    """Yield public tracklet npz/meta paths for each kind under *directory*."""
+    root = Path(directory)
+    for kind in kinds:
+        for suffix in _TRACKLET_SUFFIXES:
+            yield root / f"{kind}{suffix}"
 
 
 def raw_dir(directory: PathLike) -> Path:
@@ -29,13 +40,25 @@ def save_raw_tracklets(directory: PathLike, stores: Dict[str, Any]) -> Path:
     return dest
 
 
+def load_kind_stores(directory: PathLike) -> Dict[str, Any]:
+    """Load every discovered ``*_tracklets.npz`` kind from *directory*.
+
+    Args:
+        directory: Folder that may contain remapped or raw tracklet files.
+
+    Returns:
+        Mapping of animal kind to ``TrackletStore``. Empty if none found.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return {}
+    kinds = discover_tracklet_kinds(directory)
+    return {kind: load_tracklets(str(directory), kind) for kind in kinds}
+
+
 def load_raw_tracklets(directory: PathLike) -> Dict[str, Any]:
     """Load raw tracklets from ``raw/``. Empty dict if none."""
-    dest = raw_dir(directory)
-    if not dest.is_dir():
-        return {}
-    kinds = discover_tracklet_kinds(dest)
-    return {kind: load_tracklets(str(dest), kind) for kind in kinds}
+    return load_kind_stores(raw_dir(directory))
 
 
 def has_raw_snapshot(directory: PathLike) -> bool:
@@ -55,9 +78,7 @@ def has_accepted_identities(directory: PathLike) -> bool:
     if not discover_tracklet_kinds(directory):
         return False
     status = read_tracklets_identity_status(str(directory))
-    if "accepted" in status and status["accepted"] is not None:
-        return bool(status["accepted"])
-    return bool(status.get("corrected"))
+    return bool(status.get("accepted"))
 
 
 def snapshot_uncorrected_root_to_raw(directory: PathLike) -> bool:
@@ -76,16 +97,14 @@ def snapshot_uncorrected_root_to_raw(directory: PathLike) -> bool:
     dest = raw_dir(directory)
     dest.mkdir(parents=True, exist_ok=True)
     moved = False
-    for kind in kinds:
-        for suffix in ("_tracklets.npz", "_tracklets_meta.json"):
-            src = directory / f"{kind}{suffix}"
-            if not src.is_file():
-                continue
-            target = dest / src.name
-            if target.exists():
-                target.unlink()
-            src.replace(target)
-            moved = True
+    for src in _tracklet_kind_files(directory, kinds):
+        if not src.is_file():
+            continue
+        target = dest / src.name
+        if target.exists():
+            target.unlink()
+        src.replace(target)
+        moved = True
     if moved:
         prev = read_tracklets_identity_status(str(directory))
         write_tracklets_identity_status(
@@ -102,11 +121,9 @@ def snapshot_uncorrected_root_to_raw(directory: PathLike) -> bool:
 def unpublish_remapped_tracklets(directory: PathLike) -> None:
     """Remove published remapped tracklets; leave raw snapshot in place."""
     directory = Path(directory)
-    for kind in discover_tracklet_kinds(directory):
-        for suffix in ("_tracklets.npz", "_tracklets_meta.json"):
-            path = directory / f"{kind}{suffix}"
-            if path.is_file():
-                path.unlink()
+    for path in _tracklet_kind_files(directory, discover_tracklet_kinds(directory)):
+        if path.is_file():
+            path.unlink()
     prev = read_tracklets_identity_status(str(directory))
     write_tracklets_identity_status(
         str(directory),
@@ -132,11 +149,9 @@ def clear_raw_snapshot(directory: PathLike) -> None:
     dest = raw_dir(directory)
     if not dest.is_dir():
         return
-    for kind in discover_tracklet_kinds(dest):
-        for suffix in ("_tracklets.npz", "_tracklets_meta.json"):
-            path = dest / f"{kind}{suffix}"
-            if path.is_file():
-                path.unlink()
+    for path in _tracklet_kind_files(dest, discover_tracklet_kinds(dest)):
+        if path.is_file():
+            path.unlink()
 
 
 def reset_identity_package_for_new_detect(directory: PathLike) -> None:

@@ -115,8 +115,8 @@ class ProcessVideosTab(QWidget):
 
         btn_scan = QPushButton("Scan project / bundled models")
         btn_scan.setToolTip(
-            "Search the project models folder and LabGym’s bundled detectors/models "
-            "directories for available detectors and categorizers."
+            "Search the project models folder and LabGym’s bundled models "
+            "directory for available categorizers."
         )
         btn_scan.clicked.connect(self._scan_models)
         mform.addRow(btn_scan)
@@ -125,8 +125,8 @@ class ProcessVideosTab(QWidget):
         # Params
         pbox = QGroupBox("Analysis parameters")
         pbox.setToolTip(
-            "How long to analyze, at what resolution, and whether to reuse ID fixes "
-            "from Review IDs before labeling behaviors."
+            "How long to analyze and at what resolution. Behaviors are labeled "
+            "from accepted remapped identities — this tab does not run the detector."
         )
         pform = QFormLayout(pbox)
         self.spin_duration = QDoubleSpinBox()

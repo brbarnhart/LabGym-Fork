@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 import pandas as pd
 
@@ -30,7 +30,6 @@ _DEFAULT_ID_COLORS = [
 @dataclass
 class ProcessVideoConfig:
     video_path: str
-    detector_path: str = ""
     categorizer_path: str = ""
     results_root: str = ""
     animal_kinds: List[str] = field(default_factory=list)
@@ -40,7 +39,6 @@ class ProcessVideoConfig:
     framewidth: Optional[int] = None
     t: float = 0.0
     duration: float = 0.0  # 0 = full video
-    detector_batch: int = 1
     uncertain: float = 0.0
     min_length: Optional[int] = None
     background_free: bool = True
@@ -200,22 +198,13 @@ def process_video(
             log=log,
         )
 
-    try:
-        from LabGym.analysis.hydrate_from_tracklets import (
-            fill_geometry_from_stores,
-            kinds_and_counts,
-            load_remapped_stores,
-            rebuild_categorizer_inputs,
-            resolve_package_kinds,
-        )
-    except Exception as exc:
-        return ProcessVideoResult(
-            video_path=str(video),
-            results_path="",
-            ok=False,
-            error=f"Import failed: {exc}",
-            log=log,
-        )
+    from LabGym.analysis.hydrate_from_tracklets import (
+        fill_geometry_from_stores,
+        kinds_and_counts,
+        load_remapped_stores,
+        rebuild_categorizer_inputs,
+        resolve_package_kinds,
+    )
 
     try:
         meta = load_categorizer_metadata(config.categorizer_path)
@@ -304,9 +293,8 @@ def process_video(
                 social_distance=social_distance,
             )
             results_path = aad.results_path
-            # JobProgress (and similar) expose .frame(current, total); plain callables do not.
-            _frame = getattr(progress, "frame", None) if progress is not None else None
-            frame_progress = _frame if callable(_frame) else None
+            frame_fn = getattr(progress, "frame", None) if progress is not None else None
+            frame_progress = frame_fn if callable(frame_fn) else None
 
             _prog("Loading remapped tracklets…")
             first_store = next(iter(stores.values()))
@@ -364,7 +352,6 @@ def process_video(
 
             manifest = {
                 "video_path": str(video.resolve()),
-                "detector_path": str(Path(config.detector_path).resolve()),
                 "categorizer_path": str(Path(config.categorizer_path).resolve()),
                 "results_path": results_path,
                 "id_review_dir": config.id_review_dir or "",
@@ -388,7 +375,7 @@ def process_video(
                 from LabGym.gpu_utils import release_analyzer_gpu
 
                 release_analyzer_gpu(aad)
-                _prog("Released detector GPU memory.")
+                _prog("Released GPU memory.")
             except Exception as exc:
                 try:
                     _prog(f"Warning: GPU release incomplete: {exc}")

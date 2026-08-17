@@ -8,7 +8,6 @@ from os import PathLike
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
 from LabGym.gui_pyside.project.model import Project
 from LabGym.gui_pyside.project.paths import (
     annotations_path_for,
@@ -23,9 +22,9 @@ from LabGym.id_review.dataset import (
 from LabGym.id_review.raw_store import (
     has_accepted_identities,
     has_raw_snapshot,
+    load_kind_stores,
     load_raw_tracklets,
 )
-from LabGym.id_review.tracklets import load_tracklets
 from LabGym.id_review.types import ContactEvent, SwitchMarker
 from LabGym.identity.package import (
     SubjectRecord,
@@ -171,18 +170,12 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
     stores: Dict[str, Any] = {}
     baseline: Dict[str, Any] = {}
     if has_raw:
-        raw = load_raw_tracklets(review_dir)
-        for kind, store in raw.items():
-            baseline[kind] = store
-            stores[kind] = clone_store(store)
+        loaded = load_raw_tracklets(review_dir)
     else:
-        kinds = discover_tracklet_kinds(review_dir)
-        if not kinds:
-            raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
-        for kind in kinds:
-            store = load_tracklets(review_dir, kind)
-            stores[kind] = store
-            baseline[kind] = clone_store(store)
+        loaded = load_kind_stores(review_dir)
+    for kind, store in loaded.items():
+        baseline[kind] = store
+        stores[kind] = clone_store(store)
 
     if not stores:
         raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
@@ -258,7 +251,6 @@ def save_review_package(
     *,
     already_corrected: bool,
     baseline_stores: Dict[str, Any],
-    has_raw: Optional[bool] = None,
 ) -> SavePackageResult:
     """Finalize switches, publish remapped tracklets from raw, write subjects."""
     try:
@@ -269,10 +261,9 @@ def save_review_package(
             export_samples=True,
         )
         n = 0
-        can_rebuild = has_raw if has_raw is not None else (not already_corrected)
+        can_rebuild = has_raw_snapshot(review_dir)
         stores = {k: clone_store(s) for k, s in baseline_stores.items()}
         baselines = dict(baseline_stores)
-        corrected = already_corrected
         accepted = False
         if can_rebuild:
             n = apply_decisions_and_save_tracklets(
@@ -294,8 +285,8 @@ def save_review_package(
             n_remap=n,
             remap_note=remap_note,
             n_subjects=len(subjects),
-            already_corrected=corrected,
-            has_raw=bool(can_rebuild) or has_raw_snapshot(review_dir),
+            already_corrected=already_corrected,
+            has_raw=can_rebuild,
             accepted=accepted or has_accepted_identities(review_dir),
             stores=stores,
             baseline_stores=baselines,

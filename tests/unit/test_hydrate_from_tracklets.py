@@ -170,6 +170,24 @@ def test_rebuild_animation_uses_zeros_when_id_absent(tmp_path: Path):
     assert not np.array_equal(clip[-2], np.zeros_like(clip[-2]))
 
 
+def test_rebuild_reports_frame_progress_during_rebuild(tmp_path: Path):
+    n = 5
+    video = tmp_path / "clip.avi"
+    _write_video(video, n)
+    store = _moving_store(n=n)
+    analyzer = _analyzer(n, animation_analyzer=False)
+    fill_geometry_from_stores(analyzer, {"mouse": store})
+    seen: list[tuple[int, int]] = []
+    rebuild_categorizer_inputs(
+        analyzer,
+        video_path=str(video),
+        store_meta=store.meta,
+        frame_progress=lambda current, total: seen.append((current, total)),
+    )
+    assert seen == [(i, n) for i in range(1, n + 1)]
+    assert seen != [(n, n)]
+
+
 def test_rebuild_animation_is_temporal_window_not_frozen_still(tmp_path: Path):
     n = 5
     length = 3

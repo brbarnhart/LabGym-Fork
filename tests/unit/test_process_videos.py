@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 import sys
@@ -49,6 +50,12 @@ def test_load_categorizer_metadata(tmp_path: Path):
     assert "approach" in meta["classnames"]
     assert int(meta["time_step"]) == 15
     assert int(meta["network"]) == 2
+
+
+def test_process_video_config_has_no_detector_wiring():
+    fields = ProcessVideoConfig.__dataclass_fields__
+    assert "detector_path" not in fields
+    assert "detector_batch" not in fields
 
 
 def test_process_video_missing_paths(tmp_path: Path):
@@ -202,7 +209,62 @@ def test_process_video_mocked(tmp_path: Path):
     assert fake_aad.prepare_analysis.call_args[0][0] is None
     fake_aad.categorize_behaviors.assert_called_once()
     fake_aad.export_results.assert_called_once()
-    assert (results / "process_video_job.json").is_file()
+    manifest = json.loads((results / "process_video_job.json").read_text(encoding="utf-8"))
+    assert "detector_path" not in manifest
+    assert "detector_batch" not in manifest
+
+
+def test_process_video_forwards_frame_progress_during_rebuild(tmp_path: Path):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    review = _accepted_review(tmp_path, ["mouse"])
+    cat = _minimal_categorizer(tmp_path)
+    out = tmp_path / "analysis"
+    out.mkdir()
+    results = out / "clip"
+    results.mkdir()
+    fake_aad = MagicMock()
+    fake_aad.results_path = str(results)
+    fake_mod = types.ModuleType("LabGym.analyzebehavior_dt")
+    fake_mod.AnalyzeAnimalDetector = MagicMock(return_value=fake_aad)
+    prev = sys.modules.get("LabGym.analyzebehavior_dt")
+    sys.modules["LabGym.analyzebehavior_dt"] = fake_mod
+    frames: list[tuple[int, int]] = []
+
+    class _Prog:
+        def __call__(self, msg: str) -> None:
+            return None
+
+        def frame(self, current: int, total: int) -> None:
+            frames.append((current, total))
+
+    def _rebuild(*_a, frame_progress=None, **_k):
+        if frame_progress:
+            for i in range(1, 5):
+                frame_progress(i, 4)
+
+    try:
+        with patch(
+            "LabGym.analysis.hydrate_from_tracklets.fill_geometry_from_stores"
+        ), patch(
+            "LabGym.analysis.hydrate_from_tracklets.rebuild_categorizer_inputs",
+            side_effect=_rebuild,
+        ):
+            cfg = ProcessVideoConfig(
+                video_path=str(video),
+                categorizer_path=str(cat),
+                results_root=str(out),
+                id_review_dir=str(review),
+            )
+            r = process_video(cfg, progress=_Prog())
+    finally:
+        if prev is None:
+            sys.modules.pop("LabGym.analyzebehavior_dt", None)
+        else:
+            sys.modules["LabGym.analyzebehavior_dt"] = prev
+    assert r.ok is True, r.error
+    assert frames == [(1, 4), (2, 4), (3, 4), (4, 4)]
+    assert frames != [(4, 4)]
 
 
 def _accepted_review(tmp_path: Path, kinds: list[str]):

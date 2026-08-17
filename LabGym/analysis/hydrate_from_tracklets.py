@@ -10,8 +10,7 @@ import cv2
 import numpy as np
 
 from LabGym.id_review.samples import analysis_frame_to_video_frame
-from LabGym.id_review.tracklets import load_tracklets
-from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+from LabGym.id_review.raw_store import load_kind_stores
 from LabGym.tools import (
     extract_blob_background,
     generate_patternimage,
@@ -32,9 +31,7 @@ def load_remapped_stores(directory: str | Path) -> Dict[str, Any]:
     Returns:
         Mapping of animal kind to ``TrackletStore``.
     """
-    directory = Path(directory)
-    kinds = discover_tracklet_kinds(directory)
-    return {kind: load_tracklets(str(directory), kind) for kind in kinds}
+    return load_kind_stores(directory)
 
 
 def kinds_and_counts(stores: Dict[str, Any]) -> Dict[str, int]:
@@ -120,7 +117,7 @@ def fill_geometry_from_stores(analyzer: Any, stores: Dict[str, Any]) -> None:
                 analyzer.animal_existingcenters[kind][tid] = last
 
 
-def _allocate_id_slot(analyzer, kind: str, tid: int) -> None:
+def _allocate_id_slot(analyzer: Any, kind: str, tid: int) -> None:
     n = int(analyzer.total_analysis_framecount)
     analyzer.animal_centers[kind][tid] = [None] * n
     analyzer.animal_contours[kind][tid] = [None] * n
@@ -226,7 +223,7 @@ def rebuild_categorizer_inputs(
 
 
 def _empty_inner_rolls(
-    analyzer, length: int
+    analyzer: Any, length: int
 ) -> Dict[Tuple[str, int], Deque[Any]]:
     rolls: Dict[Tuple[str, int], Deque[Any]] = {}
     if not getattr(analyzer, "include_bodyparts", False):
@@ -268,7 +265,7 @@ def _normalized_blob(
 
 
 def _fill_frame_features(
-    analyzer,
+    analyzer: Any,
     frame: np.ndarray,
     frame_idx: int,
     *,
