@@ -100,6 +100,26 @@ def behavior_mode_from_package(directory: str | Path, fallback: int) -> int:
     return int(fallback)
 
 
+def discover_identity_package_for_video(video_path: str | Path) -> str:
+    """Find a sibling identity package for a video (no project required).
+
+    Searches the same id_review locations the annotator uses to autoload
+    tracklets. Returns ``""`` when none is present.
+    """
+    video_path = Path(video_path)
+    stem = video_path.stem
+    candidates = (
+        video_path.parent / "id_review",
+        video_path.with_suffix("") / "id_review",
+        video_path.parent / stem / "id_review",
+        video_path.parent / f"{stem}_processed" / "id_review",
+    )
+    for directory in candidates:
+        if has_identity_package(directory):
+            return str(directory)
+    return ""
+
+
 
 @dataclass
 class SubjectRecord:
