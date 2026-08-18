@@ -5,28 +5,37 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from LabGym.identity.package import writes_identity_package
+from LabGym.identity.package import has_identity_package, writes_identity_package
 
 
-def may_use_downstream(behavior_mode: int, accepted_identities: bool) -> bool:
+def may_use_downstream(
+    behavior_mode: int,
+    accepted_identities: bool,
+    *,
+    identity_package: bool = False,
+) -> bool:
     """Return whether this video may be annotated, used for examples, or processed.
 
-    Per-animal modes (non-interactive and interactive advanced) require
-    accepted identities. Interactive basic has no identity package and is
-    always allowed.
+    A present identity package is a per-animal detect world and always
+    requires accepted identities. Interactive basic (no package) is exempt.
+    Project default and categorizer ``behavior_kind`` must not be used to
+    invent that exemption when a package exists.
 
     Args:
-        behavior_mode: LabGym behavior mode code (0, 1, 2, …).
+        behavior_mode: Detect-world behavior mode for this video (0, 1, 2, …).
         accepted_identities: True when Review IDs has published remapped
             tracklets for this video.
+        identity_package: True when this video has a per-animal identity
+            package (raw, remapped, or detect job). Overrides *behavior_mode*
+            so a mode-1 project default cannot skip Review IDs.
 
     Returns:
         True if the video may proceed; False if Annotate / generate /
         Process videos must refuse.
     """
-    if not writes_identity_package(int(behavior_mode)):
-        return True
-    return bool(accepted_identities)
+    if identity_package or writes_identity_package(int(behavior_mode)):
+        return bool(accepted_identities)
+    return True
 
 
 def apply_context_to_annotator(window: Any, ctx: Any) -> bool:
@@ -44,13 +53,18 @@ def apply_context_to_annotator(window: Any, ctx: Any) -> bool:
     Returns:
         True if the video was opened; False if the gate refused or load failed.
     """
-    if not may_use_downstream(int(ctx.behavior_mode), bool(ctx.accepted_identities)):
+    tracks = str(getattr(ctx, "tracklets_dir", "") or "")
+    package = bool(tracks) and has_identity_package(tracks)
+    if not may_use_downstream(
+        int(ctx.behavior_mode),
+        bool(ctx.accepted_identities),
+        identity_package=package,
+    ):
         return False
 
     video = str(getattr(ctx, "video_path", "") or "")
     ann = getattr(ctx, "annotations_path", None) or None
     ann_arg = ann if (ann and Path(ann).is_file()) else None
-    tracks = str(getattr(ctx, "tracklets_dir", "") or "")
     tracklets_dir = tracks if (tracks and bool(ctx.accepted_identities)) else None
 
     ok = window.load_video_from_path(

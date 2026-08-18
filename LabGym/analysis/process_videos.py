@@ -164,21 +164,20 @@ def process_video(
         )
     from LabGym.id_review.raw_store import has_accepted_identities
     from LabGym.identity.downstream import may_use_downstream
+    from LabGym.identity.package import behavior_mode_from_package, has_identity_package
 
-    mode = config.behavior_mode
-    if mode is None and Path(config.categorizer_path).is_dir():
-        try:
-            peeked = load_categorizer_metadata(config.categorizer_path)
-            if peeked.get("behavior_kind") is not None:
-                mode = int(peeked.get("behavior_kind") or 0)
-        except (OSError, ValueError, FileNotFoundError):
-            mode = None
-    if mode is None:
+    pkg_dir = str(config.id_review_dir or "")
+    package = bool(pkg_dir) and has_identity_package(pkg_dir)
+    if package:
+        mode = behavior_mode_from_package(pkg_dir, fallback=0)
+    elif config.behavior_mode is not None:
+        mode = int(config.behavior_mode)
+    else:
         mode = 0
-    accepted = bool(config.id_review_dir) and has_accepted_identities(
-        config.id_review_dir
-    )
-    if not may_use_downstream(int(mode), accepted):
+    accepted = package and has_accepted_identities(pkg_dir)
+    if not may_use_downstream(
+        int(mode), accepted, identity_package=package
+    ):
         return ProcessVideoResult(
             video_path=str(video),
             results_path="",
@@ -254,11 +253,12 @@ def process_video(
         black_background = int(meta.get("black_background", 0) or 0) != 1
         if not config.black_background:
             black_background = False
-        behavior_mode = int(
-            config.behavior_mode
-            if config.behavior_mode is not None
-            else meta.get("behavior_kind", 0) or 0
-        )
+        if config.behavior_mode is not None:
+            behavior_mode = int(config.behavior_mode)
+        elif package:
+            behavior_mode = int(mode)
+        else:
+            behavior_mode = int(meta.get("behavior_kind", 0) or 0)
         social_distance = float(
             config.social_distance
             if config.social_distance

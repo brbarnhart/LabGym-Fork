@@ -205,6 +205,30 @@ def test_generate_refuses_without_accepted_identities(tmp_path: Path):
         generate_examples_from_ethogram(cfg, session=sess)
 
 
+def test_generate_session_mode_1_still_refuses_unaccepted_package(tmp_path: Path):
+    from LabGym.id_review.apply import write_tracklets_identity_status
+
+    sess = AnnotationSession(
+        video_path="v.avi",
+        fps=10,
+        total_frames=20,
+        behaviors=[Behavior("grooming")],
+        subjects=[Subject(0)],
+        behavior_mode=BEHAVIOR_MODE_INTERACTIVE_BASIC,
+    )
+    write_tracklets_identity_status(
+        str(tmp_path), corrected=False, accepted=False, has_raw=True
+    )
+    cfg = GenerationConfig(
+        video_path="v.avi",
+        annotations_path=str(tmp_path / "a.json"),
+        tracklets_dir=str(tmp_path),
+        output_dir=str(tmp_path / "out"),
+    )
+    with pytest.raises(ValueError, match="Review IDs"):
+        generate_examples_from_ethogram(cfg, session=sess)
+
+
 def test_generate_interactive_basic_not_blocked_without_accepted(tmp_path: Path):
     sess = AnnotationSession(
         video_path=str(tmp_path / "missing.avi"),

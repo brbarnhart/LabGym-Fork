@@ -274,6 +274,7 @@ def detect_and_track_video(
         from LabGym.id_review.dataset import export_review_pack
         from LabGym.id_review.types import ContactDetectorConfig
         from LabGym.identity.package import (
+            DETECT_JOB_FILENAME,
             save_subjects,
             subjects_from_track_ids,
             writes_identity_package,
@@ -383,7 +384,7 @@ def detect_and_track_video(
                 "behavior_mode": int(config.behavior_mode),
                 "n_contact_events": n_events,
             }
-            Path(out_dir).joinpath("detect_track_job.json").write_text(
+            Path(out_dir).joinpath(DETECT_JOB_FILENAME).write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8"
             )
 

@@ -18,6 +18,11 @@ def test_interactive_basic_allowed_without_accepted_identities() -> None:
     assert may_use_downstream(1, False) is True
 
 
+def test_identity_package_requires_accepted_even_if_mode_is_interactive_basic() -> None:
+    assert may_use_downstream(1, False, identity_package=True) is False
+    assert may_use_downstream(1, True, identity_package=True) is True
+
+
 @pytest.mark.parametrize("mode", [0, 1, 2])
 def test_accepted_identities_allow_every_mode(mode: int) -> None:
     assert may_use_downstream(mode, True) is True

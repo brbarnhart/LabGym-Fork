@@ -8,12 +8,16 @@ import numpy as np
 import pytest
 
 from LabGym.identity.package import (
+    DETECT_JOB_FILENAME,
     SUBJECTS_FILENAME,
     SubjectRecord,
     apply_decisions_and_save_tracklets,
+    behavior_mode_from_package,
+    has_identity_package,
     load_subjects,
     migrate_uncorrected_public_to_raw,
     needs_uncorrected_raw_migrate,
+    read_detect_behavior_mode,
     save_subjects,
     subjects_from_track_ids,
     switch_edits_allowed,
@@ -68,6 +72,27 @@ def test_writes_identity_package_for_per_animal_modes_only():
     assert writes_identity_package(0) is True
     assert writes_identity_package(2) is True
     assert writes_identity_package(1) is False
+
+
+def test_behavior_mode_from_package_prefers_detect_job(tmp_path: Path):
+    assert has_identity_package(tmp_path) is False
+    assert behavior_mode_from_package(tmp_path, fallback=1) == 1
+    assert read_detect_behavior_mode(tmp_path) is None
+
+    (tmp_path / DETECT_JOB_FILENAME).write_text(
+        '{"behavior_mode": 0, "video_path": "clip.avi"}', encoding="utf-8"
+    )
+    assert has_identity_package(tmp_path) is True
+    assert read_detect_behavior_mode(tmp_path) == 0
+    assert behavior_mode_from_package(tmp_path, fallback=1) == 0
+
+
+def test_package_without_job_is_per_animal_not_fallback(tmp_path: Path):
+    write_tracklets_identity_status(
+        str(tmp_path), corrected=False, accepted=False, has_raw=True
+    )
+    assert has_identity_package(tmp_path) is True
+    assert behavior_mode_from_package(tmp_path, fallback=1) == 0
 
 
 def test_subjects_roundtrip(tmp_path: Path):

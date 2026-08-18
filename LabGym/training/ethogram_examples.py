@@ -587,13 +587,17 @@ def generate_examples_from_ethogram(
 
     from LabGym.id_review.raw_store import has_accepted_identities
     from LabGym.identity.downstream import may_use_downstream
+    from LabGym.identity.package import behavior_mode_from_package, has_identity_package
 
-    mode = int(session.behavior_mode)
+    package = bool(config.tracklets_dir) and has_identity_package(config.tracklets_dir)
+    mode = (
+        behavior_mode_from_package(config.tracklets_dir, int(session.behavior_mode))
+        if config.tracklets_dir
+        else int(session.behavior_mode)
+    )
     if loaded_tracklets is None:
-        accepted = bool(config.tracklets_dir) and has_accepted_identities(
-            config.tracklets_dir
-        )
-        if not may_use_downstream(mode, accepted):
+        accepted = package and has_accepted_identities(config.tracklets_dir)
+        if not may_use_downstream(mode, accepted, identity_package=package):
             raise ValueError(
                 "Accepted identities are required. Open Detector → Review IDs, "
                 "review or accept the detector IDs, and save before annotating "

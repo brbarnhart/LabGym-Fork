@@ -103,7 +103,7 @@ def test_process_video_interactive_basic_skips_identity_gate(tmp_path: Path):
     assert "Review IDs" not in r.error
 
 
-def test_process_video_mode_from_categorizer_skips_identity_gate(tmp_path: Path):
+def test_process_video_categorizer_mode_does_not_skip_identity_gate(tmp_path: Path):
     video = tmp_path / "clip.avi"
     video.write_bytes(b"x")
     cat = tmp_path / "cat"
@@ -122,7 +122,33 @@ def test_process_video_mode_from_categorizer_skips_identity_gate(tmp_path: Path)
     )
     r = process_video(cfg)
     assert r.ok is False
-    assert "Review IDs" not in r.error
+    assert "Review IDs" in r.error
+
+
+def test_process_video_unaccepted_package_refuses_even_if_caller_mode_1(
+    tmp_path: Path,
+):
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"x")
+    cat = tmp_path / "cat"
+    cat.mkdir()
+    review = tmp_path / "id_review"
+    review.mkdir()
+    from LabGym.id_review.apply import write_tracklets_identity_status
+
+    write_tracklets_identity_status(
+        str(review), corrected=False, accepted=False, has_raw=True
+    )
+    cfg = ProcessVideoConfig(
+        video_path=str(video),
+        categorizer_path=str(cat),
+        results_root=str(tmp_path / "out"),
+        id_review_dir=str(review),
+        behavior_mode=1,
+    )
+    r = process_video(cfg)
+    assert r.ok is False
+    assert "Review IDs" in r.error
 
 
 def test_process_video_mocked(tmp_path: Path):

@@ -41,14 +41,15 @@ from LabGym.gui_pyside.jobs.sequential_queue import (
 from LabGym.gui_pyside.model_paths import scan_categorizer_paths
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
-    discover_tracklets_dir,
     list_project_video_choices,
+    resolve_video_context,
 )
 from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
     set_line_edit_directory,
 )
 from LabGym.identity.downstream import may_use_downstream
+from LabGym.identity.package import has_identity_package
 
 
 class ProcessVideosTab(QWidget):
@@ -335,12 +336,14 @@ class ProcessVideosTab(QWidget):
             if path in self._status_by_path:
                 status, note = self._status_by_path[path]
             else:
-                tracks = discover_tracklets_dir(self.project.project, path)
-                from LabGym.id_review.raw_store import has_accepted_identities
-
-                accepted = bool(tracks) and has_accepted_identities(tracks)
-                mode = int(self.project.project.defaults.behavior_mode)
-                if may_use_downstream(mode, accepted):
+                ctx = resolve_video_context(self.project.project, video_path=path)
+                tracks = ctx.tracklets_dir
+                pkg = bool(tracks) and has_identity_package(tracks)
+                if may_use_downstream(
+                    int(ctx.behavior_mode),
+                    bool(ctx.accepted_identities),
+                    identity_package=pkg,
+                ):
                     status, note = ("pending", tracks or "")
                 elif tracks:
                     status, note = (
@@ -398,15 +401,16 @@ class ProcessVideosTab(QWidget):
             QMessageBox.warning(self, "Process", "Select at least one video.")
             return
 
-        from LabGym.id_review.raw_store import has_accepted_identities
-
         project = self.project.project
-        mode = int(project.defaults.behavior_mode)
         missing = []
         for path in videos:
-            pkg = discover_tracklets_dir(project, path) or ""
-            accepted = bool(pkg) and has_accepted_identities(pkg)
-            if not may_use_downstream(mode, accepted):
+            ctx = resolve_video_context(project, video_path=path)
+            pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+            if not may_use_downstream(
+                int(ctx.behavior_mode),
+                bool(ctx.accepted_identities),
+                identity_package=pkg,
+            ):
                 missing.append(Path(path).name)
         if missing:
             QMessageBox.warning(
@@ -440,18 +444,18 @@ class ProcessVideosTab(QWidget):
 
         def runner(job: JobItem, prog: JobProgress) -> ProcessVideoResult:
             video = str(job.payload)
-            id_dir = discover_tracklets_dir(project, video) or ""
+            ctx = resolve_video_context(project, video_path=video)
             cfg = ProcessVideoConfig(
                 video_path=video,
                 categorizer_path=categorizer,
                 results_root=out,
-                id_review_dir=id_dir,
+                id_review_dir=ctx.tracklets_dir or "",
                 framewidth=fw,
                 t=float(self.spin_t.value()),
                 duration=float(self.spin_duration.value()),
                 uncertain=float(self.spin_uncertain.value()),
                 show_legend=self.chk_legend.isChecked(),
-                behavior_mode=mode,
+                behavior_mode=int(ctx.behavior_mode),
             )
             return process_video(cfg, progress=prog)
 

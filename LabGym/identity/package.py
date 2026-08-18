@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 from LabGym.annotator.core.tracklets_bridge import subject_color_for_index
 
 SUBJECTS_FILENAME = "subjects.json"
+DETECT_JOB_FILENAME = "detect_track_job.json"
+_IDENTITY_STATUS_FILENAME = "tracklets_identity_status.json"
 
 # Behavior modes that produce per-animal tracks (see ADR 0006).
 _PER_ANIMAL_BEHAVIOR_MODES = frozenset({0, 2})
@@ -28,6 +30,74 @@ def writes_identity_package(behavior_mode: int) -> bool:
     package.
     """
     return int(behavior_mode) in _PER_ANIMAL_BEHAVIOR_MODES
+
+
+def has_identity_package(directory: str | Path) -> bool:
+    """True when *directory* is a per-animal identity package.
+
+    Interactive basic writes no package. Raw tracklets, remapped tracklets,
+    a detect job, or identity status all mean this video has per-animal tracks.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return False
+    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_raw_snapshot
+
+    if has_raw_snapshot(directory):
+        return True
+    if discover_tracklet_kinds(directory):
+        return True
+    if (directory / DETECT_JOB_FILENAME).is_file():
+        return True
+    return (directory / _IDENTITY_STATUS_FILENAME).is_file()
+
+
+def read_detect_behavior_mode(directory: str | Path) -> Optional[int]:
+    """Behavior mode Detect + track recorded on this identity package.
+
+    Args:
+        directory: Identity package directory that may contain
+            ``detect_track_job.json``.
+
+    Returns:
+        The recorded mode, or None if missing or unreadable.
+    """
+    path = Path(directory) / DETECT_JOB_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict) or raw.get("behavior_mode") is None:
+        return None
+    try:
+        return int(raw["behavior_mode"])
+    except (TypeError, ValueError):
+        return None
+
+
+def behavior_mode_from_package(directory: str | Path, fallback: int) -> int:
+    """Detect-world behavior mode for a video.
+
+    Prefers ``detect_track_job.json``. A package with no recorded mode is
+    still a per-animal world (mode 0), not the project default — that default
+    may be interactive basic and must not exempt Review IDs.
+
+    Args:
+        directory: Identity package directory, or a path that is not a package.
+        fallback: Mode to use when there is no identity package.
+
+    Returns:
+        Detect-world mode, or *fallback* when no package is present.
+    """
+    recorded = read_detect_behavior_mode(directory)
+    if recorded is not None:
+        return recorded
+    if has_identity_package(directory):
+        return 0
+    return int(fallback)
 
 
 

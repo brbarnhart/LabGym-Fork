@@ -20,6 +20,7 @@ from LabGym.annotator.ui.main_window import MainWindow
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
 from LabGym.identity.downstream import apply_context_to_annotator, may_use_downstream
+from LabGym.identity.package import has_identity_package
 
 
 class AnnotateEthogramTab(QWidget):
@@ -194,7 +195,12 @@ class AnnotateEthogramTab(QWidget):
         ctx = self.project.resolve_context(video)
         self.project.set_current_video(video, dirty=True)
 
-        if not may_use_downstream(int(ctx.behavior_mode), bool(ctx.accepted_identities)):
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+        if not may_use_downstream(
+            int(ctx.behavior_mode),
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
+        ):
             QMessageBox.warning(
                 self,
                 "Review IDs required",

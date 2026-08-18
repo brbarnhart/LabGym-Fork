@@ -27,6 +27,7 @@ from LabGym.annotator.core.annotation_manager import AnnotationManager
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
 from LabGym.identity.downstream import may_use_downstream
+from LabGym.identity.package import has_identity_package
 from LabGym.training.ethogram_examples import GenerationConfig, generate_examples_from_ethogram
 
 
@@ -298,8 +299,11 @@ class GenerateExamplesTab(QWidget):
             warnings.append("Video file missing on disk")
         if ctx.video_path and not ctx.annotations_exists:
             warnings.append("Annotations missing — annotate and save first")
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
         if ctx.video_path and not may_use_downstream(
-            int(ctx.behavior_mode), bool(ctx.accepted_identities)
+            int(ctx.behavior_mode),
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
         ):
             warnings.append(
                 "Accepted identities missing — save Review IDs before generating"
@@ -331,11 +335,17 @@ class GenerateExamplesTab(QWidget):
         behavior_mode = int(ctx.behavior_mode)
         try:
             sess = AnnotationManager.load_from_json(ctx.annotations_path).session
-            behavior_mode = int(sess.behavior_mode)
+            if not (ctx.tracklets_dir and has_identity_package(ctx.tracklets_dir)):
+                behavior_mode = int(sess.behavior_mode)
         except (OSError, ValueError, KeyError, TypeError):
             pass
 
-        if not may_use_downstream(behavior_mode, bool(ctx.accepted_identities)):
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+        if not may_use_downstream(
+            behavior_mode,
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
+        ):
             QMessageBox.warning(
                 self,
                 "Generate",
