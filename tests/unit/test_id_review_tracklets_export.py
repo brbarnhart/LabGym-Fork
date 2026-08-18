@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from LabGym.id_review.apply import (
 	apply_decisions_to_store,
@@ -83,15 +84,14 @@ def test_apply_decisions_to_store_and_roundtrip(tmp_path: Path):
 	assert st["corrected"] is True
 
 
-def test_annotator_lazy_apply(tmp_path: Path):
-	"""Simulates old pack: uncorrected npz + switches.jsonl."""
+def test_annotator_refuses_unaccepted_identities(tmp_path: Path):
+	"""Detect-only pack (or unsaved switches) must not load for annotation."""
 	from LabGym.annotator.core.tracklets_bridge import load_tracklets_for_annotator
 	from LabGym.id_review.types import SwitchMarker
 	from LabGym.id_review.dataset import save_switches
 
 	store = _make_store()
 	save_tracklets(store, str(tmp_path))
-	# No corrected flag
 	marker = SwitchMarker(
 		marker_id="s000001_mouse",
 		frame=10,
@@ -102,8 +102,5 @@ def test_annotator_lazy_apply(tmp_path: Path):
 	)
 	save_switches(str(tmp_path), [marker])
 
-	loaded = load_tracklets_for_annotator(str(tmp_path), video_total_frames=20)
-	# Overlays / centers for subject 0 at analysis frame 15 should be remapped (right)
-	st = loaded.stores["mouse"]
-	assert st.centers[0, 15, 0] == 90.0
-	assert read_tracklets_identity_status(str(tmp_path))["corrected"] is True
+	with pytest.raises(ValueError, match="Review IDs"):
+		load_tracklets_for_annotator(str(tmp_path), video_total_frames=20)

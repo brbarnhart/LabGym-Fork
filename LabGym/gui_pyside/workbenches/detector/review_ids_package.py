@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
+from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
-from LabGym.id_review.apply import read_tracklets_identity_status
+from LabGym.gui_pyside.project.model import Project
+from LabGym.gui_pyside.project.paths import (
+    annotations_path_for,
+    discover_tracklets_dir,
+    examples_out_dir_for,
+    list_project_video_choices,
+)
 from LabGym.id_review.dataset import (
     finalize_switch_annotations,
     load_events,
     load_switches,
 )
-from LabGym.id_review.tracklets import load_tracklets
+from LabGym.id_review.raw_store import (
+    has_accepted_identities,
+    has_raw_snapshot,
+    load_kind_stores,
+    load_raw_tracklets,
+)
 from LabGym.id_review.types import ContactEvent, SwitchMarker
 from LabGym.identity.package import (
     SubjectRecord,
@@ -23,6 +35,8 @@ from LabGym.identity.package import (
     save_subjects,
     subjects_from_track_ids,
 )
+
+_log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -35,6 +49,8 @@ class LoadedReviewPackage:
     stores: Dict[str, Any]
     baseline_stores: Dict[str, Any]
     already_corrected: bool
+    has_raw: bool
+    accepted: bool
     animal_kind: str
     n_frames: int
     fps: float
@@ -43,18 +59,197 @@ class LoadedReviewPackage:
 
 @dataclass
 class SavePackageResult:
+    """Outcome of writing remapped tracklets and subjects from Review IDs.
+
+    ``ok`` is False when save refused (no raw, I/O error). ``n_remap`` counts
+    switch decisions that changed geometry; empty-switch accept still sets
+    ``accepted`` when the write succeeded.
+    """
+
     ok: bool
     error: str = ""
     n_remap: int = 0
     remap_note: str = ""
     n_subjects: int = 0
     already_corrected: bool = False
+    has_raw: bool = False
+    accepted: bool = False
     stores: Dict[str, Any] = field(default_factory=dict)
     baseline_stores: Dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class DownstreamArtifactCheck:
+    """Outcome of looking up ethogram / example-store files before remap save.
+
+    ``check_failed`` is the fail-closed signal: the caller must confirm save
+    and must not treat the result as “nothing downstream.”
+    """
+
+    check_failed: bool
+    error: str = ""
+    ethogram_path: Optional[str] = None
+    examples_path: Optional[str] = None
+
+    @property
+    def requires_confirm(self) -> bool:
+        """True when artifacts exist or the lookup failed (never an all-clear)."""
+        return bool(self.check_failed or self.ethogram_path or self.examples_path)
+
+    def note_lines(self) -> List[str]:
+        """Human-readable artifact paths or the lookup error (not dialog copy)."""
+        if self.check_failed:
+            return [
+                "Could not check for an existing ethogram or example store: "
+                f"{self.error or 'unknown error'}"
+            ]
+        lines: List[str] = []
+        if self.ethogram_path:
+            lines.append(f"Ethogram: {self.ethogram_path}")
+        if self.examples_path:
+            lines.append(f"Examples: {self.examples_path}")
+        return lines
+
+
+def should_confirm_stale_downstream(
+    *,
+    will_rebuild: bool,
+    check: DownstreamArtifactCheck,
+) -> bool:
+    """True when Save must ask because remapped tracklets will be rebuilt.
+
+    Names/roles-only saves do not rebuild remapped geometry and must not
+    warn as if they will.
+    """
+    return bool(will_rebuild and check.requires_confirm)
+
+
+def video_path_for_review_package(
+    review_dir: str,
+    *,
+    project: Optional[Project] = None,
+    hinted_video: Optional[str] = None,
+    store_meta: Optional[dict] = None,
+    events: Optional[Sequence[ContactEvent]] = None,
+) -> Optional[str]:
+    """Video this identity package belongs to (not the project's current video).
+
+    Prefers a caller hint (Load from a project video), then
+    ``detect_track_job.json`` / tracklet meta, then a project video whose
+    discovered package folder is *review_dir*.
+    """
+    hint = (hinted_video or "").strip()
+    if hint:
+        return hint
+
+    from LabGym.identity.package import read_detect_job_video
+
+    recorded = read_detect_job_video(review_dir)
+    if recorded:
+        if Path(recorded).is_file():
+            return recorded
+        resolved = resolve_video_path(
+            review_dir, {"video": recorded}, events or (), None
+        )
+        if resolved:
+            return resolved
+
+    from_meta = resolve_video_path(
+        review_dir, dict(store_meta or {}), events or (), None
+    )
+    if from_meta and Path(from_meta).is_file():
+        return from_meta
+
+    if project is not None:
+        matched = _match_package_to_project_video(project, review_dir)
+        if matched:
+            return matched
+    return from_meta
+
+
+def _match_package_to_project_video(project: Project, review_dir: str) -> Optional[str]:
+    try:
+        want = Path(review_dir).resolve()
+    except OSError:
+        want = Path(review_dir)
+    for _label, video in list_project_video_choices(project):
+        tracks = discover_tracklets_dir(project, video)
+        if not tracks:
+            continue
+        try:
+            got = Path(tracks).resolve()
+        except OSError:
+            got = Path(tracks)
+        if got == want:
+            return video
+    return None
+
+
+def check_downstream_artifacts(
+    project: Optional[Project] = None,
+    *,
+    video_path: Optional[str] = None,
+    annotations_path: Optional[Union[str, PathLike]] = None,
+    examples_dir: Optional[Union[str, PathLike]] = None,
+) -> DownstreamArtifactCheck:
+    """Look up an ethogram or example store that may go stale after remap.
+
+    Args:
+        project: Open project used to resolve ethogram / example paths for
+            *video_path*.
+        video_path: Video this package belongs to. Required when *project*
+            is used and explicit paths are omitted. The project's current
+            video is never consulted.
+        annotations_path: Optional ethogram path override.
+        examples_dir: Optional example-store directory override.
+
+    Returns:
+        A result whose ``check_failed`` flag is True if lookup/stat raises
+        or the package's video cannot be identified. That case is never an
+        all-clear: ``requires_confirm`` is True.
+    """
+    try:
+        if (
+            annotations_path is None
+            and examples_dir is None
+            and project is not None
+        ):
+            video = (video_path or "").strip()
+            if not video:
+                return DownstreamArtifactCheck(
+                    check_failed=True,
+                    error=(
+                        "Could not identify which video this identity "
+                        "package belongs to"
+                    ),
+                )
+            annotations_path = annotations_path_for(project, video)
+            examples_dir = examples_out_dir_for(project, video)
+        ethogram: Optional[str] = None
+        examples: Optional[str] = None
+        if annotations_path:
+            p = Path(annotations_path)
+            if p.is_file():
+                ethogram = str(p)
+        if examples_dir:
+            d = Path(examples_dir)
+            if d.is_dir() and any(d.iterdir()):
+                examples = str(d)
+        return DownstreamArtifactCheck(
+            check_failed=False,
+            ethogram_path=ethogram,
+            examples_path=examples,
+        )
+    except Exception as exc:
+        _log.exception("Ethogram/example-store lookup failed")
+        return DownstreamArtifactCheck(check_failed=True, error=str(exc))
+
+
 def load_review_package(review_dir: str) -> LoadedReviewPackage:
     """Load events, switches, tracklets, and subjects from *review_dir*.
+
+    Does not migrate public tracklets into raw. Callers that want that
+    must confirm and call ``migrate_uncorrected_public_to_raw`` first.
 
     Raises ``FileNotFoundError`` / ``ValueError`` with user-facing messages.
     """
@@ -64,19 +259,20 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
 
     events = load_events(review_dir)
     markers = load_switches(review_dir)
-    kinds = discover_tracklet_kinds(review_dir)
-    if not kinds:
-        raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
-
-    status = read_tracklets_identity_status(review_dir)
-    already_corrected = bool(status.get("corrected"))
-
+    accepted = has_accepted_identities(review_dir)
+    has_raw = has_raw_snapshot(review_dir)
     stores: Dict[str, Any] = {}
     baseline: Dict[str, Any] = {}
-    for kind in kinds:
-        store = load_tracklets(review_dir, kind)
-        stores[kind] = store
-        baseline[kind] = clone_store(store)
+    if has_raw:
+        loaded = load_raw_tracklets(review_dir)
+    else:
+        loaded = load_kind_stores(review_dir)
+    for kind, store in loaded.items():
+        baseline[kind] = store
+        stores[kind] = clone_store(store)
+
+    if not stores:
+        raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
 
     animal_kind = max(
         stores.keys(),
@@ -95,6 +291,9 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
         kind_ids = {k: list(s.ids) for k, s in stores.items()}
         recs = subjects_from_track_ids(kind_ids)
 
+    # Legacy baked packs have remapped geometry and no raw — freeze switch edits.
+    already_corrected = bool(accepted and not has_raw)
+
     return LoadedReviewPackage(
         review_dir=review_dir,
         events=events,
@@ -102,6 +301,8 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
         stores=stores,
         baseline_stores=baseline,
         already_corrected=already_corrected,
+        has_raw=has_raw,
+        accepted=accepted,
         animal_kind=animal_kind,
         n_frames=n_frames,
         fps=fps,
@@ -145,7 +346,7 @@ def save_review_package(
     already_corrected: bool,
     baseline_stores: Dict[str, Any],
 ) -> SavePackageResult:
-    """Finalize switches, optionally remap tracklets, write subjects.json."""
+    """Finalize switches, publish remapped tracklets from raw, write subjects."""
     try:
         decisions = finalize_switch_annotations(
             review_dir,
@@ -154,26 +355,22 @@ def save_review_package(
             export_samples=True,
         )
         n = 0
-        stores = dict(baseline_stores)
+        can_rebuild = has_raw_snapshot(review_dir)
+        stores = {k: clone_store(s) for k, s in baseline_stores.items()}
         baselines = dict(baseline_stores)
-        corrected = already_corrected
-        if not already_corrected:
+        accepted = False
+        if can_rebuild:
             n = apply_decisions_and_save_tracklets(
                 review_dir,
                 decisions,
-                baseline_stores=baseline_stores,
                 source="pyside_id_review",
             )
-            corrected = True
-            stores = {}
-            baselines = {}
-            for kind in list(baseline_stores.keys()):
-                stores[kind] = load_tracklets(review_dir, kind)
-                baselines[kind] = clone_store(stores[kind])
+            accepted = True
+            # Keep editor baselines as raw; preview applies markers live.
             remap_note = f"Remap applications: {n}\n"
         else:
             remap_note = (
-                "Tracklets already corrected — skipped re-apply "
+                "No raw snapshot — skipped rebuild "
                 "(subjects + switches updated).\n"
             )
         save_subjects(review_dir, list(subjects))
@@ -182,7 +379,9 @@ def save_review_package(
             n_remap=n,
             remap_note=remap_note,
             n_subjects=len(subjects),
-            already_corrected=corrected,
+            already_corrected=already_corrected,
+            has_raw=can_rebuild,
+            accepted=accepted or has_accepted_identities(review_dir),
             stores=stores,
             baseline_stores=baselines,
         )

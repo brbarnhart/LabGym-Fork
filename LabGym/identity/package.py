@@ -6,11 +6,135 @@ import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Tuple
+
+if TYPE_CHECKING:
+    from LabGym.annotator.core.tracklets_bridge import LoadedTracklets
+    from LabGym.id_review.types import TrackletStore
 
 from LabGym.annotator.core.tracklets_bridge import subject_color_for_index
 
 SUBJECTS_FILENAME = "subjects.json"
+DETECT_JOB_FILENAME = "detect_track_job.json"
+_IDENTITY_STATUS_FILENAME = "tracklets_identity_status.json"
+
+# Behavior modes that produce per-animal tracks (see ADR 0006).
+_PER_ANIMAL_BEHAVIOR_MODES = frozenset({0, 2})
+
+
+def writes_identity_package(behavior_mode: int) -> bool:
+    """True when Detect + track must write an identity package (raw tracklets).
+
+    Non-interactive (0) and interactive advanced (2) produce per-animal tracks
+    and always write raw. Interactive basic (1) is a group blob and writes no
+    package.
+    """
+    return int(behavior_mode) in _PER_ANIMAL_BEHAVIOR_MODES
+
+
+def has_identity_package(directory: str | Path) -> bool:
+    """True when *directory* is a per-animal identity package.
+
+    Interactive basic writes no package. Raw tracklets, remapped tracklets,
+    a detect job, or identity status all mean this video has per-animal tracks.
+    """
+    directory = Path(directory)
+    if not directory.is_dir():
+        return False
+    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_raw_snapshot
+
+    if has_raw_snapshot(directory):
+        return True
+    if discover_tracklet_kinds(directory):
+        return True
+    if (directory / DETECT_JOB_FILENAME).is_file():
+        return True
+    return (directory / _IDENTITY_STATUS_FILENAME).is_file()
+
+
+def _read_detect_job(directory: str | Path) -> Optional[Dict[str, Any]]:
+    path = Path(directory) / DETECT_JOB_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def read_detect_behavior_mode(directory: str | Path) -> Optional[int]:
+    """Behavior mode Detect + track recorded on this identity package.
+
+    Args:
+        directory: Identity package directory that may contain
+            ``detect_track_job.json``.
+
+    Returns:
+        The recorded mode, or None if missing or unreadable.
+    """
+    raw = _read_detect_job(directory)
+    if raw is None or raw.get("behavior_mode") is None:
+        return None
+    try:
+        return int(raw["behavior_mode"])
+    except (TypeError, ValueError):
+        return None
+
+
+def read_detect_job_video(directory: str | Path) -> Optional[str]:
+    """Source video path recorded on ``detect_track_job.json``, if any."""
+    raw = _read_detect_job(directory)
+    if raw is None:
+        return None
+    video = raw.get("video_path")
+    if video is None or str(video).strip() == "":
+        return None
+    return str(video)
+
+
+def behavior_mode_from_package(directory: str | Path, fallback: int) -> int:
+    """Detect-world behavior mode for a video.
+
+    Prefers ``detect_track_job.json``. A package with no recorded mode is
+    still a per-animal world (mode 0), not the project default — that default
+    may be interactive basic and must not exempt Review IDs.
+
+    Args:
+        directory: Identity package directory, or a path that is not a package.
+        fallback: Mode to use when there is no identity package.
+
+    Returns:
+        Detect-world mode, or *fallback* when no package is present.
+    """
+    recorded = read_detect_behavior_mode(directory)
+    if recorded is not None:
+        return recorded
+    if has_identity_package(directory):
+        return 0
+    return int(fallback)
+
+
+def discover_identity_package_for_video(video_path: str | Path) -> str:
+    """Find a sibling identity package for a video (no project required).
+
+    Searches the same id_review locations the annotator uses to autoload
+    tracklets. Returns ``""`` when none is present.
+    """
+    video_path = Path(video_path)
+    stem = video_path.stem
+    candidates = (
+        video_path.parent / "id_review",
+        video_path.with_suffix("") / "id_review",
+        video_path.parent / stem / "id_review",
+        video_path.parent / f"{stem}_processed" / "id_review",
+    )
+    for directory in candidates:
+        if has_identity_package(directory):
+            return str(directory)
+    return ""
+
 
 
 @dataclass
@@ -116,10 +240,17 @@ def save_subjects(directory: str | Path, subjects: Sequence[SubjectRecord]) -> P
     return path
 
 
-def merge_subjects_into_loaded(loaded, subjects: Sequence[SubjectRecord]) -> None:
+def merge_subjects_into_loaded(
+    loaded: "LoadedTracklets",
+    subjects: Sequence[SubjectRecord],
+) -> None:
     """Update LoadedTracklets.subjects display_name / role / color from subjects.json.
 
     Matches by (animal_kind, track_id) when multi-kind; else by subject_id == track_id.
+
+    Args:
+        loaded: Annotator tracklet bundle whose subjects will be rewritten.
+        subjects: Records from ``subjects.json`` (or equivalent in-memory list).
     """
     if not subjects:
         return
@@ -154,8 +285,15 @@ def merge_subjects_into_loaded(loaded, subjects: Sequence[SubjectRecord]) -> Non
     loaded.subjects = new_subjects
 
 
-def clone_store(store):
-    """Deep-ish copy of a TrackletStore for remap baselines."""
+def clone_store(store: "TrackletStore") -> "TrackletStore":
+    """Copy a TrackletStore so remap can mutate the copy, not raw.
+
+    Args:
+        store: Source store (typically a raw snapshot).
+
+    Returns:
+        Independent ``TrackletStore`` with copied arrays and contours.
+    """
     from LabGym.id_review.types import TrackletStore
 
     return TrackletStore(
@@ -171,17 +309,59 @@ def clone_store(store):
     )
 
 
+def switch_edits_allowed(directory: str | Path) -> bool:
+    """True when the switch-marker list may be mutated.
+
+    Add, delete, remove-at-frame, undo, and reorder all require raw tracklets
+    so remapped geometry can be rebuilt. Names and roles do not use this gate.
+    """
+    from LabGym.id_review.raw_store import has_raw_snapshot
+
+    return has_raw_snapshot(directory)
+
+
+def needs_uncorrected_raw_migrate(directory: str | Path) -> bool:
+    """True when opening should ask before moving public tracklets into raw.
+
+    Offered only for an uncorrected pack that has public tracklets and no raw.
+    Accepted identities (including legacy corrected packs) are never offered.
+    """
+    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_accepted_identities, has_raw_snapshot
+
+    directory = Path(directory)
+    if has_raw_snapshot(directory):
+        return False
+    if has_accepted_identities(directory):
+        return False
+    return bool(discover_tracklet_kinds(directory))
+
+
+def migrate_uncorrected_public_to_raw(directory: str | Path) -> bool:
+    """Move unpublished public tracklets into raw after the caller confirmed.
+
+    Returns True if files were moved. No-op (False) when migrate is not
+    offered — including accepted / legacy corrected packs, so remapped
+    geometry is never copied in as raw.
+    """
+    from LabGym.id_review.raw_store import snapshot_uncorrected_root_to_raw
+
+    if not needs_uncorrected_raw_migrate(directory):
+        return False
+    return bool(snapshot_uncorrected_root_to_raw(directory))
+
+
 def apply_decisions_and_save_tracklets(
     directory: str | Path,
     decisions: Sequence,
     *,
-    baseline_stores: Optional[Dict[str, Any]] = None,
     source: str = "pyside_id_review",
 ) -> int:
-    """Apply remap decisions to tracklets and write corrected npz + identity status.
+    """Publish remapped tracklets from raw plus the current switch decisions.
 
-    If ``baseline_stores`` is provided (pre-remap geometry), those are used as the
-    starting point so re-saving never double-applies. Otherwise loads from disk.
+    Rebuilds every kind in the raw snapshot. Empty decisions still write public
+    remapped files equal to raw and record accepted identities. Refuses when
+    raw is missing — public remapped files are never the remap baseline.
 
     Returns number of decision applications that remapped geometry.
     """
@@ -189,27 +369,26 @@ def apply_decisions_and_save_tracklets(
         apply_decisions_to_store,
         write_tracklets_identity_status,
     )
-    from LabGym.id_review.tracklets import load_tracklets, save_tracklets
-    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_raw_snapshot, load_raw_tracklets
+    from LabGym.id_review.tracklets import save_tracklets
 
     directory = Path(directory)
-    kinds = discover_tracklet_kinds(directory)
-    if not kinds and baseline_stores:
-        kinds = sorted(baseline_stores.keys())
+    if not has_raw_snapshot(directory):
+        raise FileNotFoundError(
+            f"Cannot rebuild remapped tracklets without raw tracklets in {directory}"
+        )
 
     n_total = 0
-    for kind in kinds:
-        if baseline_stores and kind in baseline_stores:
-            store = clone_store(baseline_stores[kind])
-        else:
-            store = load_tracklets(str(directory), kind)
-        n = apply_decisions_to_store(store, decisions, animal_kind=kind)
-        n_total += n
+    for kind, raw_store in load_raw_tracklets(directory).items():
+        store = clone_store(raw_store)
+        n_total += apply_decisions_to_store(store, decisions, animal_kind=kind)
         save_tracklets(store, str(directory))
 
     write_tracklets_identity_status(
         str(directory),
         corrected=True,
+        accepted=True,
+        has_raw=True,
         n_decisions=n_total,
         source=source,
     )

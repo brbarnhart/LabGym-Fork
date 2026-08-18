@@ -1,4 +1,4 @@
-"""Categorizer → Process videos (batch analysis with detector + categorizer)."""
+"""Categorizer → Process videos (categorize accepted identities)."""
 
 from __future__ import annotations
 
@@ -32,30 +32,28 @@ from LabGym.analysis.process_videos import (
     load_categorizer_metadata,
     process_video,
 )
-from LabGym.detection.batch_detect import load_detector_animal_kinds
 from LabGym.gui_pyside.jobs.sequential_queue import (
     JobItem,
     JobProgress,
     SequentialJobQueue,
     summarize_job_statuses,
 )
-from LabGym.gui_pyside.model_paths import (
-    scan_categorizer_paths,
-    scan_detector_paths,
-)
+from LabGym.gui_pyside.model_paths import scan_categorizer_paths
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
-    discover_tracklets_dir,
     list_project_video_choices,
+    resolve_video_context,
 )
 from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
     set_line_edit_directory,
 )
+from LabGym.identity.downstream import may_use_downstream
+from LabGym.identity.package import has_identity_package
 
 
 class ProcessVideosTab(QWidget):
-    """Batch-run detector + categorizer; optional apply Review IDs remaps."""
+    """Batch-categorize project videos from accepted remapped tracklets."""
 
     request_edit_project = Signal()
     batch_finished = Signal()
@@ -78,41 +76,15 @@ class ProcessVideosTab(QWidget):
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
-            "Process project videos: <b>detect + track</b>, optionally apply "
-            "ID remaps from Review IDs packages, <b>categorize</b>, annotate, "
-            "and export LabGym analysis outputs. One video at a time."
+            "Process project videos that already have <b>accepted identities</b> "
+            "(Detector → Review IDs → Save). Rebuilds categorizer inputs from "
+            "those remapped outlines — it does <b>not</b> run the detector. "
+            "One video at a time."
         ))
 
         # Models
         mbox = QGroupBox("Models")
         mform = QFormLayout(mbox)
-        self.ed_detector = QLineEdit()
-        self.ed_detector.setToolTip(
-            "Trained LabGym detector folder (model_final.pth + model_parameters.txt). "
-            "Used to find and track animals before categorization."
-        )
-        b_d = QPushButton("Browse…")
-        b_d.clicked.connect(
-            lambda: set_line_edit_directory(
-                self, self.ed_detector, caption="Select detector folder"
-            )
-        )
-        mform.addRow(
-            self._lab(
-                "Detector:",
-                "Path to the detector used for locating animals. Same type as "
-                "Detect + track.",
-            ),
-            path_edit_row(self.ed_detector, b_d),
-        )
-        self.lbl_kinds = QLabel("—")
-        self.lbl_kinds.setToolTip("Categories the detector was trained to detect.")
-        mform.addRow(
-            self._lab("Animal kinds:", "Read from the detector’s model_parameters.txt."),
-            self.lbl_kinds,
-        )
-        self.ed_detector.textChanged.connect(self._on_detector_changed)
-
         self.ed_categorizer = QLineEdit()
         self.ed_categorizer.setToolTip(
             "Trained LabGym categorizer folder (Keras model + model_parameters.txt "
@@ -144,8 +116,8 @@ class ProcessVideosTab(QWidget):
 
         btn_scan = QPushButton("Scan project / bundled models")
         btn_scan.setToolTip(
-            "Search the project models folder and LabGym’s bundled detectors/models "
-            "directories for available detectors and categorizers."
+            "Search the project models folder and LabGym’s bundled models "
+            "directory for available categorizers."
         )
         btn_scan.clicked.connect(self._scan_models)
         mform.addRow(btn_scan)
@@ -154,30 +126,10 @@ class ProcessVideosTab(QWidget):
         # Params
         pbox = QGroupBox("Analysis parameters")
         pbox.setToolTip(
-            "How long to analyze, at what resolution, and whether to reuse ID fixes "
-            "from Review IDs before labeling behaviors."
+            "How long to analyze and at what resolution. Behaviors are labeled "
+            "from accepted remapped identities — this tab does not run the detector."
         )
         pform = QFormLayout(pbox)
-        self.spin_animals = QSpinBox()
-        self.spin_animals.setRange(1, 50)
-        self.spin_animals.setValue(2)
-        tip_animals = (
-            "Expected number of individuals of each animal kind (same count for "
-            "every kind). Allocates track slots for the detector (e.g. 2 → IDs 0,1)."
-        )
-        self.spin_animals.setToolTip(tip_animals)
-        pform.addRow(self._lab("Animals per kind:", tip_animals), self.spin_animals)
-
-        self.spin_batch = QSpinBox()
-        self.spin_batch.setRange(1, 32)
-        self.spin_batch.setValue(1)
-        tip_batch = (
-            "GPU batch size for detector inference. Higher can be faster; lower "
-            "if you hit out-of-memory errors."
-        )
-        self.spin_batch.setToolTip(tip_batch)
-        pform.addRow(self._lab("Detector batch size:", tip_batch), self.spin_batch)
-
         self.spin_duration = QDoubleSpinBox()
         self.spin_duration.setRange(0.0, 1e7)
         self.spin_duration.setValue(0.0)
@@ -219,17 +171,6 @@ class ProcessVideosTab(QWidget):
         pform.addRow(
             self._lab("Uncertainty threshold:", tip_unc), self.spin_uncertain
         )
-
-        self.chk_apply_id = QCheckBox(
-            "Apply ID remaps from Review IDs package when available"
-        )
-        self.chk_apply_id.setChecked(True)
-        self.chk_apply_id.setToolTip(
-            "If an id_review package (from Detect + track / Review IDs) is found "
-            "for the video, apply saved identity-swap corrections after tracking "
-            "and before categorizing. Recommended when you already fixed ID swaps."
-        )
-        pform.addRow(self.chk_apply_id)
 
         self.chk_legend = QCheckBox("Show legend on annotated video")
         self.chk_legend.setChecked(True)
@@ -277,7 +218,7 @@ class ProcessVideosTab(QWidget):
         vl.addLayout(row)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
-            ["", "Video", "Status", "Results / id_review"]
+            ["", "Video", "Status", "Accepted identities"]
         )
         self.table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch
@@ -322,41 +263,21 @@ class ProcessVideosTab(QWidget):
 
     def _init_defaults(self) -> None:
         p = self.project.project
-        if p.defaults.detector_name:
-            self.ed_detector.setText(p.defaults.detector_name)
         if p.defaults.categorizer_name:
             self.ed_categorizer.setText(p.defaults.categorizer_name)
         if p.root_dir:
             # analysis results: under root/analysis or detection sibling
             self.ed_out.setText(str(p.resolve_path("analysis")))
-        self._on_detector_changed(self.ed_detector.text())
         self._on_categorizer_changed(self.ed_categorizer.text())
 
     def _scan_models(self) -> None:
         p = self.project.project
-        dets = scan_detector_paths(p)
         cats = scan_categorizer_paths(p)
-        if dets and not self.ed_detector.text().strip():
-            self.ed_detector.setText(dets[0])
         if cats and not self.ed_categorizer.text().strip():
             self.ed_categorizer.setText(cats[0])
-        self.log.append(
-            f"Scan found {len(dets)} detector(s), {len(cats)} categorizer(s)."
-        )
-        if dets:
-            self.log.append("Detectors: " + "; ".join(dets[:5]))
+        self.log.append(f"Scan found {len(cats)} categorizer(s).")
         if cats:
             self.log.append("Categorizers: " + "; ".join(cats[:5]))
-
-    def _on_detector_changed(self, path: str) -> None:
-        path = (path or "").strip()
-        if path and Path(path).is_dir():
-            try:
-                self.lbl_kinds.setText(", ".join(load_detector_animal_kinds(path)))
-            except Exception as exc:
-                self.lbl_kinds.setText(f"(error: {exc})")
-        else:
-            self.lbl_kinds.setText("—")
 
     def _on_categorizer_changed(self, path: str) -> None:
         path = (path or "").strip()
@@ -415,11 +336,25 @@ class ProcessVideosTab(QWidget):
             if path in self._status_by_path:
                 status, note = self._status_by_path[path]
             else:
-                tracks = discover_tracklets_dir(self.project.project, path)
-                status, note = (
-                    "pending",
-                    tracks or "(no id_review yet — will re-detect)",
-                )
+                ctx = resolve_video_context(self.project.project, video_path=path)
+                tracks = ctx.tracklets_dir
+                pkg = bool(tracks) and has_identity_package(tracks)
+                if may_use_downstream(
+                    int(ctx.behavior_mode),
+                    bool(ctx.accepted_identities),
+                    identity_package=pkg,
+                ):
+                    status, note = ("pending", tracks or "")
+                elif tracks:
+                    status, note = (
+                        "blocked",
+                        "needs Review IDs save",
+                    )
+                else:
+                    status, note = (
+                        "blocked",
+                        "(no identity package — Detect + track, then Review IDs)",
+                    )
             self.table.setItem(r, 2, QTableWidgetItem(status))
             self.table.setItem(r, 3, QTableWidgetItem(note))
 
@@ -453,13 +388,9 @@ class ProcessVideosTab(QWidget):
         if self.queue.is_running:
             QMessageBox.information(self, "Busy", "A batch is already running.")
             return
-        detector = self.ed_detector.text().strip()
         categorizer = self.ed_categorizer.text().strip()
         out = self.ed_out.text().strip()
         videos = self._selected_videos()
-        if not detector or not Path(detector).is_dir():
-            QMessageBox.warning(self, "Process", "Select a valid detector folder.")
-            return
         if not categorizer or not Path(categorizer).is_dir():
             QMessageBox.warning(self, "Process", "Select a valid categorizer folder.")
             return
@@ -470,21 +401,33 @@ class ProcessVideosTab(QWidget):
             QMessageBox.warning(self, "Process", "Select at least one video.")
             return
 
-        try:
-            kinds = load_detector_animal_kinds(detector)
-        except Exception as exc:
-            QMessageBox.warning(self, "Process", f"Detector metadata: {exc}")
+        project = self.project.project
+        missing = []
+        for path in videos:
+            ctx = resolve_video_context(project, video_path=path)
+            pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+            if not may_use_downstream(
+                int(ctx.behavior_mode),
+                bool(ctx.accepted_identities),
+                identity_package=pkg,
+            ):
+                missing.append(Path(path).name)
+        if missing:
+            QMessageBox.warning(
+                self,
+                "Review IDs required",
+                "These videos do not have accepted identities. "
+                "Open Detector → Review IDs, save, then try again:\n\n"
+                + "\n".join(f"  • {n}" for n in missing[:12]),
+            )
             return
 
         # Block table rebuilds for the whole batch (including mark_dirty below).
         self._batch_active = True
-        self.project.project.defaults.detector_name = detector
         self.project.project.defaults.categorizer_name = categorizer
         self.project.mark_dirty()
         Path(out).mkdir(parents=True, exist_ok=True)
 
-        n_per = int(self.spin_animals.value())
-        numbers = {k: n_per for k in kinds}
         fw = int(self.spin_fw.value()) or None
 
         items: List[JobItem] = []
@@ -499,28 +442,20 @@ class ProcessVideosTab(QWidget):
             self._set_status(r, path, "queued", "")
             items.append(JobItem(job_id=path, label=label, payload=path))
 
-        apply_id = self.chk_apply_id.isChecked()
-        project = self.project.project
-
         def runner(job: JobItem, prog: JobProgress) -> ProcessVideoResult:
             video = str(job.payload)
-            id_dir = ""
-            if apply_id:
-                id_dir = discover_tracklets_dir(project, video) or ""
+            ctx = resolve_video_context(project, video_path=video)
             cfg = ProcessVideoConfig(
                 video_path=video,
-                detector_path=detector,
                 categorizer_path=categorizer,
                 results_root=out,
-                animal_kinds=kinds,
-                animal_number=numbers,
-                id_review_dir=id_dir,
+                id_review_dir=ctx.tracklets_dir or "",
                 framewidth=fw,
                 t=float(self.spin_t.value()),
                 duration=float(self.spin_duration.value()),
-                detector_batch=int(self.spin_batch.value()),
                 uncertain=float(self.spin_uncertain.value()),
                 show_legend=self.chk_legend.isChecked(),
+                behavior_mode=int(ctx.behavior_mode),
             )
             return process_video(cfg, progress=prog)
 

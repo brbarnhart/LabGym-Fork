@@ -34,7 +34,7 @@ class DetectTrackConfig:
     black_background: bool = True
     color_costar: bool = False
     social_distance: float = 0.0
-    # Contact risk pack for later ID review
+    # Ignored: modes 0/2 always write the identity package; mode 1 never does.
     export_id_review: bool = True
     extract_contact_samples: bool = False
     contact_distance_factor: float = 1.0
@@ -271,14 +271,14 @@ def detect_and_track_video(
 
     try:
         from LabGym.analyzebehavior_dt import AnalyzeAnimalDetector
-        from LabGym.id_review.dataset import export_review_pack, review_dir
+        from LabGym.id_review.dataset import export_review_pack
         from LabGym.id_review.types import ContactDetectorConfig
         from LabGym.identity.package import (
+            DETECT_JOB_FILENAME,
             save_subjects,
             subjects_from_track_ids,
+            writes_identity_package,
         )
-        from LabGym.id_review.tracklets import load_tracklets
-        from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
         from LabGym.id_review.apply import write_tracklets_identity_status
     except Exception as exc:
         return DetectTrackResult(
@@ -339,7 +339,7 @@ def detect_and_track_video(
 
         id_review_path = ""
         n_events = 0
-        if config.export_id_review and int(config.behavior_mode) != 1:
+        if writes_identity_package(int(config.behavior_mode)):
             _prog("Exporting id_review identity package…")
             cfg = ContactDetectorConfig(
                 contact_distance_factor=float(config.contact_distance_factor),
@@ -356,14 +356,18 @@ def detect_and_track_video(
             write_tracklets_identity_status(
                 out_dir,
                 corrected=False,
+                accepted=False,
+                has_raw=True,
                 n_decisions=0,
                 source="batch_detect",
             )
             if config.write_default_subjects:
                 try:
+                    from LabGym.id_review.raw_store import load_raw_tracklets
+
                     kind_ids: Dict[str, List[int]] = {}
-                    for kind in discover_tracklet_kinds(out_dir):
-                        store = load_tracklets(out_dir, kind)
+                    raw_stores = load_raw_tracklets(out_dir)
+                    for kind, store in raw_stores.items():
                         kind_ids[kind] = list(store.ids)
                     if kind_ids:
                         save_subjects(out_dir, subjects_from_track_ids(kind_ids))
@@ -380,12 +384,9 @@ def detect_and_track_video(
                 "behavior_mode": int(config.behavior_mode),
                 "n_contact_events": n_events,
             }
-            Path(out_dir).joinpath("detect_track_job.json").write_text(
+            Path(out_dir).joinpath(DETECT_JOB_FILENAME).write_text(
                 json.dumps(manifest, indent=2), encoding="utf-8"
             )
-        else:
-            id_review_path = review_dir(results_path)
-            os.makedirs(id_review_path, exist_ok=True)
 
         _prog(f"Done: {id_review_path or results_path}")
         return DetectTrackResult(

@@ -87,6 +87,27 @@ def test_enabled_videos_filter():
     assert proj.enabled_videos()[0].path == "a.avi"
 
 
+def test_resolve_video_context_uses_package_mode_not_project_default(tmp_path: Path):
+    from LabGym.gui_pyside.project.paths import resolve_video_context, set_current_video
+    from LabGym.identity.package import DETECT_JOB_FILENAME
+
+    vid = tmp_path / "clip.avi"
+    vid.write_bytes(b"")
+    tracks = tmp_path / "id_review"
+    tracks.mkdir()
+    (tracks / DETECT_JOB_FILENAME).write_text(
+        '{"behavior_mode": 0}', encoding="utf-8"
+    )
+
+    proj = Project.new(name="p", root_dir=str(tmp_path))
+    proj.defaults.behavior_mode = 1
+    proj.add_video(str(vid))
+    set_current_video(proj, str(vid))
+    ctx = resolve_video_context(proj)
+    assert ctx.behavior_mode == 0
+    assert ctx.accepted_identities is False
+
+
 def test_resolve_video_context_annotations_and_examples(tmp_path: Path):
     from LabGym.gui_pyside.project.paths import (
         resolve_video_context,

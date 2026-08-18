@@ -66,9 +66,11 @@ python -m LabGym.training.ethogram_examples \
 
 ### 1–2. Detect & track; fix IDs
 
-Use Detector → Detect + track so that `id_review/{kind}_tracklets.npz` exists
-**after** ID remaps are applied. These tracklets are the frozen identity layer
-for annotation and example generation (no re-detection required).
+Use Detector → Detect + track (writes **raw tracklets**), then Detector →
+Review IDs → **Save** to publish **remapped tracklets** (**accepted identities**).
+An empty switch list is how you accept detector IDs. Annotate, generate
+examples, and Process videos all require that save. Process videos categorizes
+those remapped outlines and does **not** run the detector again.
 
 ### 3. Annotate ethogram
 

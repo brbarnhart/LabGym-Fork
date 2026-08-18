@@ -46,6 +46,12 @@ from .apply import (
 	write_tracklets_identity_status,
 	read_tracklets_identity_status,
 )
+from .raw_store import (
+	has_accepted_identities,
+	has_raw_snapshot,
+	load_raw_tracklets,
+	save_raw_tracklets,
+)
 from .dataset import (
 	export_review_pack,
 	append_decision,
@@ -79,6 +85,10 @@ __all__ = [
 	'load_decisions',
 	'write_tracklets_identity_status',
 	'read_tracklets_identity_status',
+	'has_accepted_identities',
+	'has_raw_snapshot',
+	'load_raw_tracklets',
+	'save_raw_tracklets',
 	'export_review_pack',
 	'append_decision',
 	'write_pair_label',

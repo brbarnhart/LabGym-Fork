@@ -181,3 +181,110 @@ def test_detect_and_track_mocked(tmp_path: Path):
     fake_aad.prepare_analysis.assert_called_once()
     fake_aad.acquire_information.assert_called_once()
     fake_aad.craft_data.assert_called_once()
+
+
+def _analyzer_with_tracks(results_path: Path, kind: str = "mouse", n: int = 6):
+    from types import SimpleNamespace
+
+    centers = {0: [(0.0, 0.0)] * n, 1: [(10.0, 0.0)] * n}
+    heights = {0: [8.0] * n, 1: [8.0] * n}
+    contours = {0: [None] * n, 1: [None] * n}
+    return SimpleNamespace(
+        results_path=str(results_path),
+        animal_kinds=[kind],
+        animal_centers={kind: centers},
+        animal_heights={kind: heights},
+        animal_contours={kind: contours},
+        animal_area={kind: 10.0},
+        fps=10,
+        t=0,
+        length=0,
+        path_to_video="clip.avi",
+        framewidth=None,
+        frameheight=None,
+        duration=0,
+        all_time=list(range(n)),
+        prepare_analysis=MagicMock(),
+        acquire_information=MagicMock(),
+        acquire_information_interact_basic=MagicMock(),
+        craft_data=MagicMock(),
+        detector=None,
+    )
+
+
+def _run_detect_with_stub(
+    tmp_path: Path,
+    *,
+    behavior_mode: int,
+    export_id_review: bool,
+):
+    """Run detect_and_track_video with a stub analyzer (no GPU acquire)."""
+    import sys
+    import types
+
+    video = tmp_path / "clip.avi"
+    video.write_bytes(b"fake")
+    det = _write_detector(tmp_path / "det", names=["mouse"])
+    out = tmp_path / "detection"
+    out.mkdir()
+    results_path = out / "clip"
+    results_path.mkdir()
+    fake_aad = _analyzer_with_tracks(results_path)
+
+    fake_mod = types.ModuleType("LabGym.analyzebehavior_dt")
+    fake_mod.AnalyzeAnimalDetector = MagicMock(return_value=fake_aad)
+    prev = sys.modules.get("LabGym.analyzebehavior_dt")
+    sys.modules["LabGym.analyzebehavior_dt"] = fake_mod
+    try:
+        cfg = DetectTrackConfig(
+            video_path=str(video),
+            detector_path=str(det),
+            results_root=str(out),
+            animal_kinds=["mouse"],
+            animal_number={"mouse": 2},
+            behavior_mode=behavior_mode,
+            export_id_review=export_id_review,
+            write_default_subjects=False,
+            extract_contact_samples=False,
+        )
+        result = detect_and_track_video(cfg)
+    finally:
+        if prev is None:
+            sys.modules.pop("LabGym.analyzebehavior_dt", None)
+        else:
+            sys.modules["LabGym.analyzebehavior_dt"] = prev
+    return result, fake_aad, results_path / "id_review"
+
+
+@pytest.mark.parametrize("mode", [0, 2])
+def test_detect_writes_raw_even_if_export_disabled(tmp_path: Path, mode: int):
+    from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
+    from LabGym.id_review.raw_store import has_accepted_identities, has_raw_snapshot
+
+    result, fake_aad, id_review = _run_detect_with_stub(
+        tmp_path, behavior_mode=mode, export_id_review=False
+    )
+    assert result.ok is True, result.error
+    assert has_raw_snapshot(id_review) is True
+    assert discover_tracklet_kinds(id_review) == []
+    assert has_accepted_identities(id_review) is False
+    assert (id_review / "raw" / "mouse_tracklets.npz").is_file()
+    fake_aad.acquire_information.assert_called_once()
+    fake_aad.craft_data.assert_called_once()
+
+
+def test_detect_interactive_basic_does_not_write_identity_package(tmp_path: Path):
+    from LabGym.id_review.raw_store import has_accepted_identities, has_raw_snapshot
+
+    result, fake_aad, id_review = _run_detect_with_stub(
+        tmp_path, behavior_mode=1, export_id_review=True
+    )
+    assert result.ok is True, result.error
+    assert result.id_review_dir == ""
+    assert has_raw_snapshot(id_review) is False
+    assert has_accepted_identities(id_review) is False
+    assert not id_review.is_dir()
+    assert not (id_review / "raw" / "mouse_tracklets.npz").is_file()
+    fake_aad.acquire_information_interact_basic.assert_called_once()
+    fake_aad.acquire_information.assert_not_called()
+    fake_aad.craft_data.assert_not_called()

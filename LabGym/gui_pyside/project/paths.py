@@ -30,6 +30,7 @@ class ResolvedVideoContext:
     annotations_exists: bool
     tracklets_dir: str
     tracklets_exists: bool
+    accepted_identities: bool
     examples_out_dir: str
     behavior_mode: int
     exclusive_mode: bool
@@ -42,7 +43,12 @@ class ResolvedVideoContext:
     background_free: bool
 
     def summary_lines(self) -> List[str]:
-        tr = "yes" if self.tracklets_exists else "missing"
+        if self.accepted_identities:
+            tr = "accepted"
+        elif self.tracklets_exists:
+            tr = "raw only — save Review IDs"
+        else:
+            tr = "missing"
         ann = "yes" if self.annotations_exists else "missing"
         return [
             f"Video: {self.video_path or '—'}",
@@ -122,7 +128,14 @@ def _dir_has_tracklet_markers(directory: Path) -> bool:
     if not directory.is_dir():
         return False
     # Cheap exact files first
-    for name in ("meta.json", "events.json", "switches.json", "subjects.json"):
+    for name in (
+        "meta.json",
+        "events.json",
+        "switches.json",
+        "subjects.json",
+        "detect_track_job.json",
+        "tracklets_identity_status.json",
+    ):
         if (directory / name).is_file():
             return True
     # Short-circuiting globs (do not materialize full lists)
@@ -241,6 +254,14 @@ def resolve_video_context(
     tracks = discover_tracklets_dir(project, vp) if vp else ""
     examples = examples_out_dir_for(project, vp)
     d = project.defaults
+    accepted = False
+    mode = int(d.behavior_mode)
+    if tracks:
+        from LabGym.id_review.raw_store import has_accepted_identities
+        from LabGym.identity.package import behavior_mode_from_package
+
+        accepted = has_accepted_identities(tracks)
+        mode = behavior_mode_from_package(tracks, fallback=mode)
     return ResolvedVideoContext(
         video_path=vp,
         video_entry=entry,
@@ -248,8 +269,9 @@ def resolve_video_context(
         annotations_exists=bool(ann) and Path(ann).is_file(),
         tracklets_dir=tracks,
         tracklets_exists=bool(tracks) and Path(tracks).is_dir(),
+        accepted_identities=accepted,
         examples_out_dir=examples,
-        behavior_mode=int(d.behavior_mode),
+        behavior_mode=mode,
         exclusive_mode=bool(d.exclusive_mode),
         window_length=int(d.window_length),
         sampling=str(d.sampling),

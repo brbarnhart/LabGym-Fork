@@ -20,12 +20,7 @@ from .types import (
 	swap_mapping,
 )
 from .contacts import detect_contact_events
-from .tracklets import (
-	tracklets_from_analyzer_all,
-	save_tracklets,
-	load_tracklets,
-	apply_mapping_to_store,
-)
+from .tracklets import tracklets_from_analyzer_all
 from .samples import export_event_samples, export_switch_samples
 from .apply import (
 	apply_decisions_to_analyzer,
@@ -39,25 +34,55 @@ def review_dir(results_path: str) -> str:
 
 
 def export_review_pack(
-	analyzer,
+	analyzer: Any,
 	config: Optional[ContactDetectorConfig] = None,
 	extract_samples: bool = True,
 ) -> Tuple[str, List[ContactEvent]]:
-	'''
-	After craft_data: save tracklets, detect contacts, write events.jsonl + samples.
+	'''Write raw tracklets and contact events after Detect + track.
 
-	Returns (id_review_directory, events).
+	If the package already has accepted identities or a raw snapshot,
+	resets it (unpublish remapped, clear switches) before writing the new
+	raw snapshot. Public remapped files are not written here.
+
+	Args:
+		analyzer: Detector analyzer after ``craft_data`` (needs
+			``results_path`` and per-kind track geometry).
+		config: Contact-event detector settings. Defaults are used when omitted.
+		extract_samples: When True, write per-event sample clips if a video path
+			is available.
+
+	Returns:
+		Tuple of ``(id_review_directory, events)``.
 	'''
 	config = config or ContactDetectorConfig()
 	out_dir = review_dir(analyzer.results_path)
 	os.makedirs(out_dir, exist_ok=True)
 
 	print('ID review: exporting tracklets...', flush=True)
+	from .apply import write_tracklets_identity_status
+	from .raw_store import (
+		has_accepted_identities,
+		has_raw_snapshot,
+		reset_identity_package_for_new_detect,
+		save_raw_tracklets,
+	)
+
 	stores = tracklets_from_analyzer_all(analyzer)
+	if has_accepted_identities(out_dir) or has_raw_snapshot(out_dir):
+		reset_identity_package_for_new_detect(out_dir)
+	if stores:
+		save_raw_tracklets(out_dir, stores)
+	write_tracklets_identity_status(
+		out_dir,
+		corrected=False,
+		accepted=False,
+		has_raw=bool(stores),
+		n_decisions=0,
+		source='detect_track',
+	)
 	for kind, store in stores.items():
-		save_tracklets(store, out_dir)
 		print(
-			f'ID review: saved tracklets for {kind} '
+			f'ID review: saved raw tracklets for {kind} '
 			f'({len(store.ids)} ids, {store.n_frames} frames)',
 			flush=True,
 		)
@@ -466,13 +491,7 @@ def run_id_review_pipeline(
 	# Re-export tracklets AFTER remaps so annotator / ethogram tools load corrected IDs.
 	# Previously only in-memory analyzer state was remapped; disk npz stayed uncorrected.
 	try:
-		_resave_tracklets_after_id_review(
-			analyzer,
-			out_dir,
-			all_decisions,
-			kind_lookup=kind_lookup,
-			applied=applied,
-		)
+		_resave_tracklets_after_id_review(out_dir, all_decisions)
 	except Exception as exc:
 		print(
 			f'ID review: WARNING — failed to re-save corrected tracklets: {exc}',
@@ -483,90 +502,23 @@ def run_id_review_pipeline(
 
 
 def _resave_tracklets_after_id_review(
-	analyzer,
 	out_dir: str,
 	all_decisions: Sequence[ReviewDecision],
-	*,
-	kind_lookup: Optional[Dict[str, str]] = None,
-	applied: Optional[Sequence[ReviewDecision]] = None,
 ) -> None:
+	'''Publish remapped tracklets from raw via the shared identity-package path.
+
+	Empty switch lists still write public remapped files equal to raw. Does not
+	use analyzer series or public remapped files as the remap baseline.
 	'''
-	Write remapped tracklets to id_review so Behavior Annotator sees fixed IDs.
+	from LabGym.identity.package import apply_decisions_and_save_tracklets
 
-	Primary path: rebuild stores from the (already remapped) analyzer.
-	Fallback: load disk stores and apply decisions via apply_mapping_to_store.
-	'''
-	from .apply import (
-		apply_decisions_to_store,
-		write_tracklets_identity_status,
-	)
-	from .tracklets import (
-		tracklets_from_analyzer_all,
-		save_tracklets,
-		load_tracklets,
-	)
-
-	applied = list(applied or [])
-	n_applied = len(applied)
-
-	# Preferred: analyzer already has remapped per-frame series
-	try:
-		stores = tracklets_from_analyzer_all(analyzer)
-		if stores:
-			for kind, store in stores.items():
-				save_tracklets(store, out_dir)
-				print(
-					f'ID review: re-saved corrected tracklets for {kind} '
-					f'({len(store.ids)} ids, {store.n_frames} frames, '
-					f'{n_applied} remap decision(s) applied in analyzer)',
-					flush=True,
-				)
-			write_tracklets_identity_status(
-				out_dir,
-				corrected=True,
-				n_decisions=n_applied,
-				source='analyzer_after_remap',
-			)
-			return
-	except Exception as exc:
-		print(
-			f'ID review: analyzer rebuild failed ({exc}); '
-			'falling back to on-disk remap…',
-			flush=True,
-		)
-
-	# Fallback: remap existing npz files
-	# Discover kinds from directory
-	kinds = []
-	for name in os.listdir(out_dir):
-		if name.endswith('_tracklets_meta.json'):
-			kinds.append(name[: -len('_tracklets_meta.json')])
-	if not kinds and getattr(analyzer, 'animal_kinds', None):
-		kinds = list(analyzer.animal_kinds)
-
-	# Group decisions by kind when possible
-	for kind in kinds:
-		try:
-			store = load_tracklets(out_dir, kind)
-		except Exception:
-			continue
-		# Prefer decisions that match this kind via lookup; else try all
-		kind_decs = []
-		for d in all_decisions:
-			k = (kind_lookup or {}).get(d.event_id)
-			if k is None or k == kind:
-				kind_decs.append(d)
-		n = apply_decisions_to_store(store, kind_decs, animal_kind=kind)
-		save_tracklets(store, out_dir)
-		print(
-			f'ID review: re-saved disk-remapped tracklets for {kind} '
-			f'({n} decision(s) applied to store)',
-			flush=True,
-		)
-
-	write_tracklets_identity_status(
+	n = apply_decisions_and_save_tracklets(
 		out_dir,
-		corrected=True,
-		n_decisions=n_applied,
-		source='disk_remap_fallback',
+		all_decisions,
+		source='analyzer_after_remap',
+	)
+	print(
+		f'ID review: published remapped tracklets from raw '
+		f'({n} remap decision(s) applied)',
+		flush=True,
 	)

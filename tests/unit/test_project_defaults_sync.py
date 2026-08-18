@@ -95,7 +95,6 @@ def test_process_and_test_tabs_model_defaults(tmp_path: Path):
 
     ctrl = _ctrl(tmp_path)
     proc = ProcessVideosTab(ctrl)
-    assert proc.ed_detector.text() == str(tmp_path / "MyDet")
     assert proc.ed_categorizer.text() == str(tmp_path / "MyCat")
 
     tdet = TestDetectorTab(ctrl)
@@ -109,7 +108,6 @@ def test_process_and_test_tabs_model_defaults(tmp_path: Path):
     proj.defaults.categorizer_name = str(tmp_path / "NewCat")
     ctrl.replace(proj, dirty=True)
 
-    assert proc.ed_detector.text() == str(tmp_path / "NewDet")
     assert proc.ed_categorizer.text() == str(tmp_path / "NewCat")
     assert tdet.ed_det.text() == str(tmp_path / "NewDet")
     assert tcat.ed_model.text() == str(tmp_path / "NewCat")

@@ -19,6 +19,12 @@ from PySide6.QtWidgets import (
 from LabGym.annotator.ui.main_window import MainWindow
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.identity.downstream import (
+    apply_context_to_annotator,
+    may_use_downstream,
+    review_ids_required_message,
+)
+from LabGym.identity.package import has_identity_package
 
 
 class AnnotateEthogramTab(QWidget):
@@ -83,6 +89,7 @@ class AnnotateEthogramTab(QWidget):
         layout.addWidget(self.empty)
 
         self.annotator = MainWindow()
+        self._wire_open_video(self.annotator)
         self.annotator.setParent(self)
         self.annotator.setWindowFlags(Qt.WindowType.Widget)
         self.annotator.statusBar().showMessage(
@@ -162,6 +169,7 @@ class AnnotateEthogramTab(QWidget):
             self._apply_to(self._detached)
             return
         win = MainWindow()
+        self._wire_open_video(win)
         win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         win.destroyed.connect(self._on_detached_closed)
         self._detached = win
@@ -171,6 +179,41 @@ class AnnotateEthogramTab(QWidget):
 
     def _on_detached_closed(self, *_args) -> None:
         self._detached = None
+
+    def _wire_open_video(self, window: MainWindow) -> None:
+        """File → Open must use the same accepted-identities gate as Load."""
+        window.open_video_handler = lambda path, w=window: self._open_video_from_file(
+            w, path
+        )
+
+    def _open_video_from_file(self, window: MainWindow, path: str) -> bool:
+        """Gate File → Open and load through project context (do not skip Review IDs).
+
+        Returns True when the attempt was handled (loaded or refused).
+        """
+        if not path or not Path(path).is_file():
+            QMessageBox.warning(
+                window, "Annotate ethogram", f"Video file not found:\n{path}"
+            )
+            return True
+        ctx = self.project.resolve_context(path)
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+        if not may_use_downstream(
+            int(ctx.behavior_mode),
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
+        ):
+            QMessageBox.warning(
+                window,
+                "Review IDs required",
+                review_ids_required_message(ctx.tracklets_dir),
+            )
+            return True
+        self.project.set_current_video(path, dirty=True)
+        ok = apply_context_to_annotator(window, ctx)
+        if ok:
+            self._update_status_banner()
+        return True
 
     def _apply_to(self, window: MainWindow) -> bool:
         video = self._selected_video_path()
@@ -193,27 +236,20 @@ class AnnotateEthogramTab(QWidget):
         ctx = self.project.resolve_context(video)
         self.project.set_current_video(video, dirty=True)
 
-        ann = ctx.annotations_path if ctx.annotations_path else None
-        # Only pass annotations_path if file exists; otherwise prefer sidecar search
-        ann_arg = ann if (ann and Path(ann).is_file()) else None
-        prefer_sidecar = ann_arg is None
-
-        ok = window.load_video_from_path(
-            video,
-            annotations_path=ann_arg,
-            tracklets_dir=ctx.tracklets_dir or None,
-            behavior_mode=int(ctx.behavior_mode),
-            exclusive_mode=bool(ctx.exclusive_mode),
-            prefer_sidecar=prefer_sidecar,
-        )
-        if ok and ctx.tracklets_dir and window._loaded_tracklets is None:
-            window.load_tracklets_from_path(ctx.tracklets_dir)
-        if ok:
-            note = ""
-            if not ctx.tracklets_exists:
-                note = "  ·  No tracklets found (ID dots optional; Detect/Review later)."
-            window.statusBar().showMessage(
-                f"Loaded project video{note}  ·  mode={ctx.behavior_mode}"
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+        if not may_use_downstream(
+            int(ctx.behavior_mode),
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
+        ):
+            QMessageBox.warning(
+                self,
+                "Review IDs required",
+                review_ids_required_message(ctx.tracklets_dir),
             )
+            return False
+
+        ok = apply_context_to_annotator(window, ctx)
+        if ok:
             self._update_status_banner()
         return ok

@@ -45,6 +45,10 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
 )
 from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+    DownstreamArtifactCheck,
+    check_downstream_artifacts,
+    should_confirm_stale_downstream,
+    video_path_for_review_package,
     clone_markers,
     events_for_kind,
     load_review_package,
@@ -62,6 +66,11 @@ from LabGym.gui_pyside.workbenches.detector.risk_timeline import RiskTimeline
 from LabGym.gui_pyside.workbenches.detector.subjects_table import SubjectsTable
 from LabGym.id_review.dataset import make_swap_marker
 from LabGym.id_review.types import ContactEvent, SwitchMarker
+from LabGym.identity.package import (
+    migrate_uncorrected_public_to_raw,
+    needs_uncorrected_raw_migrate,
+    switch_edits_allowed,
+)
 
 
 class _HardCaseExtractWorker(QObject):
@@ -140,6 +149,8 @@ class ReviewIdsTab(QWidget):
         self.min_risk = 0.0
         self._dirty = False
         self._already_corrected = False
+        self._has_raw = False
+        self._package_video_path = ""
         self._training_ranges: List[AnalysisFrameRange] = []
         self._range_start: Optional[int] = None
         self._extract_thread: Optional[QThread] = None
@@ -414,8 +425,8 @@ class ReviewIdsTab(QWidget):
             "Save package (switches + remapped tracklets + subjects)"
         )
         self.btn_save.setToolTip(
-            "Finalize switch markers, re-save corrected tracklets from original "
-            "geometry, write subjects.json"
+            "Finalize switch markers, rebuild remapped tracklets from the raw "
+            "snapshot, write subjects.json. Required before annotate / process."
         )
         self.btn_save.clicked.connect(self.save_package)
         save_row.addWidget(self.btn_save)
@@ -500,6 +511,7 @@ class ReviewIdsTab(QWidget):
             self, start, "Select id_review / tracklets folder"
         )
         if d:
+            self._package_video_path = ""
             self.load_package(d)
 
     def _load_selected_video_package(self) -> None:
@@ -518,6 +530,7 @@ class ReviewIdsTab(QWidget):
             )
             return
         self.project.set_current_video(str(path), dirty=True)
+        self._package_video_path = str(path)
         from LabGym.gui_pyside.project.paths import find_video_entry
 
         entry = find_video_entry(self.project.project, str(path))
@@ -540,7 +553,33 @@ class ReviewIdsTab(QWidget):
         self.load_package(tracks)
 
     def load_package(self, review_dir: str) -> bool:
+        """Open an identity package for preview and switch-marker edits.
+
+        Offers migrate-to-raw when an uncorrected public pack has no raw
+        snapshot. Declining leaves files unchanged and keeps switch edits
+        locked.
+
+        Args:
+            review_dir: Path to the ``id_review`` package directory.
+
+        Returns:
+            True if the package loaded; False if load failed after a warning.
+        """
         self._release_cap()
+        if needs_uncorrected_raw_migrate(review_dir):
+            reply = QMessageBox.question(
+                self,
+                "Move tracklets into raw?",
+                "This package has public tracklets but no raw snapshot. "
+                "That can mean the data is in a bad state.\n\n"
+                "Move the public tracklets into raw so switch edits can be "
+                "rebuilt later? Declining leaves the files unchanged and "
+                "keeps switch edits locked.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                migrate_uncorrected_public_to_raw(review_dir)
         try:
             pkg = load_review_package(review_dir)
         except (FileNotFoundError, ValueError) as exc:
@@ -555,6 +594,7 @@ class ReviewIdsTab(QWidget):
         self._stores = pkg.stores
         self._baseline_stores = pkg.baseline_stores
         self._already_corrected = pkg.already_corrected
+        self._has_raw = bool(pkg.has_raw)
         self.animal_kind = pkg.animal_kind
         self.n_frames = pkg.n_frames
         store = self._stores[self.animal_kind]
@@ -577,12 +617,25 @@ class ReviewIdsTab(QWidget):
         self.subjects_table.set_subjects(pkg.subjects)
         self.slider.setMaximum(max(0, self.n_frames - 1))
         self.setEnabled_controls(True)
-        corr = "corrected" if self._already_corrected else "not yet remapped on disk"
-        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  tracklets: {corr}")
+        self._set_switch_edits_enabled(switch_edits_allowed(self.review_dir))
+        self._set_package_label(accepted=pkg.accepted, has_raw=self._has_raw)
         self._seek(0)
         self._refresh_marker_list()
         self._update_undo_button()
         return True
+
+    def _set_switch_edits_enabled(self, on: bool) -> None:
+        for w in (self.btn_mark, self.btn_remove, self.btn_del, self.btn_undo):
+            w.setEnabled(on)
+
+    def _set_package_label(self, *, accepted: bool, has_raw: bool) -> None:
+        if accepted:
+            state = "accepted identities"
+        elif has_raw:
+            state = "raw only — save to accept"
+        else:
+            state = "no raw — switch edits locked"
+        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  {state}")
 
     def _refresh_id_combos(self) -> None:
         store = self._stores.get(self.animal_kind)
@@ -984,7 +1037,8 @@ class ReviewIdsTab(QWidget):
         self._update_undo_button()
 
     def _update_undo_button(self) -> None:
-        self.btn_undo.setEnabled(bool(self._undo_stack))
+        allowed = bool(self.review_dir) and switch_edits_allowed(self.review_dir)
+        self.btn_undo.setEnabled(allowed and bool(self._undo_stack))
 
     def _mark_dirty(self) -> None:
         self._dirty = True
@@ -1000,18 +1054,27 @@ class ReviewIdsTab(QWidget):
     def _refresh_marker_list(self) -> None:
         self.markers_panel.set_markers(self.markers)
 
+    def _switch_edits_blocked_message(self) -> bool:
+        """Return True when switch-list mutations are locked (no raw)."""
+        if not self.review_dir:
+            return True
+        if switch_edits_allowed(self.review_dir):
+            return False
+        QMessageBox.information(
+            self,
+            "No raw tracklets",
+            "This package has no raw snapshot, so switch markers cannot "
+            "be changed (add, delete, or undo).\n"
+            "You can still edit names/roles and save subjects.json.\n\n"
+            "To mark new ID swaps, re-run Detect + track (a new tracking "
+            "world) and review again.",
+        )
+        return True
+
     def _mark_swap(self) -> None:
         if not self.review_dir:
             return
-        if self._already_corrected:
-            QMessageBox.information(
-                self,
-                "Tracklets already corrected",
-                "This package’s tracklets were already remapped on disk.\n"
-                "You can still edit names/roles and save subjects.json.\n\n"
-                "To mark new ID swaps against raw tracks, re-export tracklets "
-                "from Detect + track (or restore an uncorrected package).",
-            )
+        if self._switch_edits_blocked_message():
             return
         ids = self._selected_swap_ids()
         if len(ids) != 2 or ids[0] == ids[1]:
@@ -1047,6 +1110,8 @@ class ReviewIdsTab(QWidget):
         self._apply_marker_change()
 
     def _delete_selected_marker(self) -> None:
+        if self._switch_edits_blocked_message():
+            return
         mid = self.markers_panel.selected_marker_id()
         if not mid:
             if self._remove_at_current_frame(silent_if_none=True):
@@ -1057,11 +1122,15 @@ class ReviewIdsTab(QWidget):
                 "Select a marker in the list, or move to a marked frame and remove.",
             )
             return
+        if not self._confirm_nontail_marker_edit(mid):
+            return
         self._push_undo()
         self.markers = [m for m in self.markers if m.marker_id != mid]
         self._apply_marker_change()
 
     def _remove_at_current_frame(self, silent_if_none: bool = False) -> bool:
+        if self._switch_edits_blocked_message():
+            return False
         to_remove = [
             m
             for m in self.markers
@@ -1073,13 +1142,39 @@ class ReviewIdsTab(QWidget):
                     self, "Nothing to remove", f"No switch marker at frame {self.frame}."
                 )
             return False
+        if any(not self._marker_is_last(m.marker_id) for m in to_remove):
+            if not self._warn_nontail_edit():
+                return False
         self._push_undo()
         ids = {m.marker_id for m in to_remove}
         self.markers = [m for m in self.markers if m.marker_id not in ids]
         self._apply_marker_change()
         return True
 
+    def _marker_is_last(self, marker_id: str) -> bool:
+        ordered = sorted(self.markers, key=lambda x: (x.frame, x.marker_id))
+        return bool(ordered) and ordered[-1].marker_id == marker_id
+
+    def _warn_nontail_edit(self) -> bool:
+        reply = QMessageBox.question(
+            self,
+            "Earlier switch marker",
+            "This marker is not the last one on the timeline. Later switches "
+            "were set while it was applied and may now be wrong.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _confirm_nontail_marker_edit(self, marker_id: str) -> bool:
+        if self._marker_is_last(marker_id):
+            return True
+        return self._warn_nontail_edit()
+
     def _undo(self) -> None:
+        if self._switch_edits_blocked_message():
+            return
         if not self._undo_stack:
             QMessageBox.information(self, "Undo", "Nothing to undo.")
             return
@@ -1132,10 +1227,34 @@ class ReviewIdsTab(QWidget):
     # --- save ---
 
     def save_package(self) -> None:
+        """Publish remapped tracklets after a fail-closed stale-file check."""
         if not self.review_dir:
             QMessageBox.information(self, "Save", "Load a package first.")
             return
         self._stop_play()
+        from LabGym.id_review.raw_store import has_raw_snapshot
+
+        will_rebuild = has_raw_snapshot(self.review_dir)
+        store_meta = {}
+        if self.animal_kind in self._stores:
+            store_meta = dict(getattr(self._stores[self.animal_kind], "meta", {}) or {})
+        video = video_path_for_review_package(
+            self.review_dir,
+            project=self.project.project,
+            hinted_video=self._package_video_path,
+            store_meta=store_meta,
+            events=self.events,
+        )
+        if will_rebuild:
+            downstream = check_downstream_artifacts(
+                self.project.project, video_path=video
+            )
+            if should_confirm_stale_downstream(
+                will_rebuild=True, check=downstream
+            ) and not self._confirm_stale_downstream(downstream):
+                return
+        else:
+            downstream = DownstreamArtifactCheck(check_failed=False)
         result = save_review_package(
             self.review_dir,
             self.markers,
@@ -1147,23 +1266,65 @@ class ReviewIdsTab(QWidget):
         if not result.ok:
             QMessageBox.critical(self, "Save failed", result.error)
             return
-        self._already_corrected = result.already_corrected
+        self._already_corrected = bool(result.already_corrected)
+        self._has_raw = bool(result.has_raw)
         if result.stores:
             self._stores = result.stores
             self._baseline_stores = result.baseline_stores
         self._dirty = False
-        self.lbl_pkg.setText(f"Package: {self.review_dir}  ·  tracklets: corrected")
+        self._set_package_label(accepted=result.accepted, has_raw=self._has_raw)
+        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
+
+        clear_tracklets_discovery_cache()
         self.package_saved.emit(self.review_dir)
-        QMessageBox.information(
-            self,
-            "Saved",
-            f"Saved identity package:\n{self.review_dir}\n\n"
-            f"Switches: {len(self.markers)}\n"
-            f"{result.remap_note}"
-            f"Subjects: {result.n_subjects}\n\n"
-            "Annotate ethogram will pick up names/colors on next load.",
-        )
+        extra_lines = downstream.note_lines()
+        extra = ("\n\n" + "\n".join(extra_lines)) if extra_lines else ""
+        if result.accepted:
+            body = (
+                f"Saved accepted identities:\n{self.review_dir}\n\n"
+                f"Switches: {len(self.markers)}\n"
+                f"{result.remap_note}"
+                f"Subjects: {result.n_subjects}\n\n"
+                "Annotate ethogram, generate examples, and Process videos can "
+                f"use this package.{extra}"
+            )
+        else:
+            body = (
+                f"Saved names/roles (no remapped publish):\n{self.review_dir}\n\n"
+                f"{result.remap_note}"
+                f"Subjects: {result.n_subjects}.{extra}"
+            )
+        QMessageBox.information(self, "Saved", body)
         self._render()
+
+    def _confirm_stale_downstream(self, check: DownstreamArtifactCheck) -> bool:
+        """Ask before save when artifacts exist or the lookup failed (default No)."""
+        if not check.requires_confirm:
+            return True
+        notes = "\n".join(check.note_lines())
+        if check.check_failed:
+            detail = (
+                f"{notes}\n\n"
+                "Saving will rebuild remapped tracklets. Existing ethogram "
+                "or example-store files, if any, will not be updated and "
+                "may now describe the wrong animals.\n\n"
+                "Save anyway?"
+            )
+        else:
+            detail = (
+                f"{notes}\n\n"
+                "Saving will rebuild remapped tracklets. Those files "
+                "will not be updated and may now describe the wrong animals.\n\n"
+                "Save anyway?"
+            )
+        reply = QMessageBox.question(
+            self,
+            "Existing annotations or examples",
+            detail,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def closeEvent(self, event) -> None:
         self._stop_play()

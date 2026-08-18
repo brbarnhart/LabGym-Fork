@@ -1,21 +1,51 @@
 """Identity package helpers (tracklets + subjects.json)."""
 
+from .downstream import (
+    apply_context_to_annotator,
+    may_open_video_for_annotation,
+    may_use_downstream,
+    review_ids_required_message,
+)
 from .package import (
+    DETECT_JOB_FILENAME,
     SUBJECTS_FILENAME,
     SubjectRecord,
     apply_decisions_and_save_tracklets,
+    behavior_mode_from_package,
+    discover_identity_package_for_video,
+    has_identity_package,
     load_subjects,
     merge_subjects_into_loaded,
+    migrate_uncorrected_public_to_raw,
+    needs_uncorrected_raw_migrate,
+    read_detect_behavior_mode,
+    read_detect_job_video,
     save_subjects,
     subjects_from_track_ids,
+    switch_edits_allowed,
+    writes_identity_package,
 )
 
 __all__ = [
+    "DETECT_JOB_FILENAME",
     "SUBJECTS_FILENAME",
     "SubjectRecord",
+    "apply_context_to_annotator",
     "apply_decisions_and_save_tracklets",
+    "behavior_mode_from_package",
+    "discover_identity_package_for_video",
+    "has_identity_package",
     "load_subjects",
+    "may_open_video_for_annotation",
+    "may_use_downstream",
+    "review_ids_required_message",
     "merge_subjects_into_loaded",
+    "migrate_uncorrected_public_to_raw",
+    "needs_uncorrected_raw_migrate",
+    "read_detect_behavior_mode",
+    "read_detect_job_video",
     "save_subjects",
     "subjects_from_track_ids",
+    "switch_edits_allowed",
+    "writes_identity_package",
 ]

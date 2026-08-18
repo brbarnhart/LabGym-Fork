@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QSettings
@@ -62,6 +62,10 @@ class MainWindow(QMainWindow):
         self._bout_list_window: Optional[QDialog] = None
         self._loaded_tracklets: Optional[LoadedTracklets] = None
         self._show_track_overlays = True
+        # Workbench sets this so File → Open uses the project identity gate.
+        # Signature: handler(path) -> True if the video was handled (loaded or
+        # refused); False to fall through to the standalone loader.
+        self.open_video_handler: Optional[Callable[[str], bool]] = None
 
         self._build_ui()
         self._setup_shortcuts()
@@ -499,6 +503,19 @@ class MainWindow(QMainWindow):
             "Video Files (*.mp4 *.avi *.mov *.mkv *.mpg *.mpeg);;All Files (*)"
         )
         if not path:
+            return
+        if self.open_video_handler is not None:
+            if self.open_video_handler(path):
+                return
+        from LabGym.identity.downstream import (
+            may_open_video_for_annotation,
+            review_ids_required_message,
+        )
+        from LabGym.identity.package import discover_identity_package_for_video
+
+        if not may_open_video_for_annotation(path):
+            pkg = discover_identity_package_for_video(path)
+            QMessageBox.warning(self, "Review IDs required", review_ids_required_message(pkg))
             return
         self.load_video_from_path(path)
 

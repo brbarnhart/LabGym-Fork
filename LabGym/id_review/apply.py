@@ -202,31 +202,67 @@ def write_tracklets_identity_status(
 	corrected: bool,
 	n_decisions: int = 0,
 	source: str = '',
+	accepted: Optional[bool] = None,
+	has_raw: Optional[bool] = None,
 ) -> str:
-	'''Mark whether on-disk tracklets already include ID remaps.'''
+	'''Mark whether remapped tracklets are published (accepted identities).
+
+	``corrected`` is kept as a deprecated alias of ``accepted`` so older
+	readers still work. When ``accepted`` is omitted it follows ``corrected``.
+	'''
 	os.makedirs(directory, exist_ok=True)
 	path = os.path.join(directory, 'tracklets_identity_status.json')
+	accepted_val = bool(corrected) if accepted is None else bool(accepted)
 	payload = {
-		'corrected': bool(corrected),
+		'corrected': accepted_val,
+		'accepted': accepted_val,
 		'n_decisions': int(n_decisions),
 		'source': source,
 	}
+	if has_raw is not None:
+		payload['has_raw'] = bool(has_raw)
 	with open(path, 'w', encoding='utf-8') as f:
 		json.dump(payload, f, indent=2)
 	return path
 
 
 def read_tracklets_identity_status(directory: str) -> Dict[str, Any]:
+	'''Read published remapped / accepted-identities status for a package.
+
+	Missing or unreadable files fail closed: ``accepted`` and ``has_raw``
+	are False.
+
+	Args:
+		directory: Identity package directory that may contain
+			``tracklets_identity_status.json``.
+
+	Returns:
+		Dict with ``accepted``, ``corrected`` (alias of accepted),
+		``n_decisions``, ``source``, and ``has_raw``.
+	'''
 	path = os.path.join(directory, 'tracklets_identity_status.json')
+	empty = {
+		'corrected': False,
+		'accepted': False,
+		'n_decisions': 0,
+		'source': '',
+		'has_raw': False,
+	}
 	if not os.path.isfile(path):
-		return {'corrected': False, 'n_decisions': 0, 'source': ''}
+		return empty
 	try:
 		with open(path, 'r', encoding='utf-8') as f:
 			d = json.load(f)
+		if 'accepted' in d:
+			accepted = bool(d.get('accepted'))
+		else:
+			accepted = bool(d.get('corrected', False))
 		return {
-			'corrected': bool(d.get('corrected', False)),
+			'corrected': accepted,
+			'accepted': accepted,
 			'n_decisions': int(d.get('n_decisions') or 0),
 			'source': str(d.get('source') or ''),
+			'has_raw': bool(d.get('has_raw', False)),
 		}
 	except Exception:
-		return {'corrected': False, 'n_decisions': 0, 'source': ''}
+		return dict(empty)

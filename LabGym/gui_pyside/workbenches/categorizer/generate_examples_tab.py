@@ -26,6 +26,8 @@ from PySide6.QtWidgets import (
 from LabGym.annotator.core.annotation_manager import AnnotationManager
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.identity.downstream import may_use_downstream
+from LabGym.identity.package import has_identity_package
 from LabGym.training.ethogram_examples import GenerationConfig, generate_examples_from_ethogram
 
 
@@ -297,8 +299,15 @@ class GenerateExamplesTab(QWidget):
             warnings.append("Video file missing on disk")
         if ctx.video_path and not ctx.annotations_exists:
             warnings.append("Annotations missing — annotate and save first")
-        if ctx.video_path and not ctx.tracklets_exists:
-            warnings.append("Tracklets folder not found — need post–ID-review tracklets")
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+        if ctx.video_path and not may_use_downstream(
+            int(ctx.behavior_mode),
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
+        ):
+            warnings.append(
+                "Accepted identities missing — save Review IDs before generating"
+            )
         if warnings:
             html += "<br><br><span style='color:#f6a'>" + " · ".join(warnings) + "</span>"
         self.lbl_summary.setText(html)
@@ -323,24 +332,29 @@ class GenerateExamplesTab(QWidget):
             )
             self.request_annotate.emit()
             return
-        if not ctx.tracklets_exists:
-            QMessageBox.warning(
-                self,
-                "Generate",
-                "Tracklets folder not found.\n"
-                "Point detection_dir on the video in Edit project, or place "
-                "id_review tracklets next to the video / under the project "
-                "detection root.\n\n"
-                f"Searched relative to:\n{ctx.video_path}",
-            )
-            return
-
         behavior_mode = int(ctx.behavior_mode)
         try:
             sess = AnnotationManager.load_from_json(ctx.annotations_path).session
-            behavior_mode = int(sess.behavior_mode)
-        except Exception:
+            if not (ctx.tracklets_dir and has_identity_package(ctx.tracklets_dir)):
+                behavior_mode = int(sess.behavior_mode)
+        except (OSError, ValueError, KeyError, TypeError):
             pass
+
+        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
+        if not may_use_downstream(
+            behavior_mode,
+            bool(ctx.accepted_identities),
+            identity_package=pkg,
+        ):
+            QMessageBox.warning(
+                self,
+                "Generate",
+                "Accepted identities are required.\n"
+                "Open Detector → Review IDs, review or accept the detector "
+                "IDs, and save.\n\n"
+                f"Package:\n{ctx.tracklets_dir or '(none found)'}",
+            )
+            return
 
         cfg = GenerationConfig(
             video_path=ctx.video_path,

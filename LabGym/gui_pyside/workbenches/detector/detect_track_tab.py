@@ -7,7 +7,6 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -79,8 +78,9 @@ class DetectTrackTab(QWidget):
 
         intro = QLabel(
             "Run the LabGym detector to <b>detect and track</b> animals on project "
-            "videos. Writes identity packages (<code>id_review/</code> with tracklets "
-            "+ contact-risk events) for later Review IDs. One video at a time."
+            "videos. Writes <b>raw tracklets</b> under <code>id_review/raw/</code> "
+            "plus contact-risk events. Save Review IDs before annotate / process. "
+            "One video at a time."
         )
         intro.setWordWrap(True)
         intro.setTextFormat(Qt.TextFormat.RichText)
@@ -136,8 +136,8 @@ class DetectTrackTab(QWidget):
         # Params
         p_box = QGroupBox("Tracking parameters")
         p_box.setToolTip(
-            "Controls how far/how long tracking runs and how identity packages "
-            "are exported for later ID review."
+            "Controls how far/how long tracking runs. Per-animal modes write "
+            "an identity package (raw tracklets) for later ID review."
         )
         p_form = QFormLayout(p_box)
         self.spin_animals = QSpinBox()
@@ -161,7 +161,8 @@ class DetectTrackTab(QWidget):
             "tracking; recommended for most ID-review work).\n"
             "• 2 Interactive advanced — tracking suited to social/interaction "
             "setups (main animal + nearby others / costars).\n"
-            "Mode 1 (interactive basic) is not used here for batch package export."
+            "Mode 1 (interactive basic) is not used here: it has no per-animal "
+            "IDs and writes no identity package."
         )
         self.combo_mode.setToolTip(tip_mode)
         p_form.addRow(self._lab("Behavior mode:", tip_mode), self.combo_mode)
@@ -237,17 +238,6 @@ class DetectTrackTab(QWidget):
         )
         self.spin_fw.setToolTip(tip_fw)
         p_form.addRow(self._lab("Frame width (resize):", tip_fw), self.spin_fw)
-
-        self.chk_export = QCheckBox("Export id_review package (tracklets + contact risk)")
-        self.chk_export.setChecked(True)
-        tip_export = (
-            "When checked (recommended), writes an identity package under "
-            "detection/<video_stem>/id_review/ with tracklets, contact-risk "
-            "events, and default subjects.json for Review IDs and annotation. "
-            "Uncheck only if you only want intermediate analysis folders."
-        )
-        self.chk_export.setToolTip(tip_export)
-        p_form.addRow(self.chk_export)
 
         self.spin_contact = QDoubleSpinBox()
         self.spin_contact.setRange(0.1, 20.0)
@@ -525,6 +515,8 @@ class DetectTrackTab(QWidget):
                 self, "Detect + track", "Select at least one project video."
             )
             return
+        if not self._confirm_overwrite_identity_packages(videos):
+            return
 
         # Block table rebuilds for the whole batch (including mark_dirty below).
         self._batch_active = True
@@ -565,7 +557,6 @@ class DetectTrackTab(QWidget):
                 duration=float(self.spin_duration.value()),
                 length=int(self.spin_length.value()),
                 detector_batch=int(self.spin_batch.value()),
-                export_id_review=self.chk_export.isChecked(),
                 contact_distance_factor=float(self.spin_contact.value()),
             )
             # Expand animal_number to each kind
@@ -583,6 +574,35 @@ class DetectTrackTab(QWidget):
         dlg = self._ensure_progress_dialog()
         dlg.begin_batch(len(items))
         self.queue.start(items, runner)
+
+    def _confirm_overwrite_identity_packages(self, videos: List[str]) -> bool:
+        """Warn when re-detect would replace accepted identities or switches."""
+        from LabGym.id_review.dataset import load_switches
+        from LabGym.id_review.raw_store import has_accepted_identities
+
+        at_risk: List[str] = []
+        for path in videos:
+            pkg = discover_tracklets_dir(self.project.project, path)
+            if not pkg:
+                continue
+            if has_accepted_identities(pkg) or load_switches(pkg):
+                at_risk.append(Path(path).name)
+        if not at_risk:
+            return True
+        names = "\n".join(f"  • {n}" for n in at_risk[:12])
+        extra = "" if len(at_risk) <= 12 else f"\n  … and {len(at_risk) - 12} more"
+        reply = QMessageBox.question(
+            self,
+            "Replace identity review?",
+            "Re-running Detect + track is a new tracking world. For:\n"
+            f"{names}{extra}\n\n"
+            "raw tracklets will be replaced, remapped tracklets unpublished, "
+            "and switch markers cleared. Annotate / generate / Process videos "
+            "will be blocked until you save Review IDs again.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return reply == QMessageBox.StandardButton.Yes
 
     def _ensure_progress_dialog(self) -> DetectTrackProgressDialog:
         if self._progress_dlg is None:

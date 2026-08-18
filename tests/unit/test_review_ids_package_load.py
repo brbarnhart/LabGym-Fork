@@ -51,10 +51,11 @@ def test_load_review_package_happy(tmp_path: Path):
     from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
         load_review_package,
     )
+    from LabGym.id_review.raw_store import save_raw_tracklets
 
     review = tmp_path / "id_review"
     review.mkdir()
-    save_tracklets(_minimal_store(), str(review))
+    save_raw_tracklets(review, {"mouse": _minimal_store()})
     # empty events/switches optional files — load_events/load_switches tolerate missing
     (review / "events.json").write_text("[]", encoding="utf-8")
     (review / "switches.json").write_text("[]", encoding="utf-8")
@@ -67,7 +68,58 @@ def test_load_review_package_happy(tmp_path: Path):
     assert pkg.n_frames == 8
     assert pkg.fps == 10.0
     assert pkg.already_corrected is False
+    assert pkg.has_raw is True
+    assert pkg.accepted is False
     assert len(pkg.subjects) >= 1
+    assert (review / "raw" / "mouse_tracklets.npz").is_file()
+
+
+def test_load_review_package_does_not_migrate_uncorrected_public(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_package,
+    )
+    from LabGym.identity.package import needs_uncorrected_raw_migrate
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    save_tracklets(_minimal_store(), str(review))
+
+    pkg = load_review_package(str(review))
+    assert needs_uncorrected_raw_migrate(review) is True
+    assert pkg.has_raw is False
+    assert pkg.accepted is False
+    assert (review / "mouse_tracklets.npz").is_file()
+    assert not (review / "raw" / "mouse_tracklets.npz").is_file()
+
+
+def test_save_review_package_writes_names_without_raw(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_package,
+        save_review_package,
+    )
+    from LabGym.identity.package import load_subjects
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    save_tracklets(_minimal_store(), str(review))
+    pkg = load_review_package(str(review))
+    pkg.subjects[0].display_name = "resident"
+    pkg.subjects[0].role = "R"
+    result = save_review_package(
+        str(review),
+        pkg.markers,
+        pkg.events,
+        pkg.subjects,
+        already_corrected=pkg.already_corrected,
+        baseline_stores=pkg.baseline_stores,
+    )
+    assert result.ok, result.error
+    assert result.accepted is False
+    assert (review / "mouse_tracklets.npz").is_file()
+    assert not (review / "raw" / "mouse_tracklets.npz").is_file()
+    loaded = load_subjects(review)
+    assert loaded[0].display_name == "resident"
+    assert loaded[0].role == "R"
 
 
 def test_load_review_package_missing_dir():
@@ -88,3 +140,45 @@ def test_load_review_package_no_tracklets(tmp_path: Path):
     empty.mkdir()
     with pytest.raises(ValueError, match="tracklets"):
         load_review_package(str(empty))
+
+
+def test_save_review_package_publishes_from_raw(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_package,
+        save_review_package,
+    )
+    from LabGym.id_review.dataset import make_swap_marker
+    from LabGym.id_review.raw_store import has_accepted_identities, save_raw_tracklets
+    from LabGym.id_review.tracklets import load_tracklets
+
+    review = tmp_path / "id_review"
+    review.mkdir()
+    raw = _minimal_store(n_frames=10)
+    save_raw_tracklets(review, {"mouse": raw})
+    pkg = load_review_package(str(review))
+    marker = make_swap_marker(4, "mouse", [0, 1], fps=10.0)
+    result = save_review_package(
+        str(review),
+        [marker],
+        pkg.events,
+        pkg.subjects,
+        already_corrected=False,
+        baseline_stores=pkg.baseline_stores,
+    )
+    assert result.ok, result.error
+    assert result.accepted is True
+    assert has_accepted_identities(review) is True
+    published = load_tracklets(str(review), "mouse")
+    assert published.centers[0, 4, 0] == raw.centers[1, 4, 0]
+    # second save must not invert
+    result2 = save_review_package(
+        str(review),
+        [marker],
+        pkg.events,
+        pkg.subjects,
+        already_corrected=False,
+        baseline_stores=pkg.baseline_stores,
+    )
+    assert result2.ok, result2.error
+    published2 = load_tracklets(str(review), "mouse")
+    assert published2.centers[0, 4, 0] == raw.centers[1, 4, 0]

@@ -115,13 +115,16 @@ def test_smoke_detect_and_process_queue_start_path_ids(
     det_tab._batch_active = False
 
     proc = ProcessVideosTab(ctrl)
-    proc.ed_detector.setText(str(det))
     proc.ed_categorizer.setText(str(cat))
     proc.ed_out.setText(str(tmp_path / "analysis"))
+    monkeypatch.setattr(
+        "LabGym.gui_pyside.workbenches.categorizer.process_videos_tab.QMessageBox.warning",
+        lambda *a, **k: None,
+    )
     proc._start()
-    assert proc._batch_active is True
-    assert len(captured["batches"][1]) == 2
-    assert all(it.job_id == it.payload for it in captured["batches"][1])
+    # No accepted identities yet — do not start a categorizer batch.
+    assert proc._batch_active is False
+    assert len(captured["batches"]) == 1
     proc._batch_active = False
 
 
