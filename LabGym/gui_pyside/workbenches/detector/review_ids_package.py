@@ -11,8 +11,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from LabGym.gui_pyside.project.model import Project
 from LabGym.gui_pyside.project.paths import (
     annotations_path_for,
-    current_video_path,
+    discover_tracklets_dir,
     examples_out_dir_for,
+    list_project_video_choices,
 )
 from LabGym.id_review.dataset import (
     finalize_switch_annotations,
@@ -110,23 +111,102 @@ class DownstreamArtifactCheck:
         return lines
 
 
+def should_confirm_stale_downstream(
+    *,
+    will_rebuild: bool,
+    check: DownstreamArtifactCheck,
+) -> bool:
+    """True when Save must ask because remapped tracklets will be rebuilt.
+
+    Names/roles-only saves do not rebuild remapped geometry and must not
+    warn as if they will.
+    """
+    return bool(will_rebuild and check.requires_confirm)
+
+
+def video_path_for_review_package(
+    review_dir: str,
+    *,
+    project: Optional[Project] = None,
+    hinted_video: Optional[str] = None,
+    store_meta: Optional[dict] = None,
+    events: Optional[Sequence[ContactEvent]] = None,
+) -> Optional[str]:
+    """Video this identity package belongs to (not the project's current video).
+
+    Prefers a caller hint (Load from a project video), then
+    ``detect_track_job.json`` / tracklet meta, then a project video whose
+    discovered package folder is *review_dir*.
+    """
+    hint = (hinted_video or "").strip()
+    if hint:
+        return hint
+
+    from LabGym.identity.package import read_detect_job_video
+
+    recorded = read_detect_job_video(review_dir)
+    if recorded:
+        if Path(recorded).is_file():
+            return recorded
+        resolved = resolve_video_path(
+            review_dir, {"video": recorded}, events or (), None
+        )
+        if resolved:
+            return resolved
+
+    from_meta = resolve_video_path(
+        review_dir, dict(store_meta or {}), events or (), None
+    )
+    if from_meta and Path(from_meta).is_file():
+        return from_meta
+
+    if project is not None:
+        matched = _match_package_to_project_video(project, review_dir)
+        if matched:
+            return matched
+    return from_meta
+
+
+def _match_package_to_project_video(project: Project, review_dir: str) -> Optional[str]:
+    try:
+        want = Path(review_dir).resolve()
+    except OSError:
+        want = Path(review_dir)
+    for _label, video in list_project_video_choices(project):
+        tracks = discover_tracklets_dir(project, video)
+        if not tracks:
+            continue
+        try:
+            got = Path(tracks).resolve()
+        except OSError:
+            got = Path(tracks)
+        if got == want:
+            return video
+    return None
+
+
 def check_downstream_artifacts(
     project: Optional[Project] = None,
     *,
+    video_path: Optional[str] = None,
     annotations_path: Optional[Union[str, PathLike]] = None,
     examples_dir: Optional[Union[str, PathLike]] = None,
 ) -> DownstreamArtifactCheck:
     """Look up an ethogram or example store that may go stale after remap.
 
     Args:
-        project: Open project used to resolve the current video's paths when
-            explicit paths are not supplied.
+        project: Open project used to resolve ethogram / example paths for
+            *video_path*.
+        video_path: Video this package belongs to. Required when *project*
+            is used and explicit paths are omitted. The project's current
+            video is never consulted.
         annotations_path: Optional ethogram path override.
         examples_dir: Optional example-store directory override.
 
     Returns:
-        A result whose ``check_failed`` flag is True if lookup/stat raises.
-        That case is never an all-clear: ``requires_confirm`` is True.
+        A result whose ``check_failed`` flag is True if lookup/stat raises
+        or the package's video cannot be identified. That case is never an
+        all-clear: ``requires_confirm`` is True.
     """
     try:
         if (
@@ -134,10 +214,17 @@ def check_downstream_artifacts(
             and examples_dir is None
             and project is not None
         ):
-            video = current_video_path(project)
-            if video:
-                annotations_path = annotations_path_for(project, video)
-                examples_dir = examples_out_dir_for(project, video)
+            video = (video_path or "").strip()
+            if not video:
+                return DownstreamArtifactCheck(
+                    check_failed=True,
+                    error=(
+                        "Could not identify which video this identity "
+                        "package belongs to"
+                    ),
+                )
+            annotations_path = annotations_path_for(project, video)
+            examples_dir = examples_out_dir_for(project, video)
         ethogram: Optional[str] = None
         examples: Optional[str] = None
         if annotations_path:

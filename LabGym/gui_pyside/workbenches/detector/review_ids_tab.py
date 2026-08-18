@@ -47,6 +47,8 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTab
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
     DownstreamArtifactCheck,
     check_downstream_artifacts,
+    should_confirm_stale_downstream,
+    video_path_for_review_package,
     clone_markers,
     events_for_kind,
     load_review_package,
@@ -148,6 +150,7 @@ class ReviewIdsTab(QWidget):
         self._dirty = False
         self._already_corrected = False
         self._has_raw = False
+        self._package_video_path = ""
         self._training_ranges: List[AnalysisFrameRange] = []
         self._range_start: Optional[int] = None
         self._extract_thread: Optional[QThread] = None
@@ -508,6 +511,7 @@ class ReviewIdsTab(QWidget):
             self, start, "Select id_review / tracklets folder"
         )
         if d:
+            self._package_video_path = ""
             self.load_package(d)
 
     def _load_selected_video_package(self) -> None:
@@ -526,6 +530,7 @@ class ReviewIdsTab(QWidget):
             )
             return
         self.project.set_current_video(str(path), dirty=True)
+        self._package_video_path = str(path)
         from LabGym.gui_pyside.project.paths import find_video_entry
 
         entry = find_video_entry(self.project.project, str(path))
@@ -1227,9 +1232,29 @@ class ReviewIdsTab(QWidget):
             QMessageBox.information(self, "Save", "Load a package first.")
             return
         self._stop_play()
-        downstream = check_downstream_artifacts(self.project.project)
-        if not self._confirm_stale_downstream(downstream):
-            return
+        from LabGym.id_review.raw_store import has_raw_snapshot
+
+        will_rebuild = has_raw_snapshot(self.review_dir)
+        store_meta = {}
+        if self.animal_kind in self._stores:
+            store_meta = dict(getattr(self._stores[self.animal_kind], "meta", {}) or {})
+        video = video_path_for_review_package(
+            self.review_dir,
+            project=self.project.project,
+            hinted_video=self._package_video_path,
+            store_meta=store_meta,
+            events=self.events,
+        )
+        if will_rebuild:
+            downstream = check_downstream_artifacts(
+                self.project.project, video_path=video
+            )
+            if should_confirm_stale_downstream(
+                will_rebuild=True, check=downstream
+            ) and not self._confirm_stale_downstream(downstream):
+                return
+        else:
+            downstream = DownstreamArtifactCheck(check_failed=False)
         result = save_review_package(
             self.review_dir,
             self.markers,

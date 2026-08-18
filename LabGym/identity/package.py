@@ -53,6 +53,17 @@ def has_identity_package(directory: str | Path) -> bool:
     return (directory / _IDENTITY_STATUS_FILENAME).is_file()
 
 
+def _read_detect_job(directory: str | Path) -> Optional[Dict[str, Any]]:
+    path = Path(directory) / DETECT_JOB_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
 def read_detect_behavior_mode(directory: str | Path) -> Optional[int]:
     """Behavior mode Detect + track recorded on this identity package.
 
@@ -63,19 +74,24 @@ def read_detect_behavior_mode(directory: str | Path) -> Optional[int]:
     Returns:
         The recorded mode, or None if missing or unreadable.
     """
-    path = Path(directory) / DETECT_JOB_FILENAME
-    if not path.is_file():
-        return None
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError, json.JSONDecodeError):
-        return None
-    if not isinstance(raw, dict) or raw.get("behavior_mode") is None:
+    raw = _read_detect_job(directory)
+    if raw is None or raw.get("behavior_mode") is None:
         return None
     try:
         return int(raw["behavior_mode"])
     except (TypeError, ValueError):
         return None
+
+
+def read_detect_job_video(directory: str | Path) -> Optional[str]:
+    """Source video path recorded on ``detect_track_job.json``, if any."""
+    raw = _read_detect_job(directory)
+    if raw is None:
+        return None
+    video = raw.get("video_path")
+    if video is None or str(video).strip() == "":
+        return None
+    return str(video)
 
 
 def behavior_mode_from_package(directory: str | Path, fallback: int) -> int:
