@@ -181,3 +181,66 @@ def test_hard_case_progress_dialog_constructs():
     assert not dlg.is_job_running
     dlg.close()
     del app
+
+
+@pytest.mark.gui
+def test_hard_case_extract_lives_on_dialog_not_right_column():
+    """Extract form is hosted in a modeless popup, not the Review IDs column."""
+    import sys
+
+    from PySide6.QtWidgets import (
+        QApplication,
+        QLineEdit,
+        QListWidget,
+        QPushButton,
+        QSpinBox,
+        QWidget,
+    )
+
+    from LabGym.gui_pyside.project.controller import ProjectController
+    from LabGym.gui_pyside.workbenches.detector.review_ids_tab import ReviewIdsTab
+
+    app = QApplication.instance() or QApplication(sys.argv)
+    tab = ReviewIdsTab(ProjectController())
+
+    opener = tab.findChild(QPushButton, "btn_hard_extract")
+    assert opener is not None
+    assert "Hard cases" in opener.text()
+    assert tab.markers_panel is not None
+    assert tab.subjects_table is not None
+    assert tab.btn_save is not None
+
+    right = tab.findChild(QWidget, "review_ids_right")
+    assert right is not None
+    assert right.findChild(QLineEdit, "ed_hard_out") is None
+    assert right.findChild(QSpinBox, "spin_hard_skip") is None
+    assert right.findChild(QPushButton, "btn_gen_hard") is None
+    assert right.findChild(QListWidget, "list_ranges") is None
+    assert tab._hard_extract_dlg is None
+
+    tab._training_ranges.append(AnalysisFrameRange(2, 8, note="pre"))
+    tab._refresh_range_list()
+    tab._open_hard_extract_dialog()
+
+    dlg = tab._hard_extract_dlg
+    assert dlg is not None
+    assert dlg.isVisible()
+    assert not dlg.isModal()
+    assert dlg.findChild(QListWidget, "list_ranges") is not None
+    assert dlg.findChild(QSpinBox, "spin_hard_skip") is not None
+    assert dlg.spin_hard_skip.value() == 10
+    assert dlg.findChild(QLineEdit, "ed_hard_out") is not None
+    assert dlg.findChild(QPushButton, "btn_gen_hard") is not None
+    assert dlg.list_ranges.count() == 1
+    assert "f2" in dlg.list_ranges.item(0).text()
+
+    # Still not in the main right column after the popup is shown.
+    assert right.findChild(QLineEdit, "ed_hard_out") is None
+    assert right.findChild(QListWidget, "list_ranges") is None
+    first = dlg
+    tab._open_hard_extract_dialog()
+    assert tab._hard_extract_dlg is first
+
+    tab.close()
+    dlg.close()
+    del app

@@ -8,18 +8,14 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
-    QListWidget,
     QMessageBox,
     QPushButton,
     QSlider,
-    QSpinBox,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -33,6 +29,9 @@ from LabGym.gui_pyside.widgets.path_browse import (
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
+)
+from LabGym.gui_pyside.workbenches.detector.hard_case_extract_dialog import (
+    HardCaseExtractDialog,
 )
 from LabGym.gui_pyside.workbenches.detector.hard_case_progress import (
     HardCaseProgressDialog,
@@ -156,6 +155,7 @@ class ReviewIdsTab(QWidget):
         self._extract_thread: Optional[QThread] = None
         self._extract_worker: Optional[_HardCaseExtractWorker] = None
         self._progress_dlg: Optional[HardCaseProgressDialog] = None
+        self._hard_extract_dlg: Optional[HardCaseExtractDialog] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -304,6 +304,7 @@ class ReviewIdsTab(QWidget):
         split.addWidget(left)
 
         right = QWidget()
+        right.setObjectName("review_ids_right")
         right_l = QVBoxLayout(right)
         right_l.setContentsMargins(0, 0, 0, 0)
 
@@ -319,106 +320,14 @@ class ReviewIdsTab(QWidget):
         subj_l.addWidget(self.subjects_table)
         right_l.addWidget(subj_box, 1)
 
-        hard_box = QGroupBox("Hard cases → detector training images")
-        hard_l = QVBoxLayout(hard_box)
-        hard_help = QLabel(
-            "Select time periods where the detector struggled. Frames from those "
-            "ranges are written as JPGs you can annotate (EZannot) and use to "
-            "retrain the detector."
+        self.btn_hard_extract = QPushButton("Hard cases → detector training images…")
+        self.btn_hard_extract.setObjectName("btn_hard_extract")
+        self.btn_hard_extract.setToolTip(
+            "Open a window to mark time ranges and extract still frames for "
+            "detector retraining."
         )
-        hard_help.setWordWrap(True)
-        hard_l.addWidget(hard_help)
-
-        self.lbl_range_pending = QLabel("Range start: (not set)")
-        hard_l.addWidget(self.lbl_range_pending)
-
-        range_btns = QHBoxLayout()
-        self.btn_range_start = QPushButton("Set start here ([)")
-        self.btn_range_start.setToolTip(
-            "Mark the current analysis frame as the start of a training range."
-        )
-        self.btn_range_start.clicked.connect(self._set_range_start)
-        self.btn_range_end = QPushButton("Set end & add (])")
-        self.btn_range_end.setToolTip(
-            "Close the range at the current frame and add it to the list."
-        )
-        self.btn_range_end.clicked.connect(self._set_range_end_and_add)
-        self.btn_add_risk = QPushButton("Add current risk band")
-        self.btn_add_risk.setToolTip(
-            "If the playhead is inside an automatic contact-risk band, add that "
-            "whole band as a training range."
-        )
-        self.btn_add_risk.clicked.connect(self._add_current_risk_band)
-        range_btns.addWidget(self.btn_range_start)
-        range_btns.addWidget(self.btn_range_end)
-        range_btns.addWidget(self.btn_add_risk)
-        hard_l.addLayout(range_btns)
-
-        self.list_ranges = QListWidget()
-        self.list_ranges.setMinimumHeight(72)
-        self.list_ranges.setToolTip("Analysis-frame ranges that will be exported.")
-        hard_l.addWidget(self.list_ranges)
-
-        range_edit = QHBoxLayout()
-        self.btn_remove_range = QPushButton("Remove selected")
-        self.btn_remove_range.clicked.connect(self._remove_selected_range)
-        self.btn_clear_ranges = QPushButton("Clear all")
-        self.btn_clear_ranges.clicked.connect(self._clear_ranges)
-        range_edit.addWidget(self.btn_remove_range)
-        range_edit.addWidget(self.btn_clear_ranges)
-        range_edit.addStretch(1)
-        hard_l.addLayout(range_edit)
-
-        out_row = QHBoxLayout()
-        self.ed_hard_out = QLineEdit()
-        self.ed_hard_out.setToolTip(
-            "Folder for extracted JPGs (same default as Generate images: "
-            "project/detector_training_images)."
-        )
-        b_hard_out = QPushButton("Browse…")
-        b_hard_out.clicked.connect(self._browse_hard_out)
-        out_row.addWidget(QLabel("Output:"), 0)
-        out_row.addWidget(self.ed_hard_out, 1)
-        out_row.addWidget(b_hard_out, 0)
-        hard_l.addLayout(out_row)
-
-        opts = QHBoxLayout()
-        self.spin_hard_skip = QSpinBox()
-        self.spin_hard_skip.setRange(1, 1_000_000)
-        self.spin_hard_skip.setValue(10)
-        self.spin_hard_skip.setToolTip(
-            "Write one image every N analysis frames within each range "
-            "(start and end of each range are always kept). "
-            "Smaller values = denser sampling of hard cases."
-        )
-        opts.addWidget(QLabel("Skip (frames):"))
-        opts.addWidget(self.spin_hard_skip)
-        self.chk_hard_resize = QCheckBox("Resize width")
-        self.chk_hard_resize.setToolTip(
-            "Optional proportional resize before writing JPGs."
-        )
-        self.spin_hard_width = QSpinBox()
-        self.spin_hard_width.setRange(10, 10000)
-        self.spin_hard_width.setValue(480)
-        self.spin_hard_width.setEnabled(False)
-        self.chk_hard_resize.toggled.connect(self.spin_hard_width.setEnabled)
-        opts.addWidget(self.chk_hard_resize)
-        opts.addWidget(self.spin_hard_width)
-        opts.addStretch(1)
-        hard_l.addLayout(opts)
-
-        self.btn_gen_hard = QPushButton("Generate training images from ranges")
-        self.btn_gen_hard.setToolTip(
-            "Extract still frames from the source video for every listed range."
-        )
-        self.btn_gen_hard.clicked.connect(self._generate_hard_case_images)
-        hard_l.addWidget(self.btn_gen_hard)
-
-        self.lbl_hard_status = QLabel("")
-        self.lbl_hard_status.setWordWrap(True)
-        hard_l.addWidget(self.lbl_hard_status)
-
-        right_l.addWidget(hard_box)
+        self.btn_hard_extract.clicked.connect(self._open_hard_extract_dialog)
+        right_l.addWidget(self.btn_hard_extract)
 
         save_row = QHBoxLayout()
         self.btn_save = QPushButton(
@@ -454,22 +363,11 @@ class ReviewIdsTab(QWidget):
             self.btn_save,
             self.subjects_table,
             self.marker_table,
-            self.btn_range_start,
-            self.btn_range_end,
-            self.btn_add_risk,
-            self.btn_remove_range,
-            self.btn_clear_ranges,
-            self.btn_gen_hard,
-            self.list_ranges,
-            self.ed_hard_out,
-            self.spin_hard_skip,
-            self.chk_hard_resize,
+            self.btn_hard_extract,
         ):
             w.setEnabled(on)
-        if on:
-            self.spin_hard_width.setEnabled(self.chk_hard_resize.isChecked())
-        else:
-            self.spin_hard_width.setEnabled(False)
+        if self._hard_extract_dlg is not None:
+            self._hard_extract_dlg.set_extract_enabled(on)
 
     def _bind_shortcuts(self) -> None:
         QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._toggle_play)
@@ -793,22 +691,64 @@ class ReviewIdsTab(QWidget):
 
     # --- hard-case training ranges ---
 
+    def _ensure_hard_extract_dialog(self) -> HardCaseExtractDialog:
+        """Create the extract popup once; later calls reuse the same widgets."""
+        if self._hard_extract_dlg is None:
+            dlg = HardCaseExtractDialog(self)
+            dlg.btn_range_start.clicked.connect(self._set_range_start)
+            dlg.btn_range_end.clicked.connect(self._set_range_end_and_add)
+            dlg.btn_add_risk.clicked.connect(self._add_current_risk_band)
+            dlg.btn_remove_range.clicked.connect(self._remove_selected_range)
+            dlg.btn_clear_ranges.clicked.connect(self._clear_ranges)
+            dlg.btn_hard_out.clicked.connect(self._browse_hard_out)
+            dlg.btn_gen_hard.clicked.connect(self._generate_hard_case_images)
+            self._hard_extract_dlg = dlg
+            self._prefills_hard_case_out()
+            self._refresh_range_list()
+            self._sync_range_pending_label()
+            dlg.set_extract_enabled(bool(self.review_dir))
+        return self._hard_extract_dlg
+
+    def _open_hard_extract_dialog(self) -> None:
+        """Show or raise the modeless hard-case extract window."""
+        dlg = self._ensure_hard_extract_dialog()
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
     def _prefills_hard_case_out(self) -> None:
-        if self.ed_hard_out.text().strip():
+        dlg = self._hard_extract_dlg
+        if dlg is None:
+            return
+        if dlg.ed_hard_out.text().strip():
             return
         root = self.project.project.root_dir or ""
-        self.ed_hard_out.setText(default_output_dir(root or None))
+        dlg.ed_hard_out.setText(default_output_dir(root or None))
 
     def _browse_hard_out(self) -> None:
+        dlg = self._hard_extract_dlg
+        if dlg is None:
+            return
         set_line_edit_directory(
-            self, self.ed_hard_out, caption="Select folder for training images"
+            dlg, dlg.ed_hard_out, caption="Select folder for training images"
         )
+
+    def _sync_range_pending_label(self) -> None:
+        dlg = self._hard_extract_dlg
+        if dlg is None:
+            return
+        if self._range_start is None:
+            dlg.lbl_range_pending.setText("Range start: (not set)")
+        else:
+            dlg.lbl_range_pending.setText(
+                f"Range start: analysis frame {self._range_start}"
+            )
 
     def _set_range_start(self) -> None:
         if not self.review_dir:
             return
         self._range_start = int(self.frame)
-        self.lbl_range_pending.setText(f"Range start: analysis frame {self._range_start}")
+        self._sync_range_pending_label()
         self._refresh_timeline()
 
     def _set_range_end_and_add(self) -> None:
@@ -818,7 +758,7 @@ class ReviewIdsTab(QWidget):
         start = self._range_start if self._range_start is not None else end
         self._add_range(AnalysisFrameRange(start, end))
         self._range_start = None
-        self.lbl_range_pending.setText("Range start: (not set)")
+        self._sync_range_pending_label()
         self._refresh_timeline()
 
     def _add_range(self, rng: AnalysisFrameRange) -> None:
@@ -856,7 +796,10 @@ class ReviewIdsTab(QWidget):
         )
 
     def _remove_selected_range(self) -> None:
-        row = self.list_ranges.currentRow()
+        dlg = self._hard_extract_dlg
+        if dlg is None:
+            return
+        row = dlg.list_ranges.currentRow()
         if row < 0 or row >= len(self._training_ranges):
             return
         del self._training_ranges[row]
@@ -866,14 +809,22 @@ class ReviewIdsTab(QWidget):
     def _clear_ranges(self) -> None:
         self._training_ranges.clear()
         self._range_start = None
-        self.lbl_range_pending.setText("Range start: (not set)")
+        self._sync_range_pending_label()
         self._refresh_range_list()
         self._refresh_timeline()
 
     def _refresh_range_list(self) -> None:
-        self.list_ranges.clear()
+        dlg = self._hard_extract_dlg
+        if dlg is None:
+            return
+        dlg.list_ranges.clear()
         for r in self._training_ranges:
-            self.list_ranges.addItem(r.label(self.fps))
+            dlg.list_ranges.addItem(r.label(self.fps))
+
+    def _set_hard_status(self, text: str) -> None:
+        dlg = self._hard_extract_dlg
+        if dlg is not None:
+            dlg.lbl_hard_status.setText(text)
 
     def _ensure_hard_progress_dialog(self) -> HardCaseProgressDialog:
         if self._progress_dlg is None:
@@ -884,9 +835,10 @@ class ReviewIdsTab(QWidget):
     def _cancel_hard_export(self) -> None:
         if self._extract_worker is not None:
             self._extract_worker.request_cancel()
-        self.lbl_hard_status.setText("Cancel requested…")
+        self._set_hard_status("Cancel requested…")
 
     def _generate_hard_case_images(self) -> None:
+        form = self._ensure_hard_extract_dialog()
         if self._extract_thread is not None:
             QMessageBox.warning(self, "Busy", "Image extraction is already running.")
             return
@@ -901,7 +853,7 @@ class ReviewIdsTab(QWidget):
                 "risk band).",
             )
             return
-        out = self.ed_hard_out.text().strip()
+        out = form.ed_hard_out.text().strip()
         if not out:
             QMessageBox.warning(
                 self, "Missing output", "Choose an output folder for the images."
@@ -921,7 +873,7 @@ class ReviewIdsTab(QWidget):
         n_est = len(
             frames_to_extract(
                 self._training_ranges,
-                skip=int(self.spin_hard_skip.value()),
+                skip=int(form.spin_hard_skip.value()),
                 n_frames=self.n_frames,
             )
         )
@@ -939,8 +891,8 @@ class ReviewIdsTab(QWidget):
         self._release_cap()
 
         framewidth = (
-            int(self.spin_hard_width.value())
-            if self.chk_hard_resize.isChecked()
+            int(form.spin_hard_width.value())
+            if form.chk_hard_resize.isChecked()
             else None
         )
         worker = _HardCaseExtractWorker(
@@ -949,7 +901,7 @@ class ReviewIdsTab(QWidget):
             ranges=list(self._training_ranges),
             store_meta=dict(meta),
             fps=float(fps),
-            skip=int(self.spin_hard_skip.value()),
+            skip=int(form.spin_hard_skip.value()),
             framewidth=framewidth,
             n_frames=self.n_frames,
         )
@@ -966,8 +918,8 @@ class ReviewIdsTab(QWidget):
 
         self._extract_worker = worker
         self._extract_thread = thread
-        self.btn_gen_hard.setEnabled(False)
-        self.lbl_hard_status.setText("Extracting frames…")
+        form.btn_gen_hard.setEnabled(False)
+        self._set_hard_status("Extracting frames…")
 
         dlg = self._ensure_hard_progress_dialog()
         dlg.begin_export(n_est, out_path=out, video_label=Path(str(video)).name)
@@ -976,17 +928,19 @@ class ReviewIdsTab(QWidget):
     def _clear_hard_thread(self) -> None:
         self._extract_thread = None
         self._extract_worker = None
-        if self.review_dir:
-            self.btn_gen_hard.setEnabled(True)
+        form = self._hard_extract_dlg
+        if form is not None and self.review_dir:
+            form.btn_gen_hard.setEnabled(True)
         self._render()
 
     def _on_hard_progress(self, current: int, total: int, msg: str) -> None:
-        self.lbl_hard_status.setText(msg)
+        self._set_hard_status(msg)
         if self._progress_dlg is not None:
             self._progress_dlg.set_frame_progress(current, total, msg)
 
     def _on_hard_finished(self, result) -> None:
-        out = self.ed_hard_out.text().strip()
+        form = self._hard_extract_dlg
+        out = form.ed_hard_out.text().strip() if form is not None else ""
         dlg = self._progress_dlg
 
         if result.cancelled:
@@ -994,13 +948,13 @@ class ReviewIdsTab(QWidget):
                 f"Cancelled after writing {result.n_written} image(s)."
                 + (f" → {out}" if result.n_written and out else "")
             )
-            self.lbl_hard_status.setText(status)
+            self._set_hard_status(status)
             if dlg is not None:
                 dlg.finish_export(cancelled=True, status=status)
             return
 
         if result.error and not result.n_written:
-            self.lbl_hard_status.setText(f"Failed: {result.error}")
+            self._set_hard_status(f"Failed: {result.error}")
             if dlg is not None:
                 dlg.finish_export(failed=True, status=result.error)
                 dlg.append_log(result.error)
@@ -1012,7 +966,7 @@ class ReviewIdsTab(QWidget):
             + (f" ({result.n_failed} failed reads)" if result.n_failed else "")
             + f" → {out}"
         )
-        self.lbl_hard_status.setText(msg)
+        self._set_hard_status(msg)
         if dlg is not None:
             dlg.finish_export(status=msg)
         QMessageBox.information(
@@ -1024,7 +978,7 @@ class ReviewIdsTab(QWidget):
         )
 
     def _on_hard_error(self, err: str) -> None:
-        self.lbl_hard_status.setText(f"Error: {err}")
+        self._set_hard_status(f"Error: {err}")
         if self._progress_dlg is not None:
             self._progress_dlg.finish_export(failed=True, status=err)
             self._progress_dlg.append_log(err)
