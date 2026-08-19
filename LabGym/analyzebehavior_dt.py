@@ -108,6 +108,7 @@ class AnalyzeAnimalDetector():
 		self.animal_other_contours={}
 		self.animal_centers={}
 		self.animal_existingcenters={}
+		self.animal_last_steps={}
 		self.animal_heights={}
 		self.animal_inners={}
 		self.animal_other_inners={}
@@ -231,6 +232,7 @@ class AnalyzeAnimalDetector():
 				self.animal_other_contours[animal_name]={}
 			self.animal_centers[animal_name]={}
 			self.animal_existingcenters[animal_name]={}
+			self.animal_last_steps[animal_name]={}
 			self.animal_heights[animal_name]={}
 			self.pattern_images[animal_name]={}
 			if self.include_bodyparts:
@@ -248,6 +250,7 @@ class AnalyzeAnimalDetector():
 					self.animal_other_contours[animal_name][i]=deque(maxlen=self.length)
 				self.animal_centers[animal_name][i]=[None]*self.total_analysis_framecount
 				self.animal_existingcenters[animal_name][i]=(-10000,-10000)
+				self.animal_last_steps[animal_name][i]=(0.0, 0.0)
 				self.animal_heights[animal_name][i]=[None]*self.total_analysis_framecount
 				if self.include_bodyparts:
 					self.animal_inners[animal_name][i]=deque(maxlen=self.length)
@@ -276,11 +279,13 @@ class AnalyzeAnimalDetector():
 
 	def _associate_kind_slots(self,animal_name,centers):
 		"""Assign this frame's detections to identity slots for one animal kind."""
+		last_steps=self.animal_last_steps.setdefault(animal_name, {})
 		return associate_identity_slots(
 			FrameDetections(centers=centers),
 			IdentitySlotState(
 				last_centers=self.animal_existingcenters[animal_name],
 				unused_counts=self.to_deregister[animal_name],
+				last_steps=last_steps,
 			),
 			animals_per_kind=int(self.animal_number[animal_name]),
 			count_to_deregister=self.count_to_deregister,
@@ -1046,6 +1051,8 @@ class AnalyzeAnimalDetector():
 					del self.register_counts[animal_name][i]
 					del self.animal_centers[animal_name][i]
 					del self.animal_existingcenters[animal_name][i]
+					if animal_name in self.animal_last_steps:
+						self.animal_last_steps[animal_name].pop(i, None)
 					del self.animal_contours[animal_name][i]
 					if self.behavior_mode==2:
 						del self.animal_other_contours[animal_name][i]
@@ -2030,6 +2037,7 @@ class AnalyzeAnimalDetector():
 				self.animal_other_contours[animal_name][i]=deque(maxlen=self.length)
 				self.animal_centers[animal_name][i]=deque(maxlen=self.length)
 				self.animal_existingcenters[animal_name][i]=(-10000,-10000)
+				self.animal_last_steps.setdefault(animal_name, {})[i]=(0.0, 0.0)
 				self.animal_blobs[animal_name][i]=deque(maxlen=self.length)
 				if self.include_bodyparts:
 					self.animal_inners[animal_name][i]=deque(maxlen=self.length)
