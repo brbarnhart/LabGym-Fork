@@ -1,5 +1,12 @@
 """Identity package helpers (tracklets + subjects.json)."""
 
+from .continuity import (
+    DUMMY_COM,
+    FrameDetections,
+    IdentitySlotState,
+    SlotAssignment,
+    associate_identity_slots,
+)
 from .downstream import (
     apply_context_to_annotator,
     may_open_video_for_annotation,
@@ -28,8 +35,13 @@ from .package import (
 
 __all__ = [
     "DETECT_JOB_FILENAME",
+    "DUMMY_COM",
+    "FrameDetections",
+    "IdentitySlotState",
+    "SlotAssignment",
     "SUBJECTS_FILENAME",
     "SubjectRecord",
+    "associate_identity_slots",
     "apply_context_to_annotator",
     "apply_decisions_and_save_tracklets",
     "behavior_mode_from_package",

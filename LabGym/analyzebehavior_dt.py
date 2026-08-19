@@ -31,7 +31,6 @@ import time
 import cv2
 import numpy as np
 import pandas as pd
-from scipy.spatial import distance
 from skimage import exposure
 import tensorflow as tf
 from tensorflow import keras  # pylint: disable=unused-import
@@ -59,6 +58,7 @@ def _emit_frame_progress(callback, current, total, stride=1, force=False):
 # Local application/library specific imports.
 from .detection.acquisition_timing import AcquisitionTiming, emit_status as _emit_status
 from .detector import Detector
+from .identity.continuity import FrameDetections, IdentitySlotState, associate_identity_slots
 from .tools import (
 	crop_frame,
 	extract_blob_background,
@@ -274,6 +274,19 @@ class AnalyzeAnimalDetector():
 		self.log.append('Preparation completed!')
 
 
+	def _associate_kind_slots(self,animal_name,centers):
+		"""Assign this frame's detections to identity slots for one animal kind."""
+		return associate_identity_slots(
+			FrameDetections(centers=centers),
+			IdentitySlotState(
+				last_centers=self.animal_existingcenters[animal_name],
+				unused_counts=self.to_deregister[animal_name],
+			),
+			animals_per_kind=int(self.animal_number[animal_name]),
+			count_to_deregister=self.count_to_deregister,
+		)
+
+
 	def track_animal(self,frame_count_analyze,animal_name,contours,centers,heights,inners=None):
 
 		# animal_name: the name of animals / objects that are included in the analysis
@@ -282,44 +295,26 @@ class AnalyzeAnimalDetector():
 		# heights: the heights of detected animals / objects
 		# inners: the inner contours of detected animals / objects when body parts are included in pattern images
 
-		unused_existing_indices=list(self.animal_existingcenters[animal_name])
-		existing_centers=list(self.animal_existingcenters[animal_name].values())
-		unused_new_indices=list(range(len(centers)))
-		dt_flattened=distance.cdist(existing_centers,centers).flatten()
-		dt_sort_index=dt_flattened.argsort()
-		length=len(centers)
+		assignment=self._associate_kind_slots(animal_name,centers)
 
-		for idx in dt_sort_index:
-			index_in_existing=int(idx/length)
-			index_in_new=int(idx%length)
-			if index_in_existing in unused_existing_indices:
-				if index_in_new in unused_new_indices:
-					unused_existing_indices.remove(index_in_existing)
-					unused_new_indices.remove(index_in_new)
-					if self.register_counts[animal_name][index_in_existing] is None:
-						self.register_counts[animal_name][index_in_existing]=frame_count_analyze
-					self.to_deregister[animal_name][index_in_existing]=0
-					self.animal_contours[animal_name][index_in_existing][frame_count_analyze]=contours[index_in_new]
-					center=centers[index_in_new]
-					self.animal_centers[animal_name][index_in_existing][frame_count_analyze]=center
-					self.animal_existingcenters[animal_name][index_in_existing]=center
-					self.animal_heights[animal_name][index_in_existing][frame_count_analyze]=heights[index_in_new]
-					if self.include_bodyparts:
-						self.animal_inners[animal_name][index_in_existing].append(inners[index_in_new])
-						pattern_image=generate_patternimage(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],inners=self.animal_inners[animal_name][index_in_existing],std=self.std)
-					else:
-						pattern_image=generate_patternimage(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],inners=None,std=0)
-					pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
-					self.pattern_images[animal_name][index_in_existing][frame_count_analyze]=np.array(pattern_image)
+		for index_in_existing,index_in_new in assignment.slot_to_detection.items():
+			if self.register_counts[animal_name][index_in_existing] is None:
+				self.register_counts[animal_name][index_in_existing]=frame_count_analyze
+			self.animal_contours[animal_name][index_in_existing][frame_count_analyze]=contours[index_in_new]
+			center=centers[index_in_new]
+			self.animal_centers[animal_name][index_in_existing][frame_count_analyze]=center
+			self.animal_heights[animal_name][index_in_existing][frame_count_analyze]=heights[index_in_new]
+			if self.include_bodyparts:
+				self.animal_inners[animal_name][index_in_existing].append(inners[index_in_new])
+				pattern_image=generate_patternimage(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],inners=self.animal_inners[animal_name][index_in_existing],std=self.std)
+			else:
+				pattern_image=generate_patternimage(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],inners=None,std=0)
+			pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
+			self.pattern_images[animal_name][index_in_existing][frame_count_analyze]=np.array(pattern_image)
 
-		if len(unused_existing_indices)>0:
-			for i in unused_existing_indices:
-				if self.to_deregister[animal_name][i]<=self.count_to_deregister:
-					self.to_deregister[animal_name][i]+=1
-				else:
-					self.animal_existingcenters[animal_name][i]=(-10000,-10000)
-				if self.include_bodyparts:
-					self.animal_inners[animal_name][i].append(None)
+		for i in assignment.unmatched_slots:
+			if self.include_bodyparts:
+				self.animal_inners[animal_name][i].append(None)
 
 
 	def track_animal_interact(self,frame_count_analyze,contours,other_contours,centers,heights,inners=None,other_inners=None,blobs=None):
@@ -350,55 +345,37 @@ class AnalyzeAnimalDetector():
 				if self.animation_analyzer:
 					animal_blobs=blobs[n:animal_length]
 
-				unused_existing_indices=list(self.animal_existingcenters[animal_name])
-				existing_centers=list(self.animal_existingcenters[animal_name].values())
-				unused_new_indices=list(range(len(animal_centers)))
-				dt_flattened=distance.cdist(existing_centers,animal_centers).flatten()
-				dt_sort_index=dt_flattened.argsort()
-				length=len(animal_centers)
+				assignment=self._associate_kind_slots(animal_name,animal_centers)
 
-				for idx in dt_sort_index:
-					index_in_existing=int(idx/length)
-					index_in_new=int(idx%length)
-					if index_in_existing in unused_existing_indices:
-						if index_in_new in unused_new_indices:
-							unused_existing_indices.remove(index_in_existing)
-							unused_new_indices.remove(index_in_new)
-							if self.register_counts[animal_name][index_in_existing] is None:
-								self.register_counts[animal_name][index_in_existing]=frame_count_analyze
-							self.to_deregister[animal_name][index_in_existing]=0
-							contour=animal_contours[index_in_new]
-							self.animal_contours[animal_name][index_in_existing][frame_count_analyze]=contour
-							center=animal_centers[index_in_new]
-							self.animal_centers[animal_name][index_in_existing][frame_count_analyze]=center
-							self.animal_existingcenters[animal_name][index_in_existing]=center
-							self.animal_heights[animal_name][index_in_existing][frame_count_analyze]=animal_heights[index_in_new]
-							self.animal_other_contours[animal_name][index_in_existing].append(animal_other_contours[index_in_new])
-							if self.animation_analyzer:
-								blob=img_to_array(cv2.resize(animal_blobs[index_in_new],(self.dim_tconv,self.dim_tconv),interpolation=cv2.INTER_AREA))
-								self.animal_blobs[animal_name][index_in_existing].append(blob)
-								self.animations[animal_name][index_in_existing][frame_count_analyze]=np.array(self.animal_blobs[animal_name][index_in_existing])
-							if self.include_bodyparts:
-								self.animal_inners[animal_name][index_in_existing].append(animal_inners[index_in_new])
-								self.animal_other_inners[animal_name][index_in_existing].append(animal_other_inners[index_in_new])
-								pattern_image=generate_patternimage_interact(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],self.animal_other_contours[animal_name][index_in_existing],inners=self.animal_inners[animal_name][index_in_existing],other_inners=self.animal_other_inners[animal_name][index_in_existing],std=self.std)
-							else:
-								pattern_image=generate_patternimage_interact(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],self.animal_other_contours[animal_name][index_in_existing],inners=None,other_inners=None,std=0)
-							pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
-							self.pattern_images[animal_name][index_in_existing][frame_count_analyze]=np.array(pattern_image)
+				for index_in_existing,index_in_new in assignment.slot_to_detection.items():
+					if self.register_counts[animal_name][index_in_existing] is None:
+						self.register_counts[animal_name][index_in_existing]=frame_count_analyze
+					contour=animal_contours[index_in_new]
+					self.animal_contours[animal_name][index_in_existing][frame_count_analyze]=contour
+					center=animal_centers[index_in_new]
+					self.animal_centers[animal_name][index_in_existing][frame_count_analyze]=center
+					self.animal_heights[animal_name][index_in_existing][frame_count_analyze]=animal_heights[index_in_new]
+					self.animal_other_contours[animal_name][index_in_existing].append(animal_other_contours[index_in_new])
+					if self.animation_analyzer:
+						blob=img_to_array(cv2.resize(animal_blobs[index_in_new],(self.dim_tconv,self.dim_tconv),interpolation=cv2.INTER_AREA))
+						self.animal_blobs[animal_name][index_in_existing].append(blob)
+						self.animations[animal_name][index_in_existing][frame_count_analyze]=np.array(self.animal_blobs[animal_name][index_in_existing])
+					if self.include_bodyparts:
+						self.animal_inners[animal_name][index_in_existing].append(animal_inners[index_in_new])
+						self.animal_other_inners[animal_name][index_in_existing].append(animal_other_inners[index_in_new])
+						pattern_image=generate_patternimage_interact(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],self.animal_other_contours[animal_name][index_in_existing],inners=self.animal_inners[animal_name][index_in_existing],other_inners=self.animal_other_inners[animal_name][index_in_existing],std=self.std)
+					else:
+						pattern_image=generate_patternimage_interact(self.background,self.animal_contours[animal_name][index_in_existing][max(0,(frame_count_analyze-self.length+1)):frame_count_analyze+1],self.animal_other_contours[animal_name][index_in_existing],inners=None,other_inners=None,std=0)
+					pattern_image=cv2.resize(pattern_image,(self.dim_conv,self.dim_conv),interpolation=cv2.INTER_AREA)
+					self.pattern_images[animal_name][index_in_existing][frame_count_analyze]=np.array(pattern_image)
 
-				if len(unused_existing_indices)>0:
-					for i in unused_existing_indices:
-						if self.to_deregister[animal_name][i]<=self.count_to_deregister:
-							self.to_deregister[animal_name][i]+=1
-						else:
-							self.animal_existingcenters[animal_name][i]=(-10000,-10000)
-						self.animal_other_contours[animal_name][i].append([None])
-						if self.animation_analyzer:
-							self.animal_blobs[animal_name][i].append(np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8'))
-						if self.include_bodyparts:
-							self.animal_inners[animal_name][i].append(None)
-							self.animal_other_inners[animal_name][i].append([None])
+				for i in assignment.unmatched_slots:
+					self.animal_other_contours[animal_name][i].append([None])
+					if self.animation_analyzer:
+						self.animal_blobs[animal_name][i].append(np.zeros((self.dim_tconv,self.dim_tconv,self.channel),dtype='uint8'))
+					if self.include_bodyparts:
+						self.animal_inners[animal_name][i].append(None)
+						self.animal_other_inners[animal_name][i].append([None])
 
 				n+=self.animal_present[animal_name]
 
@@ -2240,46 +2217,28 @@ class AnalyzeAnimalDetector():
 								animal_inners=all_inners[n:animal_length]
 								animal_other_inners=other_inners[n:animal_length]
 
-							unused_existing_indices=list(self.animal_existingcenters[animal_name])
-							existing_centers=list(self.animal_existingcenters[animal_name].values())
-							unused_new_indices=list(range(len(animal_centers)))
-							dt_flattened=distance.cdist(existing_centers,animal_centers).flatten()
-							dt_sort_index=dt_flattened.argsort()
-							length=len(animal_centers)
+							assignment=self._associate_kind_slots(animal_name,animal_centers)
 
-							for idx in dt_sort_index:
-								index_in_existing=int(idx/length)
-								index_in_new=int(idx%length)
-								if index_in_existing in unused_existing_indices:
-									if index_in_new in unused_new_indices:
-										unused_existing_indices.remove(index_in_existing)
-										unused_new_indices.remove(index_in_new)
-										self.to_deregister[animal_name][index_in_existing]=0
-										contour=animal_contours[index_in_new]
-										self.animal_contours[animal_name][index_in_existing].append(contour)
-										center=animal_centers[index_in_new]
-										self.animal_centers[animal_name][index_in_existing].append(center)
-										self.animal_existingcenters[animal_name][index_in_existing]=center
-										self.animal_other_contours[animal_name][index_in_existing].append(animal_other_contours[index_in_new])
+							for index_in_existing,index_in_new in assignment.slot_to_detection.items():
+								contour=animal_contours[index_in_new]
+								self.animal_contours[animal_name][index_in_existing].append(contour)
+								center=animal_centers[index_in_new]
+								self.animal_centers[animal_name][index_in_existing].append(center)
+								self.animal_other_contours[animal_name][index_in_existing].append(animal_other_contours[index_in_new])
 
-										self.animal_blobs[animal_name][index_in_existing].append(animal_blobs[index_in_new])
-										if self.include_bodyparts:
-											self.animal_inners[animal_name][index_in_existing].append(animal_inners[index_in_new])
-											self.animal_other_inners[animal_name][index_in_existing].append(animal_other_inners[index_in_new])
+								self.animal_blobs[animal_name][index_in_existing].append(animal_blobs[index_in_new])
+								if self.include_bodyparts:
+									self.animal_inners[animal_name][index_in_existing].append(animal_inners[index_in_new])
+									self.animal_other_inners[animal_name][index_in_existing].append(animal_other_inners[index_in_new])
 
-							if len(unused_existing_indices)>0:
-								for i in unused_existing_indices:
-									if self.to_deregister[animal_name][i]<=self.count_to_deregister:
-										self.to_deregister[animal_name][i]+=1
-									else:
-										self.animal_existingcenters[animal_name][i]=(-10000,-10000)
-									self.animal_contours[animal_name][i].append(None)
-									self.animal_other_contours[animal_name][i].append([None])
-									self.animal_centers[animal_name][i].append(None)
-									self.animal_blobs[animal_name][i].append(None)
-									if self.include_bodyparts:
-										self.animal_inners[animal_name][i].append(None)
-										self.animal_other_inners[animal_name][i].append([None])
+							for i in assignment.unmatched_slots:
+								self.animal_contours[animal_name][i].append(None)
+								self.animal_other_contours[animal_name][i].append([None])
+								self.animal_centers[animal_name][i].append(None)
+								self.animal_blobs[animal_name][i].append(None)
+								if self.include_bodyparts:
+									self.animal_inners[animal_name][i].append(None)
+									self.animal_other_inners[animal_name][i].append([None])
 
 							n+=self.animal_present[animal_name]
 
