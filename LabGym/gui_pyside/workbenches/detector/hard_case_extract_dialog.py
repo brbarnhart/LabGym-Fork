@@ -144,6 +144,7 @@ class HardCaseExtractDialog(QDialog):
             self.btn_gen_hard,
             self.list_ranges,
             self.ed_hard_out,
+            self.btn_hard_out,
             self.spin_hard_skip,
             self.chk_hard_resize,
         ):

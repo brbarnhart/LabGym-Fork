@@ -188,6 +188,7 @@ def test_hard_case_extract_lives_on_dialog_not_right_column():
     """Extract form is hosted in a modeless popup, not the Review IDs column."""
     import sys
 
+    from PySide6.QtGui import QKeySequence, QShortcut
     from PySide6.QtWidgets import (
         QApplication,
         QLineEdit,
@@ -233,6 +234,13 @@ def test_hard_case_extract_lives_on_dialog_not_right_column():
     assert dlg.findChild(QPushButton, "btn_gen_hard") is not None
     assert dlg.list_ranges.count() == 1
     assert "f2" in dlg.list_ranges.item(0).text()
+    dlg_keys = {s.key().toString() for s in dlg.findChildren(QShortcut)}
+    assert QKeySequence("[").toString() in dlg_keys
+    assert QKeySequence("]").toString() in dlg_keys
+    dlg.set_extract_enabled(False)
+    assert not dlg.btn_hard_out.isEnabled()
+    dlg.set_extract_enabled(True)
+    assert dlg.btn_hard_out.isEnabled()
 
     # Still not in the main right column after the popup is shown.
     assert right.findChild(QLineEdit, "ed_hard_out") is None

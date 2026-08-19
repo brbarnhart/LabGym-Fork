@@ -702,6 +702,9 @@ class ReviewIdsTab(QWidget):
             dlg.btn_clear_ranges.clicked.connect(self._clear_ranges)
             dlg.btn_hard_out.clicked.connect(self._browse_hard_out)
             dlg.btn_gen_hard.clicked.connect(self._generate_hard_case_images)
+            # WindowShortcut on the tab is inactive while this window is active.
+            QShortcut(QKeySequence("["), dlg, self._set_range_start)
+            QShortcut(QKeySequence("]"), dlg, self._set_range_end_and_add)
             self._hard_extract_dlg = dlg
             self._prefills_hard_case_out()
             self._refresh_range_list()
@@ -781,8 +784,9 @@ class ReviewIdsTab(QWidget):
             and e.start_frame <= self.frame <= e.end_frame
         ]
         if not bands:
+            parent = self._hard_extract_dlg if self._hard_extract_dlg is not None else self
             QMessageBox.information(
-                self,
+                parent,
                 "No risk band",
                 "Playhead is not inside a contact-risk band (or all bands are "
                 "hidden by the Min risk filter).",
@@ -840,14 +844,14 @@ class ReviewIdsTab(QWidget):
     def _generate_hard_case_images(self) -> None:
         form = self._ensure_hard_extract_dialog()
         if self._extract_thread is not None:
-            QMessageBox.warning(self, "Busy", "Image extraction is already running.")
+            QMessageBox.warning(form, "Busy", "Image extraction is already running.")
             return
         if not self.review_dir:
-            QMessageBox.information(self, "Generate images", "Load a package first.")
+            QMessageBox.information(form, "Generate images", "Load a package first.")
             return
         if not self._training_ranges:
             QMessageBox.warning(
-                self,
+                form,
                 "No ranges",
                 "Add at least one time range (Set start / Set end, or Add current "
                 "risk band).",
@@ -856,14 +860,14 @@ class ReviewIdsTab(QWidget):
         out = form.ed_hard_out.text().strip()
         if not out:
             QMessageBox.warning(
-                self, "Missing output", "Choose an output folder for the images."
+                form, "Missing output", "Choose an output folder for the images."
             )
             return
 
         video, meta, fps = self._video_meta()
         if not video:
             QMessageBox.warning(
-                self,
+                form,
                 "No video",
                 "Could not resolve the source video for this package.\n"
                 "Select the project video or ensure the package meta points at a file.",
@@ -878,7 +882,7 @@ class ReviewIdsTab(QWidget):
             )
         )
         reply = QMessageBox.question(
-            self,
+            form,
             "Generate training images?",
             f"Extract ~{n_est} frame(s) from {len(self._training_ranges)} range(s)\n"
             f"Video:\n{video}\n\nInto:\n{out}",
@@ -940,6 +944,7 @@ class ReviewIdsTab(QWidget):
 
     def _on_hard_finished(self, result) -> None:
         form = self._hard_extract_dlg
+        parent = form if form is not None else self
         out = form.ed_hard_out.text().strip() if form is not None else ""
         dlg = self._progress_dlg
 
@@ -958,7 +963,7 @@ class ReviewIdsTab(QWidget):
             if dlg is not None:
                 dlg.finish_export(failed=True, status=result.error)
                 dlg.append_log(result.error)
-            QMessageBox.critical(self, "Extraction failed", result.error)
+            QMessageBox.critical(parent, "Extraction failed", result.error)
             return
 
         msg = (
@@ -970,7 +975,7 @@ class ReviewIdsTab(QWidget):
         if dlg is not None:
             dlg.finish_export(status=msg)
         QMessageBox.information(
-            self,
+            parent,
             "Training images ready",
             f"{msg}\n\n"
             "Next: annotate with EZannot (or similar), export COCO JSON, then "
@@ -982,7 +987,10 @@ class ReviewIdsTab(QWidget):
         if self._progress_dlg is not None:
             self._progress_dlg.finish_export(failed=True, status=err)
             self._progress_dlg.append_log(err)
-        QMessageBox.critical(self, "Extraction failed", err)
+        parent = (
+            self._hard_extract_dlg if self._hard_extract_dlg is not None else self
+        )
+        QMessageBox.critical(parent, "Extraction failed", err)
 
     def _push_undo(self) -> None:
         self._undo_stack.append(clone_markers(self.markers))
