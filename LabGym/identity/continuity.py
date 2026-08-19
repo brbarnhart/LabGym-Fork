@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional, Sequence
+from typing import Optional, Sequence
 
 from scipy.spatial import distance
 
-# Far dummy last COM used when an unmatched slot times out (current teleport).
+# Far last COM so a timed-out unmatched slot does not steal nearby detections.
 DUMMY_COM = (-10000, -10000)
 
 
@@ -16,15 +16,10 @@ class FrameDetections:
     """Per-frame detections for one animal kind.
 
     Args:
-        centers: Detection centers of mass. Required for live association.
-        contours: Optional outlines; unused by the greedy default, passed
-            through for later association tickets.
-        areas: Optional detection areas; unused by the greedy default.
+        centers: Detection centers of mass.
     """
 
     centers: Sequence[Sequence[float]]
-    contours: Optional[Sequence[Any]] = None
-    areas: Optional[Sequence[float]] = None
 
 
 @dataclass
@@ -114,8 +109,7 @@ def associate_identity_slots(
     slot_to_detection: dict[int, int] = {}
     length = len(centers)
 
-    # length == 0: skip greedy (cdist on an empty new set is undefined) and
-    # treat every slot as unmatched — same as the engine's empty loop.
+    # scipy cdist raises on a Python empty detection list.
     if length != 0:
         existing_centers = list(slot_state.last_centers.values())
         dt_flattened = distance.cdist(existing_centers, centers).flatten()

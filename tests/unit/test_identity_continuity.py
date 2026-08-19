@@ -82,10 +82,7 @@ def test_unmatched_slot_teleports_after_unused_timeout():
 
 
 def test_two_animal_crossing_swaps_under_greedy_last_com():
-    """Known greedy last-COM bug: IDs swap when animals cross.
-
-    Lock the swap; do not correct it in this ticket.
-    """
+    """Known greedy last-COM bug: IDs swap when animals cross."""
     state = IdentitySlotState.initial(2)
     frames = [
         [(0, 0), (20, 0)],
