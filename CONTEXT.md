@@ -126,13 +126,61 @@ _Avoid_: remapped soft labels (ambiguous with permanent rewrite)
 
 ## Identity review
 
+**Animal kind**:
+A detector class of animal or object that has its own identity-slot space (for example mouse versus object).
+_Avoid_: class (ok in detector prose), category (reserved for behaviors)
+
+**Identity slot**:
+One of the at most N identities of an animal kind in a video. Slots persist when that animal is briefly undetected or off-frame; they are not created or destroyed mid-video to chase extra detections.
+_Avoid_: track ID (implementation), subject (ok in UI)
+
+**Animals per kind**:
+The user-declared maximum number of identity slots for one animal kind in a video. Kinds may have different maxima. Not every slot need be occupied in every frame.
+_Avoid_: global N, animal number (implementation)
+
+**Identity association**:
+The assignment of this frame’s detections to that kind’s identity slots.
+_Avoid_: tracking (broader), ID assignment (ok casually)
+
+**Contact event**:
+A timeline risk bout: either an occlusion bout or a proximity risk.
+_Avoid_: using this when you mean only occlusion or only proximity; collision; interaction (broader; includes behavior)
+
+**Occlusion bout**:
+A run of frames where animals of a kind are piled or one is only partly visible, so identity association freezes for those animals. Raw outlines need not intersect: the detector typically outlines only the visible part of a hidden animal.
+_Avoid_: overlap bout, pile (ok casually), contact (alone)
+
+**Proximity risk**:
+A run of frames where animals of a kind are close in center of mass but are not in an occlusion bout. A weak timeline hint; not a proposed switch marker unless a rematch is decisive.
+_Avoid_: chase event (chase is one cause), contact (alone)
+
+**Freeze-lift**:
+The first frame after an occlusion bout where the occlusion tests no longer hold.
+_Avoid_: unfreeze (implementation), separation (ok casually), outlines separate (raw contours may never have touched)
+
+**Split detection**:
+Two or more overlapping detections that belong to one animal in a single frame, while another identity slot of that kind is unmatched.
+_Avoid_: double detect (ok casually), duplicate outline
+
+**Parked slot**:
+An identity slot whose animal is currently undetected or off-frame. It still counts against animals per kind and is not free to bind to an arbitrary leftover detection.
+_Avoid_: deregistered, lost track, dummy COM
+
+**Proposed switch marker**:
+A machine-suggested identity swap (or permutation) at one analysis frame. It is not a switch marker and is not applied on save until the user accepts it.
+_Avoid_: auto switch, suggested mapping (ok casually)
+
+**Marked animal**:
+An animal with a human-applied visual mark intended to distinguish it from others of the same kind.
+_Avoid_: labeled animal (ambiguous with behavior labels)
+
 **Raw tracklets**:
 The detector’s per-video track geometry before any human identity corrections. They are not overwritten when switch markers change.
 _Avoid_: original mappings, uncorrected tracks (ok casually)
 
 **Switch marker**:
-A user-recorded identity swap at one analysis frame. The current list of switch markers is the source of truth for identity corrections.
-_Avoid_: mapping (alone), updated mappings, original mappings
+An identity swap at one analysis frame that the user has accepted (including by accepting a proposed switch marker). The current list of switch markers is the source of truth for identity corrections.
+_Avoid_: mapping (alone), updated mappings, original mappings, proposed switch marker
 
 **Remapped tracklets**:
 Track geometry derived by applying the current switch-marker list to raw tracklets. Created or regenerated only when Review IDs is saved; this is what later annotation and analysis consume.
