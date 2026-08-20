@@ -277,15 +277,26 @@ class AnalyzeAnimalDetector():
 		self.log.append('Preparation completed!')
 
 
-	def _associate_kind_slots(self,animal_name,centers):
+	def _associate_kind_slots(self,animal_name,centers,contours=None):
 		"""Assign this frame's detections to identity slots for one animal kind."""
 		last_steps=self.animal_last_steps.setdefault(animal_name, {})
+		outlines=list(contours) if contours is not None else []
+		areas=[]
+		for outline in outlines:
+			if outline is None:
+				areas.append(None)
+			else:
+				areas.append(float(cv2.contourArea(outline)))
+		typical=None
+		if isinstance(self.animal_area, dict):
+			typical=self.animal_area.get(animal_name)
 		return associate_identity_slots(
-			FrameDetections(centers=centers),
+			FrameDetections(centers=centers, outlines=outlines, areas=areas),
 			IdentitySlotState(
 				last_centers=self.animal_existingcenters[animal_name],
 				unused_counts=self.to_deregister[animal_name],
 				last_steps=last_steps,
+				typical_area=typical,
 			),
 			animals_per_kind=int(self.animal_number[animal_name]),
 			count_to_deregister=self.count_to_deregister,
@@ -300,7 +311,7 @@ class AnalyzeAnimalDetector():
 		# heights: the heights of detected animals / objects
 		# inners: the inner contours of detected animals / objects when body parts are included in pattern images
 
-		assignment=self._associate_kind_slots(animal_name,centers)
+		assignment=self._associate_kind_slots(animal_name,centers,contours)
 
 		for index_in_existing,index_in_new in assignment.slot_to_detection.items():
 			if self.register_counts[animal_name][index_in_existing] is None:
@@ -350,7 +361,7 @@ class AnalyzeAnimalDetector():
 				if self.animation_analyzer:
 					animal_blobs=blobs[n:animal_length]
 
-				assignment=self._associate_kind_slots(animal_name,animal_centers)
+				assignment=self._associate_kind_slots(animal_name,animal_centers,animal_contours)
 
 				for index_in_existing,index_in_new in assignment.slot_to_detection.items():
 					if self.register_counts[animal_name][index_in_existing] is None:
@@ -2225,7 +2236,7 @@ class AnalyzeAnimalDetector():
 								animal_inners=all_inners[n:animal_length]
 								animal_other_inners=other_inners[n:animal_length]
 
-							assignment=self._associate_kind_slots(animal_name,animal_centers)
+							assignment=self._associate_kind_slots(animal_name,animal_centers,animal_contours)
 
 							for index_in_existing,index_in_new in assignment.slot_to_detection.items():
 								contour=animal_contours[index_in_new]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import numpy as np
+
 from LabGym.identity.continuity import (
     DUMMY_COM,
     FrameDetections,
@@ -10,9 +12,32 @@ from LabGym.identity.continuity import (
 )
 
 
-def _associate(centers, state, animals_per_kind, count_to_deregister=1000):
+def _box(cx, cy, w=10, h=10):
+    """Axis-aligned rectangle outline centered at (cx, cy), OpenCV contour shape."""
+    x0 = int(round(cx - w / 2.0))
+    y0 = int(round(cy - h / 2.0))
+    x1 = int(round(cx + w / 2.0))
+    y1 = int(round(cy + h / 2.0))
+    return np.array(
+        [[[x0, y0]], [[x1, y0]], [[x1, y1]], [[x0, y1]]],
+        dtype=np.int32,
+    )
+
+
+def _associate(
+    centers,
+    state,
+    animals_per_kind,
+    count_to_deregister=1000,
+    outlines=None,
+    areas=None,
+):
     return associate_identity_slots(
-        FrameDetections(centers=centers),
+        FrameDetections(
+            centers=centers,
+            outlines=() if outlines is None else outlines,
+            areas=() if areas is None else areas,
+        ),
         state,
         animals_per_kind=animals_per_kind,
         count_to_deregister=count_to_deregister,
@@ -211,3 +236,357 @@ def test_association_is_independent_per_animal_kind():
     assert list(objects.last_centers) == [0]
     assert mice.last_centers[0] == (5, 5)
     assert objects.last_centers[0] == (200, 200)
+
+
+def _bind_left_right(state):
+    """Two well-separated animals: slot 0 left, slot 1 right, with velocity."""
+    _associate([(10, 50), (80, 50)], state, 2)
+    _associate([(12, 50), (82, 50)], state, 2)
+
+
+def test_split_detection_parks_unmatched_slot_instead_of_stealing():
+    """Overlapping outlines on one animal do not bind both slots.
+
+    Two overlapping boxes sit on the left animal; the right animal is missed.
+    Hungarian would give the extra outline to the right slot. Split detection
+    parks that slot and leaves the extra detection unused.
+    """
+    state = IdentitySlotState.initial(2)
+    _bind_left_right(state)
+
+    split = _associate(
+        [(12, 50), (14, 50)],
+        state,
+        2,
+        outlines=[_box(12, 50), _box(14, 50)],
+    )
+    assert split.split_detection is True
+    assert split.occlusion_bout is False
+    assert 0 in split.slot_to_detection
+    assert 1 not in split.slot_to_detection
+    assert split.unmatched_slots == [1]
+    assert len(split.extra_detections) == 1
+    assert split.extra_detections[0] not in split.slot_to_detection.values()
+    assert state.last_centers[1] == (82, 50)
+
+
+def test_split_detection_parks_when_missed_animal_is_nearby():
+    """Overlapping outlines on one animal still park a close unmatched slot."""
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (50, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(50, 50)],
+    )
+    _associate(
+        [(28, 50), (52, 50)],
+        state,
+        2,
+        outlines=[_box(28, 50), _box(52, 50)],
+    )
+    split = _associate(
+        [(28, 50), (30, 50)],
+        state,
+        2,
+        outlines=[_box(28, 50), _box(30, 50)],
+    )
+    assert split.split_detection is True
+    assert 0 in split.slot_to_detection
+    assert 1 not in split.slot_to_detection
+    assert split.unmatched_slots == [1]
+    assert state.last_centers[1] == (52, 50)
+
+
+def test_one_or_two_frame_split_does_not_leave_lasting_swap():
+    """After a short split on the right animal, identities recover.
+
+    Two overlapping outlines on the moving right animal would steal the left
+    slot onto that body. Once both animals are detected again, the parked left
+    slot still sits on the left and rematches there.
+    """
+    state = IdentitySlotState.initial(2)
+    _associate([(10, 50), (70, 50)], state, 2)
+    _associate([(10, 50), (78, 50)], state, 2)
+
+    for _ in range(2):
+        split = _associate(
+            [(78, 50), (80, 50)],
+            state,
+            2,
+            outlines=[_box(78, 50), _box(80, 50)],
+        )
+        assert 0 not in split.slot_to_detection
+        assert split.unmatched_slots == [0]
+        assert state.last_centers[0] == (10, 50)
+
+    recovered = _associate(
+        [(10, 50), (86, 50)],
+        state,
+        2,
+        outlines=[_box(10, 50, w=10), _box(86, 50, w=10)],
+    )
+    assert recovered.slot_to_detection == {0: 0, 1: 1}
+    assert recovered.unmatched_slots == []
+    assert state.last_centers[0] == (10, 50)
+    assert state.last_centers[1] == (86, 50)
+
+
+def test_first_frame_pile_still_binds_unbound_slots():
+    """Unbound slots still claim detections even if the first frame is a pile."""
+    state = IdentitySlotState.initial(2)
+    first = _associate(
+        [(44, 50), (56, 50)],
+        state,
+        2,
+        outlines=[_box(44, 50), _box(56, 50)],
+    )
+    assert first.slot_to_detection.keys() == {0, 1}
+    assert state.last_centers[0] != DUMMY_COM
+    assert state.last_centers[1] != DUMMY_COM
+
+
+def test_intersecting_outlines_of_two_animals_are_occlusion_not_split():
+    """Raw overlap of two piled animals freezes; it does not park one slot."""
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+    )
+    _associate(
+        [(30, 50), (70, 50)],
+        state,
+        2,
+        outlines=[_box(30, 50), _box(70, 50)],
+    )
+    pre_centers = dict(state.last_centers)
+    piled = _associate(
+        [(48, 50), (52, 50)],
+        state,
+        2,
+        outlines=[_box(48, 50), _box(52, 50)],
+    )
+    assert piled.split_detection is False
+    assert piled.occlusion_bout is True
+    assert piled.slot_to_detection.keys() == {0, 1}
+    assert state.last_centers == pre_centers
+
+
+def test_almost_touching_outlines_freeze_occlusion_bout():
+    """Almost-touching, non-intersecting outlines freeze last COM and velocity."""
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+    )
+    _associate(
+        [(30, 50), (70, 50)],
+        state,
+        2,
+        outlines=[_box(30, 50), _box(70, 50)],
+    )
+    pre_centers = dict(state.last_centers)
+    pre_steps = dict(state.last_steps)
+
+    # 10x10 boxes centered 12 px apart: gap 2 px, raw outlines do not intersect.
+    piled = _associate(
+        [(44, 50), (56, 50)],
+        state,
+        2,
+        outlines=[_box(44, 50), _box(56, 50)],
+    )
+    assert piled.occlusion_bout is True
+    assert piled.split_detection is False
+    assert sorted(piled.frozen_slots) == [0, 1]
+    assert state.last_centers == pre_centers
+    assert state.last_steps == pre_steps
+
+
+def test_hidden_animal_one_blob_is_occlusion_not_proximity():
+    """One leftover detection with a nearby unmatched slot freezes as occlusion."""
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+    )
+    _associate(
+        [(36, 50), (64, 50)],
+        state,
+        2,
+        outlines=[_box(36, 50), _box(64, 50)],
+    )
+    pre_centers = dict(state.last_centers)
+    assert pre_centers[0] == (36, 50)
+    assert pre_centers[1] == (64, 50)
+
+    hidden = _associate(
+        [(50, 50)],
+        state,
+        2,
+        outlines=[_box(50, 50)],
+    )
+    assert hidden.occlusion_bout is True
+    assert hidden.split_detection is False
+    assert len(hidden.slot_to_detection) == 1
+    assert hidden.unmatched_slots == [s for s in (0, 1) if s not in hidden.slot_to_detection]
+    assert state.last_centers == pre_centers
+
+
+def test_chase_close_centers_without_occlusion_does_not_freeze():
+    """Close centers of mass with a clear outline gap are chase, not freeze."""
+    state = IdentitySlotState.initial(2)
+    state.typical_area = 100.0
+    frames = [
+        ([(20, 50), (50, 50)], [_box(20, 50), _box(50, 50)]),
+        ([(28, 50), (52, 50)], [_box(28, 50), _box(52, 50)]),
+        ([(36, 50), (54, 50)], [_box(36, 50), _box(54, 50)]),
+        ([(40, 50), (58, 50)], [_box(40, 50), _box(58, 50)]),
+    ]
+    maps = []
+    for centers, outlines in frames:
+        asg = _associate(centers, state, 2, outlines=outlines)
+        maps.append(asg.slot_to_detection)
+        assert asg.occlusion_bout is False
+        assert asg.split_detection is False
+        assert asg.frozen_slots == []
+    assert maps == [{0: 0, 1: 1}] * len(frames)
+    assert state.last_centers[0] == (40, 50)
+    assert state.last_centers[1] == (58, 50)
+
+
+def test_collapsed_area_near_another_detection_freezes():
+    """A shrunken fragment next to a full detection is an occlusion bout."""
+    state = IdentitySlotState.initial(2)
+    state.typical_area = 100.0
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+        areas=[100.0, 100.0],
+    )
+    _associate(
+        [(30, 50), (70, 50)],
+        state,
+        2,
+        outlines=[_box(30, 50), _box(70, 50)],
+        areas=[100.0, 100.0],
+    )
+    pre_centers = dict(state.last_centers)
+    # Gap is 8 px (no fattened intersect at 3 px, gap above 4 px) but the
+    # right blob has collapsed versus typical area.
+    collapsed = _associate(
+        [(40, 50), (58, 50)],
+        state,
+        2,
+        outlines=[_box(40, 50, w=10, h=10), _box(58, 50, w=4, h=4)],
+        areas=[100.0, 16.0],
+    )
+    assert collapsed.occlusion_bout is True
+    assert state.last_centers == pre_centers
+
+
+def test_freeze_lift_rematch_uses_pre_freeze_identities_not_pile_center():
+    """At freeze-lift, slots rematch from last pre-freeze COMs.
+
+    Detection order at lift is reversed so a rematch off the pile center
+    would swap; pre-freeze identities keep slot 0 on the left.
+    """
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+    )
+    _associate(
+        [(30, 50), (70, 50)],
+        state,
+        2,
+        outlines=[_box(30, 50), _box(70, 50)],
+    )
+    piled = _associate(
+        [(44, 50), (56, 50)],
+        state,
+        2,
+        outlines=[_box(44, 50), _box(56, 50)],
+    )
+    assert piled.occlusion_bout is True
+    assert state.last_centers[0] == (30, 50)
+    assert state.last_centers[1] == (70, 50)
+
+    # Right body first, left body second — pile-center rematch would swap.
+    lift = _associate(
+        [(68, 50), (32, 50)],
+        state,
+        2,
+        outlines=[_box(68, 50), _box(32, 50)],
+    )
+    assert lift.occlusion_bout is False
+    assert lift.slot_to_detection == {0: 1, 1: 0}
+    assert state.last_centers[0] == (32, 50)
+    assert state.last_centers[1] == (68, 50)
+
+
+def test_several_freeze_lifts_in_one_wrestle_rematch_each_time():
+    """A mid-bout separation rematches immediately, not only at the final exit."""
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+    )
+    _associate(
+        [(30, 50), (70, 50)],
+        state,
+        2,
+        outlines=[_box(30, 50), _box(70, 50)],
+    )
+
+    first_pile = _associate(
+        [(44, 50), (56, 50)],
+        state,
+        2,
+        outlines=[_box(44, 50), _box(56, 50)],
+    )
+    assert first_pile.occlusion_bout is True
+    assert state.last_centers[0] == (30, 50)
+
+    mid_lift = _associate(
+        [(66, 50), (34, 50)],
+        state,
+        2,
+        outlines=[_box(66, 50), _box(34, 50)],
+    )
+    assert mid_lift.occlusion_bout is False
+    assert mid_lift.slot_to_detection == {0: 1, 1: 0}
+    assert state.last_centers[0] == (34, 50)
+    assert state.last_centers[1] == (66, 50)
+
+    second_pile = _associate(
+        [(46, 50), (58, 50)],
+        state,
+        2,
+        outlines=[_box(46, 50), _box(58, 50)],
+    )
+    assert second_pile.occlusion_bout is True
+    assert state.last_centers[0] == (34, 50)
+    assert state.last_centers[1] == (66, 50)
+
+    final_lift = _associate(
+        [(70, 50), (30, 50)],
+        state,
+        2,
+        outlines=[_box(70, 50), _box(30, 50)],
+    )
+    assert final_lift.occlusion_bout is False
+    assert final_lift.slot_to_detection == {0: 1, 1: 0}
+    assert state.last_centers[0] == (30, 50)
+    assert state.last_centers[1] == (70, 50)
