@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import cv2
 import numpy as np
 
 from LabGym.identity.continuity import (
@@ -532,6 +533,59 @@ def test_freeze_lift_rematch_uses_pre_freeze_identities_not_pile_center():
     assert lift.slot_to_detection == {0: 1, 1: 0}
     assert state.last_centers[0] == (32, 50)
     assert state.last_centers[1] == (68, 50)
+
+
+def _ellipse_pair(x0, y0, x1, y1, a=50, b=18, canvas=900):
+    """Two filled-ellipse contours, as Detect + track gets from instance masks."""
+    m0 = np.zeros((canvas, canvas), dtype=np.uint8)
+    m1 = np.zeros((canvas, canvas), dtype=np.uint8)
+    cv2.ellipse(m0, (int(x0), int(y0)), (a, b), 0, 0, 360, 1, -1)
+    cv2.ellipse(m1, (int(x1), int(y1)), (a, b), 0, 0, 360, 1, -1)
+    c0, _ = cv2.findContours(m0, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    c1, _ = cv2.findContours(m1, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    return (
+        [c0[0], c1[0]],
+        [float(cv2.contourArea(c0[0])), float(cv2.contourArea(c1[0]))],
+        int(np.sum(m0 & m1)),
+    )
+
+
+def test_close_chase_does_not_drop_a_contour_when_mice_almost_touch():
+    """Freeze + split must not park a chasing mouse that still has its own outline.
+
+    Leader and pursuer close up; fattened-outline freeze fires, then instance
+    masks overlap a little. Both slots must keep a detection — the second
+    outline is the pursuer, not a split leftover.
+    """
+    state = IdentitySlotState.initial(2)
+    state.typical_area = float(np.pi * 50 * 18)
+    leader, pursuer = 250.0, 100.0
+    y = 200.0
+    dropped = []
+    for _ in range(20):
+        outlines, areas, overlap_px = _ellipse_pair(leader, y, pursuer, y)
+        asg = _associate(
+            [(leader, y), (pursuer, y)],
+            state,
+            2,
+            outlines=outlines,
+            areas=areas,
+        )
+        if len(asg.slot_to_detection) < 2:
+            dropped.append(
+                {
+                    "leader": leader,
+                    "pursuer": pursuer,
+                    "overlap_px": overlap_px,
+                    "unmatched": list(asg.unmatched_slots),
+                    "extra": list(asg.extra_detections),
+                    "split": asg.split_detection,
+                }
+            )
+            break
+        leader += 3
+        pursuer += 8
+    assert dropped == []
 
 
 def test_several_freeze_lifts_in_one_wrestle_rematch_each_time():

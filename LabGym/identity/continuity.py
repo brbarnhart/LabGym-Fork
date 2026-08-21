@@ -19,6 +19,12 @@ OUTLINE_DILATION_PX = 3
 CONTOUR_GAP_PX = 4.0
 AREA_COLLAPSE_RATIO = 0.5
 UNMATCHED_NEAR_SIZE_FACTOR = 1.5
+# Overlapping outlines are a split only if their COMs sit on one body.
+# Two mice that almost touch have COMs ~one animal-size apart.
+SPLIT_SAME_BODY_COM_FACTOR = 0.5
+# If every stolen-to slot still has its last COM near the overlapping
+# cluster, the animals are present in a pile — do not park one of them.
+SPLIT_PILE_LAST_COM_FACTOR = 2.0
 
 
 @dataclass
@@ -242,14 +248,16 @@ def _apply_split_detection(
     outlines: Sequence,
     centers: Sequence[tuple[float, float]],
     predictions: dict[int, tuple[float, float]],
+    animal_size: float,
+    last_centers: dict[int, tuple[float, float]],
 ) -> bool:
     """Unassign stolen slots when overlapping outlines belong to one animal.
 
-    If two or more assigned detections have overlapping raw outlines, keep the
-    slot whose predicted COM is nearest the overlapping cluster and park the
-    others — but only when the parked slot's prediction is far from the
-    cluster. Two animals piled on the same cluster keep both assignments
-    (occlusion handles that). Returns True when a steal was refused.
+    If two or more assigned detections have overlapping raw outlines *and*
+    their centers of mass sit on one body, keep the slot whose predicted COM
+    is nearest the overlapping cluster and park the others. Two animals that
+    almost touch (COMs about one body apart) keep both assignments; occlusion
+    freeze handles that. Returns True when a steal was refused.
     """
     assigned = list(slot_to_detection.items())
     if len(assigned) < 2:
@@ -286,8 +294,25 @@ def _apply_split_detection(
         if len(members) < 2:
             continue
         det_idxs = [d for _, d in members]
+        max_com = 0.0
+        for i in range(len(det_idxs)):
+            for j in range(i + 1, len(det_idxs)):
+                max_com = max(
+                    max_com,
+                    float(distance.euclidean(centers[det_idxs[i]], centers[det_idxs[j]])),
+                )
+        if max_com >= SPLIT_SAME_BODY_COM_FACTOR * max(float(animal_size), 1.0):
+            continue
         cx = sum(centers[d][0] for d in det_idxs) / len(det_idxs)
         cy = sum(centers[d][1] for d in det_idxs) / len(det_idxs)
+        size = max(float(animal_size), 1.0)
+        if all(
+            not _is_unbound(last_centers[s])
+            and distance.euclidean(_xy(last_centers[s]), (cx, cy))
+            <= SPLIT_PILE_LAST_COM_FACTOR * size
+            for s, _ in members
+        ):
+            continue
         slots = [s for s, _ in members]
         votes: dict[int, int] = {s: 0 for s in slots}
         for _, det_i in members:
@@ -475,12 +500,15 @@ def associate_identity_slots(
         slot_to_detection[slot] = det_i
         used_detections.add(det_i)
 
+    animal_size = _animal_size(slot_state, detections)
     split_detection = _apply_split_detection(
         slot_to_detection,
         used_detections,
         outlines,
         centers,
         predictions,
+        animal_size,
+        slot_state.last_centers,
     )
 
     leftover = [i for i in range(len(centers)) if i not in used_detections]
