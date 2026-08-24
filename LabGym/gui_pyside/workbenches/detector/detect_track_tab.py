@@ -7,6 +7,7 @@ from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
@@ -255,6 +256,27 @@ class DetectTrackTab(QWidget):
         p_form.addRow(
             self._lab("Contact distance × size:", tip_contact), self.spin_contact
         )
+
+        self.chk_split = QCheckBox("On")
+        self.chk_split.setChecked(True)
+        tip_split = (
+            "Troubleshooting: refuse a steal when two overlapping outlines look "
+            "like one animal (the other slot parks). Turn off to use Hungarian "
+            "assignment only for those frames. Re-detect to apply."
+        )
+        self.chk_split.setToolTip(tip_split)
+        p_form.addRow(self._lab("Split detection:", tip_split), self.chk_split)
+
+        self.chk_freeze = QCheckBox("On")
+        self.chk_freeze.setChecked(True)
+        tip_freeze = (
+            "Troubleshooting: during an occlusion bout (almost-touching outlines, "
+            "hidden animal, collapsed area), do not update last center of mass "
+            "or velocity. Turn off to keep following detections while animals "
+            "are close. Re-detect to apply."
+        )
+        self.chk_freeze.setToolTip(tip_freeze)
+        p_form.addRow(self._lab("Occlusion freeze:", tip_freeze), self.chk_freeze)
 
         layout.addWidget(p_box)
 
@@ -558,6 +580,8 @@ class DetectTrackTab(QWidget):
                 length=int(self.spin_length.value()),
                 detector_batch=int(self.spin_batch.value()),
                 contact_distance_factor=float(self.spin_contact.value()),
+                enable_split_detection=self.chk_split.isChecked(),
+                enable_occlusion_freeze=self.chk_freeze.isChecked(),
             )
             # Expand animal_number to each kind
             try:

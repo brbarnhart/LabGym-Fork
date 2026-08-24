@@ -92,6 +92,16 @@ def test_validate_requires_weights(tmp_path: Path):
     assert load_detector_animal_kinds(det) == ["mouse"]
 
 
+def test_identity_hygiene_toggles_default_on():
+    cfg = DetectTrackConfig(
+        video_path="x.avi",
+        detector_path="d",
+        results_root="out",
+    )
+    assert cfg.enable_split_detection is True
+    assert cfg.enable_occlusion_freeze is True
+
+
 def test_resolved_animal_number_defaults():
     cfg = DetectTrackConfig(
         video_path="x.avi",

@@ -427,6 +427,8 @@ def associate_identity_slots(
     *,
     animals_per_kind: int,
     count_to_deregister: int,
+    enable_split_detection: bool = True,
+    enable_occlusion_freeze: bool = True,
 ) -> SlotAssignment:
     """Assign this frame's detections to identity slots for one animal kind.
 
@@ -450,6 +452,10 @@ def associate_identity_slots(
             initialize dummy slots when ``slot_state`` has none.
         count_to_deregister: Unused-frame timeout retained for the Detect +
             track adapter. Parked slots no longer teleport after this count.
+        enable_split_detection: When False, overlapping outlines may bind two
+            slots (Hungarian-only). Troubleshooting toggle.
+        enable_occlusion_freeze: When False, last COM and velocity still update
+            during almost-touch / pile frames. Troubleshooting toggle.
 
     Returns:
         Slot assignment plus the updated ``slot_state``.
@@ -501,15 +507,17 @@ def associate_identity_slots(
         used_detections.add(det_i)
 
     animal_size = _animal_size(slot_state, detections)
-    split_detection = _apply_split_detection(
-        slot_to_detection,
-        used_detections,
-        outlines,
-        centers,
-        predictions,
-        animal_size,
-        slot_state.last_centers,
-    )
+    split_detection = False
+    if enable_split_detection:
+        split_detection = _apply_split_detection(
+            slot_to_detection,
+            used_detections,
+            outlines,
+            centers,
+            predictions,
+            animal_size,
+            slot_state.last_centers,
+        )
 
     leftover = [i for i in range(len(centers)) if i not in used_detections]
     still_unbound = [s for s in unbound if s not in slot_to_detection]
@@ -520,10 +528,14 @@ def associate_identity_slots(
     claimable: list[int] = []
     for det_i in leftover:
         leftover_outline = outlines[det_i] if det_i < len(outlines) else None
-        if leftover_outline is not None and any(
-            _raw_outlines_overlap(leftover_outline, other)
-            for other in assigned_outlines
-            if other is not None
+        if (
+            enable_split_detection
+            and leftover_outline is not None
+            and any(
+                _raw_outlines_overlap(leftover_outline, other)
+                for other in assigned_outlines
+                if other is not None
+            )
         ):
             split_detection = True
             continue
@@ -535,7 +547,7 @@ def associate_identity_slots(
     unmatched_slots = [s for s in slot_ids if s not in slot_to_detection]
     frozen_slots: list[int] = []
     occlusion_bout = False
-    if not split_detection:
+    if enable_occlusion_freeze and not split_detection:
         frozen_slots = _occlusion_involved_slots(
             detections,
             slot_state,

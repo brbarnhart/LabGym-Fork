@@ -41,6 +41,8 @@ class DetectTrackConfig:
     min_contact_frames: int = 3
     gap_bridge_frames: int = 2
     write_default_subjects: bool = True
+    enable_split_detection: bool = True
+    enable_occlusion_freeze: bool = True
 
     def resolved_animal_kinds(self) -> List[str]:
         if self.animal_kinds:
@@ -294,6 +296,8 @@ def detect_and_track_video(
     aad = None
     try:
         aad = AnalyzeAnimalDetector()
+        aad.enable_split_detection = bool(config.enable_split_detection)
+        aad.enable_occlusion_freeze = bool(config.enable_occlusion_freeze)
         aad.prepare_analysis(
             str(Path(config.detector_path).resolve()),
             str(video.resolve()),

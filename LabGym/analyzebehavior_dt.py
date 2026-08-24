@@ -121,6 +121,8 @@ class AnalyzeAnimalDetector():
 		self.temp_frames=None
 		self.social_distance=0
 		self.log=[]
+		self.enable_split_detection=True
+		self.enable_occlusion_freeze=True
 
 
 	def prepare_analysis(self,
@@ -300,6 +302,8 @@ class AnalyzeAnimalDetector():
 			),
 			animals_per_kind=int(self.animal_number[animal_name]),
 			count_to_deregister=self.count_to_deregister,
+			enable_split_detection=bool(getattr(self, "enable_split_detection", True)),
+			enable_occlusion_freeze=bool(getattr(self, "enable_occlusion_freeze", True)),
 		)
 
 

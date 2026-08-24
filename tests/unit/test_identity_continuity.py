@@ -32,6 +32,8 @@ def _associate(
     count_to_deregister=1000,
     outlines=None,
     areas=None,
+    enable_split_detection=True,
+    enable_occlusion_freeze=True,
 ):
     return associate_identity_slots(
         FrameDetections(
@@ -42,6 +44,8 @@ def _associate(
         state,
         animals_per_kind=animals_per_kind,
         count_to_deregister=count_to_deregister,
+        enable_split_detection=enable_split_detection,
+        enable_occlusion_freeze=enable_occlusion_freeze,
     )
 
 
@@ -331,6 +335,55 @@ def test_one_or_two_frame_split_does_not_leave_lasting_swap():
     assert recovered.unmatched_slots == []
     assert state.last_centers[0] == (10, 50)
     assert state.last_centers[1] == (86, 50)
+
+
+def test_split_detection_can_be_disabled():
+    """With split off, overlapping outlines may bind both slots (Hungarian-only)."""
+    state = IdentitySlotState.initial(2)
+    _associate([(10, 50), (80, 50)], state, 2)
+    _associate([(12, 50), (82, 50)], state, 2)
+    split_off = _associate(
+        [(12, 50), (14, 50)],
+        state,
+        2,
+        outlines=[_box(12, 50), _box(14, 50)],
+        enable_split_detection=False,
+        enable_occlusion_freeze=False,
+    )
+    assert split_off.split_detection is False
+    assert split_off.slot_to_detection.keys() == {0, 1}
+    assert split_off.unmatched_slots == []
+
+
+def test_occlusion_freeze_can_be_disabled():
+    """With freeze off, almost-touching outlines still update last COM."""
+    state = IdentitySlotState.initial(2)
+    _associate(
+        [(20, 50), (80, 50)],
+        state,
+        2,
+        outlines=[_box(20, 50), _box(80, 50)],
+        enable_occlusion_freeze=False,
+    )
+    _associate(
+        [(30, 50), (70, 50)],
+        state,
+        2,
+        outlines=[_box(30, 50), _box(70, 50)],
+        enable_occlusion_freeze=False,
+    )
+    piled = _associate(
+        [(44, 50), (56, 50)],
+        state,
+        2,
+        outlines=[_box(44, 50), _box(56, 50)],
+        enable_occlusion_freeze=False,
+    )
+    assert piled.occlusion_bout is False
+    assert piled.frozen_slots == []
+    assert piled.slot_to_detection.keys() == {0, 1}
+    assert state.last_centers[0] == (44, 50)
+    assert state.last_centers[1] == (56, 50)
 
 
 def test_first_frame_pile_still_binds_unbound_slots():
