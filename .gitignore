@@ -168,3 +168,7 @@ tmp.pylint
 
 # test data directory
 testing_ground/
+
+# Local agent scratch (specs, ticket drafts)
+.scratch/
+
