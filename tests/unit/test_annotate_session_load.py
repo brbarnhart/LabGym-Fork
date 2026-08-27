@@ -307,6 +307,78 @@ def test_missing_video_does_not_drop_metadata(tmp_path: Path):
     assert "video unavailable" in (got["video_err"] or "")
 
 
+def test_no_package_metadata_does_not_invent_n_frames():
+    from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
+        run_annotate_session_load,
+    )
+
+    got = {"meta": None}
+    state = run_annotate_session_load(
+        "",
+        video_path="clip.avi",
+        skip_video=True,
+        on_metadata=lambda m: got.__setitem__("meta", m),
+    )
+    assert state == "ok"
+    assert got["meta"] is not None
+    assert got["meta"].n_frames is None
+    assert got["meta"].kinds == []
+
+
+def test_sidecar_fills_n_frames_when_no_package(tmp_path: Path):
+    from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
+        run_annotate_session_load,
+    )
+
+    sidecar = tmp_path / "clip.annotations.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "video_path": "clip.avi",
+                "fps": 12.0,
+                "total_frames": 40,
+                "behaviors": [],
+                "subjects": [{"subject_id": 0, "animal_kind": "mouse"}],
+                "bouts": {"0": {}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    got = {"meta": None}
+    state = run_annotate_session_load(
+        "",
+        video_path=str(tmp_path / "clip.avi"),
+        annotations_path=str(sidecar),
+        skip_video=True,
+        on_metadata=lambda m: got.__setitem__("meta", m),
+    )
+    assert state == "ok"
+    assert got["meta"].n_frames == 40
+    assert got["meta"].fps == 12.0
+    assert got["meta"].annotations_data is not None
+
+
+def test_worker_does_not_pass_package_length_as_video_length(tmp_path: Path):
+    from LabGym.annotator.core.tracklets_bridge import load_tracklets_for_annotator
+    from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
+        run_annotate_session_load,
+    )
+
+    review = _package_two_kinds_accepted(tmp_path)
+    seen: dict = {}
+
+    def spy(directory, **kwargs):
+        seen.update(kwargs)
+        return load_tracklets_for_annotator(directory)
+
+    state = run_annotate_session_load(
+        str(review), skip_video=True, load_tracklets=spy
+    )
+    assert state == "ok"
+    assert seen.get("video_total_frames") is None
+
+
 def test_runner_source_does_not_use_analysis_job_queue():
     import ast
     from pathlib import Path as P
@@ -364,7 +436,6 @@ def _make_tab(tmp_path: Path, *, accepted: bool = True):
 def test_annotate_load_does_not_enqueue_job_queue(tmp_path: Path, monkeypatch):
     from PySide6.QtWidgets import QApplication, QMessageBox
 
-    from LabGym.annotator.ui.main_window import MainWindow
     from LabGym.gui_pyside.jobs.sequential_queue import SequentialJobQueue
 
     hits: list[str] = []
@@ -372,7 +443,13 @@ def test_annotate_load_does_not_enqueue_job_queue(tmp_path: Path, monkeypatch):
         SequentialJobQueue, "start", lambda *a, **k: hits.append("start")
     )
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: 0)
-    monkeypatch.setattr(MainWindow, "open_session_video", lambda self, path: None)
+
+    def boom_load(self, path):
+        raise AssertionError("session load must not open VideoHandler on the UI thread")
+
+    monkeypatch.setattr(
+        "LabGym.annotator.core.video_handler.VideoHandler.load", boom_load
+    )
 
     tab = _make_tab(tmp_path)
     started = tab.load_current()
@@ -396,6 +473,8 @@ def test_annotate_load_does_not_enqueue_job_queue(tmp_path: Path, monkeypatch):
     loaded = tab.annotator._loaded_tracklets
     assert loaded is not None
     assert set(loaded.stores) == {"mouse", "object"}
+    assert tab.annotator.video.is_loaded is False
+    assert tab.annotator.has_unsaved_ethogram() is False
     tab.drop_session()
 
 
@@ -456,11 +535,19 @@ def test_video_combo_during_load_replaces(tmp_path: Path, monkeypatch):
 
     from LabGym.gui_pyside.project.controller import ProjectController
     from LabGym.gui_pyside.project.model import Project
+    from LabGym.gui_pyside.workbenches.categorizer import annotate_session_load as sl
     from LabGym.gui_pyside.workbenches.categorizer.annotate_ethogram_tab import (
         AnnotateEthogramTab,
     )
+    from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
+        AnnotateSessionMetadata,
+    )
 
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: 0)
+    monkeypatch.setattr(
+        "LabGym.gui_pyside.workbenches.categorizer.annotate_ethogram_tab.may_use_downstream",
+        lambda *a, **k: True,
+    )
 
     vid_a = tmp_path / "a.avi"
     vid_b = tmp_path / "b.avi"
@@ -472,17 +559,73 @@ def test_video_combo_during_load_replaces(tmp_path: Path, monkeypatch):
     proj.defaults.current_video = str(vid_a)
     ctrl = ProjectController()
     ctrl.replace(proj, dirty=False)
+
+    started: list[str] = []
+    gens_seen: list[int] = []
+    block = threading.Event()
+
+    def gated_run(*args, **kwargs):
+        started.append(str(kwargs.get("video_path") or args[0] if args else ""))
+        cancel = kwargs.get("cancel_event")
+        on_metadata = kwargs.get("on_metadata")
+        if on_metadata is not None:
+            on_metadata(
+                AnnotateSessionMetadata(
+                    video_path=str(kwargs.get("video_path") or ""),
+                    annotations_path="",
+                    review_dir="",
+                    n_frames=8,
+                    fps=10.0,
+                    kinds=[],
+                )
+            )
+        for _ in range(50):
+            if cancel is not None and cancel.is_set():
+                return "cancelled"
+            if block.wait(0.05):
+                break
+        return "ok"
+
+    monkeypatch.setattr(sl, "run_annotate_session_load", gated_run)
+
     tab = AnnotateEthogramTab(ctrl)
-    calls: list[str] = []
-    monkeypatch.setattr(tab, "_apply_to", lambda w: calls.append("apply") or True)
-    tab._session_thread = object()
-    tab.combo_video.setCurrentIndex(1)
-    assert calls == ["apply"]
-    calls.clear()
-    tab._session_thread = None
-    tab.combo_video.setCurrentIndex(0)
-    assert calls == []
-    tab.drop_session()
+    orig_start = tab._start_session_load
+
+    def tracking_start(window, ctx):
+        orig_start(window, ctx)
+        gens_seen.append(tab._session_gen)
+
+    monkeypatch.setattr(tab, "_start_session_load", tracking_start)
+    app = QApplication.instance()
+    assert app is not None
+    try:
+        assert tab.load_current() is True
+        assert tab._session_thread is not None
+        first_target = tab._session_window
+        other = None
+        for i in range(tab.combo_video.count()):
+            data = str(tab.combo_video.itemData(i) or "")
+            if data.endswith("b.avi"):
+                other = i
+                break
+        assert other is not None
+        tab.combo_video.setCurrentIndex(int(other))
+        for _ in range(40):
+            app.processEvents()
+            if len(started) >= 2:
+                break
+            time.sleep(0.05)
+        assert [p.endswith("a.avi") for p in started].count(True) >= 1
+        assert [p.endswith("b.avi") for p in started].count(True) >= 1
+        assert tab._session_window is first_target
+        assert len(gens_seen) >= 2
+        assert gens_seen[-1] != gens_seen[0]
+    finally:
+        block.set()
+        thread = tab._session_thread
+        if thread is not None:
+            thread.wait(5000)
+        tab.drop_session()
 
 
 @pytest.mark.gui
@@ -513,6 +656,97 @@ def test_accepted_identities_gate_does_not_open_video(tmp_path: Path, monkeypatc
     assert tab.annotator.video.is_loaded is False
     assert tab.annotator.manager is None
     tab.drop_session()
+
+
+@pytest.mark.gui
+def test_sidecar_bouts_survive_subset_subjects_and_stay_saved(tmp_path: Path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.annotator.core.tracklets_bridge import LoadedTracklets
+    from LabGym.annotator.ui.main_window import MainWindow
+    from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
+        loaded_tracklets_placeholder,
+        overlay_subject_display,
+    )
+    from LabGym.identity.package import SubjectRecord
+    from LabGym.id_review.types import SCHEMA_VERSION, TrackletStore
+
+    sidecar = {
+        "schema_version": 2,
+        "video_path": "clip.avi",
+        "fps": 10.0,
+        "total_frames": 8,
+        "behaviors": [{"name": "grooming", "color": "#00AAFF", "hotkey": "1"}],
+        "subjects": [
+            {
+                "subject_id": 0,
+                "animal_kind": "mouse",
+                "display_name": "a",
+                "color": "#4FC3F7",
+            },
+            {
+                "subject_id": 1,
+                "animal_kind": "mouse",
+                "display_name": "b",
+                "color": "#FF8A65",
+            },
+        ],
+        "bouts": {
+            "0": {"grooming": [{"start_frame": 1, "end_frame": 2}]},
+            "1": {"grooming": [{"start_frame": 3, "end_frame": 4}]},
+        },
+        "interaction_bouts": {},
+        "exclusive_mode": False,
+        "behavior_mode": 0,
+    }
+    recs = [
+        SubjectRecord(
+            subject_id=0,
+            animal_kind="mouse",
+            display_name="resident",
+            track_id=0,
+        )
+    ]
+    win = MainWindow()
+    win.begin_session_from_metadata(
+        video_path="clip.avi",
+        n_frames=8,
+        fps=10.0,
+        subjects=recs,
+        annotations_data=sidecar,
+        tracklets_placeholder=loaded_tracklets_placeholder(".", recs),
+    )
+    overlay_subject_display(win.manager.session, recs)
+    assert "1" in win.manager.session.bouts
+    assert win.manager.session.bouts["1"]["grooming"][0].start_frame == 3
+    assert win.has_unsaved_ethogram() is False
+
+    n = 8
+    store = TrackletStore(
+        schema_version=SCHEMA_VERSION,
+        animal_kind="mouse",
+        ids=[0, 1],
+        n_frames=n,
+        centers=np.zeros((2, n, 2)),
+        valid=np.ones((2, n), dtype=bool),
+        heights=np.ones((2, n)),
+        contours=None,
+        meta={"fps": 10.0},
+    )
+    loaded = LoadedTracklets(
+        directory=".",
+        stores={"mouse": store},
+        subjects=list(win.manager.session.subjects),
+        subject_to_track={0: ("mouse", 0), 1: ("mouse", 1)},
+    )
+    win.apply_loaded_tracklets(loaded)
+    assert win.manager.session.bouts["1"]["grooming"][0].start_frame == 3
+    assert win.has_unsaved_ethogram() is False
+    win.drop_session()
 
 
 def test_in_flight_tracklets_load_is_cancellable(tmp_path: Path):

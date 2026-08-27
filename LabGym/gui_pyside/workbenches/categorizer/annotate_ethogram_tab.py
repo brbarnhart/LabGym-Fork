@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -24,12 +24,37 @@ from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
     AnnotateSessionLoadThread,
     AnnotateSessionMetadata,
     loaded_tracklets_placeholder,
+    overlay_subject_display,
 )
 from LabGym.identity.downstream import (
     may_use_downstream,
     review_ids_required_message,
 )
 from LabGym.identity.package import has_identity_package
+
+
+def _annotator_alive(window: Optional[MainWindow]) -> bool:
+    """False when the C++ QWidget has already been deleted."""
+    if window is None:
+        return False
+    try:
+        from shiboken6 import isValid
+    except ImportError:
+        return True
+    return bool(isValid(window))
+
+
+def _bgr_to_rgb(frame: object) -> object:
+    """Convert OpenCV BGR preview to the annotator widget's RGB layout."""
+    import numpy as np
+
+    if frame is None or not isinstance(frame, np.ndarray):
+        return frame
+    if frame.ndim != 3 or frame.shape[2] != 3:
+        return frame
+    import cv2
+
+    return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
 
 class AnnotateEthogramTab(QWidget):
@@ -195,7 +220,12 @@ class AnnotateEthogramTab(QWidget):
             self.project.set_current_video(str(path), dirty=True)
         self._update_status_banner()
         if self._session_thread is not None:
-            if not self._apply_to(self.annotator):
+            target = (
+                self._session_window
+                if _annotator_alive(self._session_window)
+                else self.annotator
+            )
+            if not self._apply_to(target):
                 self._cancel_session_load()
 
     def _selected_video_path(self) -> str:
@@ -238,7 +268,11 @@ class AnnotateEthogramTab(QWidget):
         self._apply_to(win)
 
     def _on_detached_closed(self, *_args) -> None:
+        closed = self._detached
         self._detached = None
+        if self._session_window is closed:
+            self._cancel_session_load()
+            self._session_window = None
 
     def _wire_open_video(self, window: MainWindow) -> None:
         """File → Open must use the same accepted-identities gate as Load."""
@@ -316,7 +350,7 @@ class AnnotateEthogramTab(QWidget):
             review_dir,
             video_path=str(getattr(ctx, "video_path", "") or ""),
             annotations_path=ann_arg or None,
-            skip_video=True,
+            skip_video=False,
             behavior_mode=int(ctx.behavior_mode),
             exclusive_mode=bool(getattr(ctx, "exclusive_mode", False)),
             parent=self,
@@ -326,6 +360,9 @@ class AnnotateEthogramTab(QWidget):
         )
         thread.tracklets_ready.connect(
             lambda loaded, g=gen, w=window: self._on_session_tracklets(w, loaded, g)
+        )
+        thread.frame_ready.connect(
+            lambda frame, g=gen, w=window: self._on_session_frame(w, frame, g)
         )
         thread.tracklets_error.connect(
             lambda msg, g=gen, w=window: self._on_session_tracklets_error(w, msg, g)
@@ -354,7 +391,7 @@ class AnnotateEthogramTab(QWidget):
         self.btn_cancel_load.setEnabled(False)
 
     def _on_session_metadata(self, window: MainWindow, meta: object, gen: int) -> None:
-        if gen != self._session_gen:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
         if not isinstance(meta, AnnotateSessionMetadata):
             return
@@ -364,11 +401,12 @@ class AnnotateEthogramTab(QWidget):
         self, window: MainWindow, meta: AnnotateSessionMetadata, gen: int
     ) -> None:
         """Unlock subjects / n_frames / ethogram from package JSON."""
-        if gen != self._session_gen:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
         self._session_meta = meta
+        sidecar = meta.annotations_data is not None
         placeholder = None
-        if meta.subjects:
+        if meta.subjects and not sidecar:
             placeholder = loaded_tracklets_placeholder(meta.review_dir, meta.subjects)
         window.begin_session_from_metadata(
             video_path=meta.video_path,
@@ -376,32 +414,29 @@ class AnnotateEthogramTab(QWidget):
             fps=meta.fps,
             subjects=meta.subjects,
             annotations_path=meta.annotations_path or None,
+            annotations_data=meta.annotations_data,
             behavior_mode=meta.behavior_mode,
             exclusive_mode=meta.exclusive_mode,
             tracklets_placeholder=placeholder,
         )
+        if sidecar and window.manager is not None:
+            overlay_subject_display(window.manager.session, meta.subjects)
+            if window.subject_panel:
+                window.subject_panel.set_manager(window.manager)
+        n = int(meta.n_frames or 0)
         self.lbl_status.setText(
-            f"Frame 0/{max(0, meta.n_frames - 1)}  |  loading video and outlines…"
-        )
-        video_path = meta.video_path
-        QTimer.singleShot(
-            0, lambda g=gen, w=window, p=video_path: self._open_session_video(w, p, g)
+            f"Frame 0/{max(0, n - 1)}  |  loading video and outlines…"
         )
 
-    def _open_session_video(self, window: MainWindow, path: str, gen: int) -> None:
-        if gen != self._session_gen:
+    def _on_session_frame(self, window: MainWindow, frame: object, gen: int) -> None:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
-        err = window.open_session_video(path)
-        if gen != self._session_gen:
-            return
-        if err:
-            window.show_canvas_error(err)
-            self.lbl_status.setText(err)
+        window.show_session_preview(_bgr_to_rgb(frame))
 
     def _on_session_tracklets(
         self, window: MainWindow, loaded: object, gen: int
     ) -> None:
-        if gen != self._session_gen:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
         if not isinstance(loaded, LoadedTracklets):
             return
@@ -413,15 +448,17 @@ class AnnotateEthogramTab(QWidget):
     def _on_session_tracklets_error(
         self, window: MainWindow, message: str, gen: int
     ) -> None:
-        if gen != self._session_gen:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
+        if window.manager:
+            window.manager.mark_saved()
         window.show_canvas_error(f"Could not load outlines: {message}")
         self.lbl_status.setText(f"Could not load outlines: {message}")
 
     def _on_session_video_error(
         self, window: MainWindow, message: str, gen: int
     ) -> None:
-        if gen != self._session_gen:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
         window.show_canvas_error(message)
         self.lbl_status.setText(message)
@@ -429,7 +466,7 @@ class AnnotateEthogramTab(QWidget):
     def _on_session_load_error(
         self, window: MainWindow, message: str, gen: int
     ) -> None:
-        if gen != self._session_gen:
+        if gen != self._session_gen or not _annotator_alive(window):
             return
         QMessageBox.warning(window, "Annotate ethogram", message)
         self.lbl_status.setText(message)

@@ -7,9 +7,11 @@ Geometry is published remapped tracklets (ADR-0006 / ADR-0009), not raw stores.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Sequence
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from PySide6.QtCore import QThread, Signal
 
@@ -45,14 +47,15 @@ class AnnotateSessionMetadata:
     video_path: str
     annotations_path: str
     review_dir: str
-    n_frames: int
-    fps: float
+    n_frames: Optional[int]
+    fps: Optional[float]
     kinds: List[str]
     subjects: List[SubjectRecord] = field(default_factory=list)
     behavior_mode: int = 0
     exclusive_mode: bool = False
     accepted: bool = False
     package: Optional[ReviewPackageMetadata] = None
+    annotations_data: Optional[Dict[str, Any]] = None
 
 
 def load_annotate_session_metadata(
@@ -90,8 +93,8 @@ def load_annotate_session_metadata(
         video_path=str(video_hint or pkg.video_path or ""),
         annotations_path=str(annotations_path or ""),
         review_dir=pkg.review_dir,
-        n_frames=int(pkg.n_frames),
-        fps=float(pkg.fps),
+        n_frames=int(pkg.n_frames) if pkg.n_frames else None,
+        fps=float(pkg.fps) if pkg.fps else None,
         kinds=kinds,
         subjects=list(pkg.subjects),
         behavior_mode=int(behavior_mode),
@@ -131,6 +134,63 @@ def loaded_tracklets_placeholder(
         subjects=subj_models,
         subject_to_track=mapping,
     )
+
+
+def overlay_subject_display(session: Any, records: Sequence[SubjectRecord]) -> None:
+    """Copy names/colors onto existing subjects; do not replace bout maps."""
+    if not records or session is None:
+        return
+    by_sid = {int(r.subject_id): r for r in records}
+    by_key: Dict[tuple, SubjectRecord] = {}
+    for rec in records:
+        tid = int(rec.track_id if rec.track_id is not None else rec.subject_id)
+        by_key[(str(rec.animal_kind), tid)] = rec
+    for subj in list(getattr(session, "subjects", None) or []):
+        rec = by_sid.get(int(subj.subject_id))
+        if rec is None:
+            rec = by_key.get((str(getattr(subj, "animal_kind", "")), int(subj.subject_id)))
+        if rec is None:
+            continue
+        if rec.display_name:
+            subj.display_name = rec.display_name
+        if rec.color:
+            subj.color = rec.color
+
+
+def read_sidecar_annotations(path: str) -> Optional[Dict[str, Any]]:
+    """Parse an ethogram JSON file; return None if missing or invalid."""
+    raw_path = str(path or "").strip()
+    if not raw_path:
+        return None
+    file_path = Path(raw_path)
+    if not file_path.is_file():
+        return None
+    try:
+        data = json.loads(file_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _attach_sidecar(meta: AnnotateSessionMetadata) -> None:
+    data = read_sidecar_annotations(meta.annotations_path)
+    if data is None:
+        return
+    meta.annotations_data = data
+    if not meta.n_frames:
+        try:
+            n = int(data.get("total_frames") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            meta.n_frames = n
+    if not meta.fps:
+        try:
+            fps = float(data.get("fps") or 0)
+        except (TypeError, ValueError):
+            fps = 0.0
+        if fps > 0:
+            meta.fps = fps
 
 
 def _default_read_frame(
@@ -183,12 +243,10 @@ def run_annotate_session_load(
 
     Args:
         review_dir: Identity package folder (published remapped tracklets).
-        video_path: Video to open via the annotator decoder (or preview
-            reader when *read_frame* is used).
-        annotations_path: Sidecar ethogram path.
+        video_path: Video path for the throwaway frame-0 preview reader.
+        annotations_path: Sidecar ethogram path (parsed on this thread).
         skip_metadata: When True, do not re-read package JSON.
-        skip_video: When True, do not open the video (UI uses the live
-            annotator decoder instead).
+        skip_video: When True, skip the throwaway frame-0 read.
         cancel_event: Set to abort; in-flight npz/video may still finish I/O
             but callbacks after cancel are skipped.
         on_metadata: Called with JSON metadata before npz/video work.
@@ -235,8 +293,8 @@ def run_annotate_session_load(
                 video_path=str(video_path or ""),
                 annotations_path=str(annotations_path or ""),
                 review_dir="",
-                n_frames=0,
-                fps=10.0,
+                n_frames=None,
+                fps=None,
                 kinds=[],
                 behavior_mode=int(behavior_mode),
                 exclusive_mode=bool(exclusive_mode),
@@ -246,6 +304,8 @@ def run_annotate_session_load(
             meta.video_path = str(video_path)
         if annotations_path:
             meta.annotations_path = str(annotations_path)
+        if meta is not None:
+            _attach_sidecar(meta)
         if _cancelled(cancel_event):
             return "cancelled"
         if on_metadata is not None:
@@ -269,12 +329,13 @@ def run_annotate_session_load(
             else:
                 raise
             return "error"
+        if meta is not None:
+            _attach_sidecar(meta)
 
     resolved_video = str(
         video_path or (meta.video_path if meta is not None else "") or ""
     )
-    n_frames = int(meta.n_frames) if meta is not None else 0
-    fps = float(meta.fps) if meta is not None else 10.0
+    fps = float(meta.fps) if (meta is not None and meta.fps) else 10.0
     store_meta = {}
     if meta is not None and meta.package is not None:
         kind = meta.package.animal_kind
@@ -286,10 +347,8 @@ def run_annotate_session_load(
         if not directory or _cancelled(cancel_event):
             return
         try:
-            loaded = load_fn(
-                directory, video_total_frames=n_frames or None
-            )
-        except Exception as exc:
+            loaded = load_fn(directory)
+        except (OSError, ValueError, FileNotFoundError, KeyError, TypeError) as exc:
             if not _cancelled(cancel_event) and on_tracklets_error is not None:
                 on_tracklets_error(str(exc))
             return
@@ -349,7 +408,7 @@ class AnnotateSessionLoadThread(QThread):
         video_path: Optional[str] = None,
         annotations_path: Optional[str] = None,
         skip_metadata: bool = False,
-        skip_video: bool = True,
+        skip_video: bool = False,
         metadata: Optional[AnnotateSessionMetadata] = None,
         behavior_mode: int = 0,
         exclusive_mode: bool = False,
