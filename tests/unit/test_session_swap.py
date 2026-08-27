@@ -508,3 +508,25 @@ def test_project_replaced_drops_ethogram_and_does_not_session_load(tmp_path: Pat
     assert tab.annotator.manager is None
     assert loads == []
     assert tab.has_unsaved_ethogram() is False
+
+
+def test_bout_list_methods_tolerate_no_manager() -> None:
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.annotator.ui.bout_list import BoutListWidget
+
+    sess = AnnotationSession(video_path="clip.avi", fps=10.0, total_frames=20)
+    mgr = AnnotationManager(sess)
+    mgr.add_behavior("grooming", "#00AAFF", "1")
+    widget = BoutListWidget(mgr)
+    widget.set_manager(None)
+    widget.refresh()
+    widget.set_current_frame(4)
+    widget._on_filter_changed(0)
+    assert widget._behavior_names() == []
+    assert widget._open_at_frame() == []
+    assert widget.table.rowCount() == 0

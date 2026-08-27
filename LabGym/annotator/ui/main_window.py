@@ -1251,6 +1251,8 @@ class MainWindow(QMainWindow):
             self.subject_panel.set_manager(None)
         if self.bout_list_dialog is not None:
             self.bout_list_dialog.set_manager(None)
+        if self._bout_list_window is not None:
+            self._bout_list_window.close()
         if hasattr(self, "video_widget"):
             self.video_widget.clear()
         if hasattr(self, "timeline"):
