@@ -31,7 +31,6 @@ from LabGym.gui_pyside.session_swap import (
     CHOICE_DISCARD,
     CHOICE_SAVE,
     SessionSwapReport,
-    drop_sessions,
     resolve_unsaved_session,
 )
 from LabGym.gui_pyside.shell.workbench_bar import WorkbenchBar
@@ -204,12 +203,20 @@ class WorkbenchMainWindow(QMainWindow):
         if report.unsaved_ethogram:
             parts.append("an unsaved ethogram")
         joined = " and ".join(parts) if parts else "unsaved session edits"
+        extra = ""
+        if report.unsaved_switch_markers and report.unsaved_ethogram:
+            extra = (
+                "\nSave writes Review IDs first, then the ethogram. "
+                "If the ethogram save fails, switch markers already written "
+                "stay on disk and the swap is blocked."
+            )
         r = QMessageBox.question(
             self,
             "Unsaved session",
             f"This project swap cannot continue while there is {joined}.\n\n"
             "Save or Discard before Open / Open Recent / Edit Project.\n"
-            "Discard does not write switch markers or the ethogram.",
+            "Discard does not write switch markers or the ethogram."
+            f"{extra}",
             QMessageBox.StandardButton.Save
             | QMessageBox.StandardButton.Discard
             | QMessageBox.StandardButton.Cancel,
@@ -233,20 +240,19 @@ class WorkbenchMainWindow(QMainWindow):
             prompt=self._prompt_unsaved_session,
         )
 
-    def _confirm_and_drop_session_for_project_swap(
-        self, *, project_file: bool = True
-    ) -> bool:
-        """Session Save/Discard, optional project-file prompt, then drop the session.
+    def _confirm_project_swap(self, *, project_file: bool = True) -> bool:
+        """Session Save/Discard, then optional project-file prompt. Does not drop.
 
-        Clean sessions skip the session prompt and drop immediately. Does not
-        start a **session load**.
+        The previous **session load** stays until a swap is committed
+        (``load_from_path`` / ``new_project`` / editor OK). ``project_replaced``
+        drops capture and tracklets. Cancel of Open's file dialog or Edit
+        Project leaves the current session loaded. Does not start a
+        **session load**.
         """
         if not self._confirm_session_for_project_swap():
             return False
         if project_file and not self._confirm_discard():
             return False
-        review, ethogram = self._session_hosts()
-        drop_sessions(review_ids=review, ethogram=ethogram)
         return True
 
     def _confirm_discard(self) -> bool:
@@ -267,14 +273,14 @@ class WorkbenchMainWindow(QMainWindow):
         return True
 
     def _new_project(self) -> None:
-        if not self._confirm_and_drop_session_for_project_swap():
+        if not self._confirm_project_swap():
             return
         self.project.new_project()
         self._edit_project()
         self._rebuild_recent_menu()
 
     def _open_project(self) -> None:
-        if not self._confirm_and_drop_session_for_project_swap():
+        if not self._confirm_project_swap():
             return
         start = self.project.last_project_path() or ""
         path, _ = QFileDialog.getOpenFileName(
@@ -297,7 +303,7 @@ class WorkbenchMainWindow(QMainWindow):
             QMessageBox.warning(self, "Open Recent", f"File not found:\n{path}")
             self._rebuild_recent_menu()
             return
-        if not self._confirm_and_drop_session_for_project_swap():
+        if not self._confirm_project_swap():
             return
         try:
             self.project.load_from_path(path)
@@ -350,7 +356,7 @@ class WorkbenchMainWindow(QMainWindow):
             return False
 
     def _edit_project(self) -> None:
-        if not self._confirm_and_drop_session_for_project_swap(project_file=False):
+        if not self._confirm_project_swap(project_file=False):
             return
         dlg = ProjectEditorDialog(self.project, self)
         dlg.exec()

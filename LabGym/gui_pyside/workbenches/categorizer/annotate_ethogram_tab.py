@@ -107,7 +107,11 @@ class AnnotateEthogramTab(QWidget):
         self.refresh_video_list()
 
     def has_unsaved_ethogram(self) -> bool:
-        """True when the embedded or detached annotator has unsaved bouts."""
+        """True when the embedded or detached annotator has an unsaved ethogram.
+
+        Counts bouts, behaviors, exclusive mode, and open starts — not the
+        ``*.labproj.json`` dirty flag.
+        """
         if self.annotator.has_unsaved_ethogram():
             return True
         if self._detached is not None:

@@ -3,9 +3,9 @@
 Unsaved **switch markers** and an unsaved ethogram block swap until Save or
 Discard. This is independent of the ``*.labproj.json`` dirty flag.
 
-Clean sessions are not prompted. Callers drop the session after this gate
-succeeds *and* any project-file prompt succeeds, typically via
-``project_replaced`` on the owning tabs.
+Clean sessions are not prompted. The session stays loaded until a **project
+swap** is committed (``load_from_path`` / ``new_project`` / editor OK);
+``project_replaced`` on the owning tabs is the drop.
 
 Proposed switch markers are not switch markers and must not be reported here.
 """
@@ -133,6 +133,10 @@ def resolve_unsaved_session(
     A clean session returns True without calling *prompt*. Cancel or a failed
     save returns False and leaves session memory in place. Discard reverts
     unsaved switch markers / ethogram in memory and does not write.
+
+    Save is not atomic across kinds: Review IDs is written first, then the
+    ethogram. If the second write fails, the first stays on disk, the swap
+    is blocked, and the session is not dropped.
 
     Args:
         review_ids: Review IDs session host.

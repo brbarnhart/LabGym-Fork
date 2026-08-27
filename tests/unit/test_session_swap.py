@@ -92,15 +92,16 @@ def _marker(frame: int = 4) -> SwitchMarker:
 
 
 def test_inspect_ignores_project_dirty_flag() -> None:
+    from LabGym.gui_pyside.project.controller import ProjectController
+
+    ctrl = ProjectController()
+    ctrl.mark_dirty()
+    assert ctrl.dirty is True
     review = _FakeReview(unsaved=False)
     ethogram = _FakeEthogram(unsaved=False)
     report = inspect_sessions(review_ids=review, ethogram=ethogram)
     assert report.is_dirty is False
     assert report.kinds() == ()
-    # Project dirty is a different gate; this helper never sees it.
-    project_dirty = True
-    assert project_dirty is True
-    assert inspect_sessions(review_ids=review, ethogram=ethogram).is_dirty is False
 
 
 def test_inspect_reports_switch_markers_and_ethogram_independently() -> None:
@@ -216,6 +217,28 @@ def test_failed_save_aborts_without_drop() -> None:
     assert review.unsaved is True
 
 
+def test_combined_save_second_failure_does_not_drop() -> None:
+    review = _FakeReview(unsaved=True)
+    ethogram = _FakeEthogram(unsaved=True)
+    ethogram.save_ok = False
+    assert (
+        resolve_unsaved_session(
+            review_ids=review,
+            ethogram=ethogram,
+            prompt=lambda _r: CHOICE_SAVE,
+        )
+        is False
+    )
+    assert review.saved is True
+    assert review.wrote is True
+    assert ethogram.saved is False
+    assert ethogram.wrote is False
+    assert review.dropped is False
+    assert ethogram.dropped is False
+    drop_sessions(review_ids=review, ethogram=ethogram)
+    assert review.dropped is True
+
+
 def test_switch_markers_signature_ignores_object_identity() -> None:
     a = [_marker(9)]
     b = [_marker(9)]
@@ -283,9 +306,11 @@ def test_project_replaced_drops_review_ids_and_does_not_session_load() -> None:
     tab.review_dir = "pkg"
     tab.markers = [_marker(1)]
     tab._saved_markers = [_marker(1)]
+    tab._cap._path = "clip.avi"
     ctrl.replace(Project.new(), dirty=False)
     assert tab.review_dir == ""
     assert tab._stores == {}
+    assert tab._cap.path is None
     assert tab.has_unsaved_switch_markers() is False
     assert loads == []
 
@@ -332,19 +357,23 @@ def test_open_and_edit_blocked_when_session_unresolved(
     monkeypatch.setattr(
         "LabGym.gui_pyside.main_window.ProjectEditorDialog", _NoDialog
     )
+    news: list[int] = []
+    monkeypatch.setattr(w.project, "new_project", lambda *a, **k: news.append(1))
     w._open_project()
     w._open_recent(str(recent))
     w._edit_project()
-    assert gates == ["session", "session", "session"]
+    w._new_project()
+    assert gates == ["session", "session", "session", "session"]
     assert loads == []
     assert editors == []
+    assert news == []
     w.close()
 
 
-def test_clean_swap_drops_session_without_prompt(monkeypatch) -> None:
+def test_project_file_cancel_keeps_session_loaded(monkeypatch) -> None:
     import sys
 
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QFileDialog
 
     QApplication.instance() or QApplication(sys.argv)
 
@@ -354,15 +383,92 @@ def test_clean_swap_drops_session_without_prompt(monkeypatch) -> None:
     review = w.wb_detector.review_tab
     review._stores["mouse"] = object()
     review.review_dir = "pkg"
+    monkeypatch.setattr(
+        "LabGym.gui_pyside.main_window.resolve_unsaved_session",
+        lambda **_k: True,
+    )
+    monkeypatch.setattr(w, "_confirm_discard", lambda: False)
+    monkeypatch.setattr(
+        QFileDialog, "getOpenFileName", lambda *a, **k: ("should-not-open.json", "")
+    )
+    loads: list[str] = []
+    monkeypatch.setattr(w.project, "load_from_path", lambda p: loads.append(p))
+    w._open_project()
+    assert review.review_dir == "pkg"
+    assert "mouse" in review._stores
+    assert loads == []
+    w.close()
+
+
+def test_open_and_edit_cancel_keep_session_loaded(monkeypatch) -> None:
+    import sys
+
+    from PySide6.QtWidgets import QApplication, QFileDialog
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.gui_pyside.main_window import WorkbenchMainWindow
+
+    w = WorkbenchMainWindow()
+    review = w.wb_detector.review_tab
+    review._stores["mouse"] = object()
+    review.review_dir = "pkg"
+
+    monkeypatch.setattr(
+        "LabGym.gui_pyside.main_window.resolve_unsaved_session",
+        lambda **_k: True,
+    )
+    monkeypatch.setattr(w, "_confirm_discard", lambda: True)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
+    loads: list[str] = []
+    monkeypatch.setattr(w.project, "load_from_path", lambda p: loads.append(p))
+
+    class _CancelDialog:
+        def __init__(self, *a, **k):
+            pass
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(
+        "LabGym.gui_pyside.main_window.ProjectEditorDialog", _CancelDialog
+    )
+    w._open_project()
+    assert review.review_dir == "pkg"
+    assert "mouse" in review._stores
+    assert loads == []
+    w._edit_project()
+    assert review.review_dir == "pkg"
+    assert "mouse" in review._stores
+    w.close()
+
+
+def test_clean_committed_swap_drops_session_without_prompt(monkeypatch) -> None:
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.gui_pyside.main_window import WorkbenchMainWindow
+    from LabGym.gui_pyside.project.model import Project
+
+    w = WorkbenchMainWindow()
+    review = w.wb_detector.review_tab
+    review._stores["mouse"] = object()
+    review.review_dir = "pkg"
+    review._cap._path = "clip.avi"
     prompts: list = []
     monkeypatch.setattr(
         w, "_prompt_unsaved_session", lambda r: prompts.append(r) or CHOICE_CANCEL
     )
-    monkeypatch.setattr(w, "_confirm_discard", lambda: True)
-    assert w._confirm_and_drop_session_for_project_swap() is True
+    assert w._confirm_project_swap() is True
     assert prompts == []
+    assert review.review_dir == "pkg"
+    w.project.replace(Project.new(), dirty=False)
     assert review.review_dir == ""
     assert review._stores == {}
+    assert review._cap.path is None
     assert w.wb_categorizer.generate_host.annotate_tab.annotator.manager is None
     w.close()
 

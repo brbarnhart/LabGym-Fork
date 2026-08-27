@@ -1200,6 +1200,11 @@ class MainWindow(QMainWindow):
         if not path and self.manager.session.video_path:
             path = str(self.sidecar_annotations_path(self.manager.session.video_path))
         if not path:
+            QMessageBox.critical(
+                self,
+                "Save Error",
+                "No sidecar or last-save path for this ethogram.",
+            )
             return False
         try:
             self.manager.close_all_open_bouts(self._current_frame)
@@ -1208,7 +1213,8 @@ class MainWindow(QMainWindow):
             self._refresh_display_overlay()
             self.statusBar().showMessage(f"Saved: {path}")
             return True
-        except OSError:
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
             return False
 
     def discard_unsaved_ethogram(self) -> None:
@@ -1233,10 +1239,25 @@ class MainWindow(QMainWindow):
         self.manager = None
         self._ethogram_path = None
         self._current_frame = 0
+        if hasattr(self, "palette_container"):
+            layout = self.palette_container.layout()
+            if layout is not None:
+                for i in reversed(range(layout.count())):
+                    w = layout.itemAt(i).widget()
+                    if w:
+                        w.setParent(None)
+        self.palette = None
+        if self.subject_panel:
+            self.subject_panel.set_manager(None)
+        if self.bout_list_dialog is not None:
+            self.bout_list_dialog.set_manager(None)
         if hasattr(self, "video_widget"):
             self.video_widget.clear()
         if hasattr(self, "timeline"):
             self.timeline.clear_selections()
+            self.timeline.update()
+        self._rebind_behavior_hotkeys()
+        self._update_undo_action()
         self.setWindowTitle("LabGym Behavior Annotator")
         self.statusBar().showMessage("Session dropped.")
 

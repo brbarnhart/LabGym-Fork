@@ -956,8 +956,12 @@ class BoutListWidget(QWidget):
         start = int(item.text())
         self.jump_requested.emit(start)
 
-    def set_manager(self, manager: AnnotationManager):
+    def set_manager(self, manager: Optional[AnnotationManager]) -> None:
         self.manager = manager
         self._filter_behavior = None
+        if manager is None:
+            self.table.setRowCount(0)
+            self._row_meta = []
+            return
         self._rebuild_filter_combo()
         self.refresh()
