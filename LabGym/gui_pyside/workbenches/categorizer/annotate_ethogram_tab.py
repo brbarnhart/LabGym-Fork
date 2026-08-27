@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -16,11 +16,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from LabGym.annotator.core.tracklets_bridge import LoadedTracklets
 from LabGym.annotator.ui.main_window import MainWindow
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
+    AnnotateSessionLoadThread,
+    AnnotateSessionMetadata,
+    loaded_tracklets_placeholder,
+)
 from LabGym.identity.downstream import (
-    apply_context_to_annotator,
     may_use_downstream,
     review_ids_required_message,
 )
@@ -37,6 +42,10 @@ class AnnotateEthogramTab(QWidget):
         self.project = project
         self._detached: Optional[MainWindow] = None
         self._block_combo = False
+        self._session_thread: Optional[AnnotateSessionLoadThread] = None
+        self._session_gen = 0
+        self._session_window: Optional[MainWindow] = None
+        self._session_meta: Optional[AnnotateSessionMetadata] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -57,6 +66,14 @@ class AnnotateEthogramTab(QWidget):
         )
         self.btn_load.clicked.connect(self.load_current)
         bar.addWidget(self.btn_load)
+
+        self.btn_cancel_load = QPushButton("Cancel")
+        self.btn_cancel_load.setEnabled(False)
+        self.btn_cancel_load.setToolTip(
+            "Abort the in-flight session load. Choosing another video also replaces it."
+        )
+        self.btn_cancel_load.clicked.connect(lambda: self._cancel_session_load())
+        bar.addWidget(self.btn_cancel_load)
 
         self.btn_reload = QPushButton("Refresh list")
         self.btn_reload.clicked.connect(self.refresh_video_list)
@@ -135,9 +152,12 @@ class AnnotateEthogramTab(QWidget):
 
     def drop_session(self) -> None:
         """Release annotator capture and tracklets; do not **session load**."""
+        self._cancel_session_load()
         self.annotator.drop_session()
         if self._detached is not None:
             self._detached.drop_session()
+        self._session_meta = None
+        self._session_window = None
 
     def refresh_video_list(self) -> None:
         choices = list_project_video_choices(self.project.project)
@@ -174,6 +194,9 @@ class AnnotateEthogramTab(QWidget):
         if path:
             self.project.set_current_video(str(path), dirty=True)
         self._update_status_banner()
+        if self._session_thread is not None:
+            if not self._apply_to(self.annotator):
+                self._cancel_session_load()
 
     def _selected_video_path(self) -> str:
         data = self.combo_video.currentData()
@@ -182,6 +205,8 @@ class AnnotateEthogramTab(QWidget):
         return self.project.current_video_path()
 
     def _update_status_banner(self) -> None:
+        if self._session_thread is not None:
+            return
         ctx = self.project.resolve_context(self._selected_video_path() or None)
         lines = ctx.summary_lines()
         lines.append("Save ethogram with Ctrl+S (File → Save Annotations in annotator menu).")
@@ -245,9 +270,7 @@ class AnnotateEthogramTab(QWidget):
             )
             return True
         self.project.set_current_video(path, dirty=True)
-        ok = apply_context_to_annotator(window, ctx)
-        if ok:
-            self._update_status_banner()
+        self._start_session_load(window, ctx)
         return True
 
     def _apply_to(self, window: MainWindow) -> bool:
@@ -260,14 +283,6 @@ class AnnotateEthogramTab(QWidget):
             )
             self.request_edit_project.emit()
             return False
-        if not Path(video).is_file():
-            QMessageBox.warning(
-                self,
-                "Annotate ethogram",
-                f"Video file not found:\n{video}",
-            )
-            return False
-
         ctx = self.project.resolve_context(video)
         self.project.set_current_video(video, dirty=True)
 
@@ -284,7 +299,143 @@ class AnnotateEthogramTab(QWidget):
             )
             return False
 
-        ok = apply_context_to_annotator(window, ctx)
-        if ok:
-            self._update_status_banner()
-        return ok
+        self._start_session_load(window, ctx)
+        return True
+
+    def _start_session_load(self, window: MainWindow, ctx) -> None:
+        """Replace any in-flight session load with a new one."""
+        self._cancel_session_load()
+        window.drop_session()
+        gen = self._session_gen
+        tracks = str(getattr(ctx, "tracklets_dir", "") or "")
+        package = bool(tracks) and has_identity_package(tracks)
+        review_dir = tracks if (package and bool(ctx.accepted_identities)) else ""
+        ann = getattr(ctx, "annotations_path", None) or None
+        ann_arg = str(ann) if (ann and Path(str(ann)).is_file()) else ""
+        thread = AnnotateSessionLoadThread(
+            review_dir,
+            video_path=str(getattr(ctx, "video_path", "") or ""),
+            annotations_path=ann_arg or None,
+            skip_video=True,
+            behavior_mode=int(ctx.behavior_mode),
+            exclusive_mode=bool(getattr(ctx, "exclusive_mode", False)),
+            parent=self,
+        )
+        thread.metadata_ready.connect(
+            lambda meta, g=gen, w=window: self._on_session_metadata(w, meta, g)
+        )
+        thread.tracklets_ready.connect(
+            lambda loaded, g=gen, w=window: self._on_session_tracklets(w, loaded, g)
+        )
+        thread.tracklets_error.connect(
+            lambda msg, g=gen, w=window: self._on_session_tracklets_error(w, msg, g)
+        )
+        thread.video_error.connect(
+            lambda msg, g=gen, w=window: self._on_session_video_error(w, msg, g)
+        )
+        thread.load_error.connect(
+            lambda msg, g=gen, w=window: self._on_session_load_error(w, msg, g)
+        )
+        thread.finished.connect(lambda g=gen: self._on_session_thread_finished(g))
+        self._session_thread = thread
+        self._session_window = window
+        self.btn_cancel_load.setEnabled(True)
+        self.lbl_status.setText("Loading package JSON…")
+        thread.start()
+
+    def _cancel_session_load(self) -> None:
+        """Abort the in-flight session load without dropping loaded metadata."""
+        self._session_gen += 1
+        thread = self._session_thread
+        if thread is not None:
+            thread.cancel()
+            thread.finished.connect(thread.deleteLater)
+        self._session_thread = None
+        self.btn_cancel_load.setEnabled(False)
+
+    def _on_session_metadata(self, window: MainWindow, meta: object, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        if not isinstance(meta, AnnotateSessionMetadata):
+            return
+        self._apply_session_metadata(window, meta, gen)
+
+    def _apply_session_metadata(
+        self, window: MainWindow, meta: AnnotateSessionMetadata, gen: int
+    ) -> None:
+        """Unlock subjects / n_frames / ethogram from package JSON."""
+        if gen != self._session_gen:
+            return
+        self._session_meta = meta
+        placeholder = None
+        if meta.subjects:
+            placeholder = loaded_tracklets_placeholder(meta.review_dir, meta.subjects)
+        window.begin_session_from_metadata(
+            video_path=meta.video_path,
+            n_frames=meta.n_frames,
+            fps=meta.fps,
+            subjects=meta.subjects,
+            annotations_path=meta.annotations_path or None,
+            behavior_mode=meta.behavior_mode,
+            exclusive_mode=meta.exclusive_mode,
+            tracklets_placeholder=placeholder,
+        )
+        self.lbl_status.setText(
+            f"Frame 0/{max(0, meta.n_frames - 1)}  |  loading video and outlines…"
+        )
+        video_path = meta.video_path
+        QTimer.singleShot(
+            0, lambda g=gen, w=window, p=video_path: self._open_session_video(w, p, g)
+        )
+
+    def _open_session_video(self, window: MainWindow, path: str, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        err = window.open_session_video(path)
+        if gen != self._session_gen:
+            return
+        if err:
+            window.show_canvas_error(err)
+            self.lbl_status.setText(err)
+
+    def _on_session_tracklets(
+        self, window: MainWindow, loaded: object, gen: int
+    ) -> None:
+        if gen != self._session_gen:
+            return
+        if not isinstance(loaded, LoadedTracklets):
+            return
+        window.apply_loaded_tracklets(loaded)
+        if window.manager:
+            n = window.manager.session.total_frames
+            self.lbl_status.setText(f"Loaded outlines  ·  {n} frames")
+
+    def _on_session_tracklets_error(
+        self, window: MainWindow, message: str, gen: int
+    ) -> None:
+        if gen != self._session_gen:
+            return
+        window.show_canvas_error(f"Could not load outlines: {message}")
+        self.lbl_status.setText(f"Could not load outlines: {message}")
+
+    def _on_session_video_error(
+        self, window: MainWindow, message: str, gen: int
+    ) -> None:
+        if gen != self._session_gen:
+            return
+        window.show_canvas_error(message)
+        self.lbl_status.setText(message)
+
+    def _on_session_load_error(
+        self, window: MainWindow, message: str, gen: int
+    ) -> None:
+        if gen != self._session_gen:
+            return
+        QMessageBox.warning(window, "Annotate ethogram", message)
+        self.lbl_status.setText(message)
+
+    def _on_session_thread_finished(self, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        self._session_thread = None
+        self.btn_cancel_load.setEnabled(False)
