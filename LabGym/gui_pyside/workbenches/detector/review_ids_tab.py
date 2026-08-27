@@ -54,14 +54,17 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
 from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
     DownstreamArtifactCheck,
+    ReviewPackageMetadata,
     check_downstream_artifacts,
     should_confirm_stale_downstream,
     video_path_for_review_package,
     clone_markers,
     events_for_kind,
-    load_review_package,
     resolve_video_path,
     save_review_package,
+)
+from LabGym.gui_pyside.workbenches.detector.review_ids_session_load import (
+    ReviewSessionLoadThread,
 )
 from LabGym.gui_pyside.workbenches.detector.review_ids_render import (
     VideoCaptureCache,
@@ -135,6 +138,7 @@ class ReviewIdsTab(QWidget):
 
     request_edit_project = Signal()
     package_saved = Signal(str)  # review_dir
+    session_load_finished = Signal(bool)
 
     def __init__(self, project: ProjectController, parent=None):
         super().__init__(parent)
@@ -173,6 +177,13 @@ class ReviewIdsTab(QWidget):
         self._probe_gen = 0
         self._probe_total = 0
         self._probe_done = 0
+        self._session_thread: Optional[ReviewSessionLoadThread] = None
+        self._session_gen = 0
+        self._pending_bgr = None
+        self._session_canvas_error = ""
+        self._session_store_meta: dict = {}
+        self._session_video_path = ""
+        self._session_meta: Optional[ReviewPackageMetadata] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -216,6 +227,13 @@ class ReviewIdsTab(QWidget):
         self.btn_load = QPushButton("Load")
         self.btn_load.clicked.connect(self._load_selected_video_package)
         pick.addWidget(self.btn_load)
+        self.btn_cancel_load = QPushButton("Cancel")
+        self.btn_cancel_load.setEnabled(False)
+        self.btn_cancel_load.setToolTip(
+            "Abort the in-flight session load. Choosing another video also replaces it."
+        )
+        self.btn_cancel_load.clicked.connect(lambda: self._cancel_session_load())
+        pick.addWidget(self.btn_cancel_load)
         self.btn_edit = QPushButton("Edit project…")
         self.btn_edit.clicked.connect(self.request_edit_project.emit)
         pick.addWidget(self.btn_edit)
@@ -441,7 +459,13 @@ class ReviewIdsTab(QWidget):
         self._update_probe_progress()
 
     def _on_video_combo(self, _i: int) -> None:
-        pass
+        if self._session_thread is None:
+            return
+        path = self.combo_video.currentData()
+        if path:
+            self._load_selected_video_package()
+        else:
+            self._cancel_session_load()
 
     def _on_project_replaced(self) -> None:
         """Drop the previous session; do not **session load** the new current video."""
@@ -582,19 +606,19 @@ class ReviewIdsTab(QWidget):
         self.load_package(tracks)
 
     def load_package(self, review_dir: str) -> bool:
-        """Open an identity package for preview and switch-marker edits.
+        """Start a cancellable **session load** for an identity package.
 
         Offers migrate-to-raw when an uncorrected public pack has no raw
         snapshot. Declining leaves files unchanged and keeps switch edits
-        locked.
+        locked. Package JSON unlocks the tab; pixels and outlines arrive
+        independently off the UI thread. Not an analysis job-queue item.
 
         Args:
             review_dir: Path to the ``id_review`` package directory.
 
         Returns:
-            True if the package loaded; False if load failed after a warning.
+            True if the load was started; False if it failed before starting.
         """
-        self._release_cap()
         if needs_uncorrected_raw_migrate(review_dir):
             reply = QMessageBox.question(
                 self,
@@ -609,50 +633,221 @@ class ReviewIdsTab(QWidget):
             )
             if reply == QMessageBox.StandardButton.Yes:
                 migrate_uncorrected_public_to_raw(review_dir)
-        try:
-            pkg = load_review_package(review_dir)
-        except (FileNotFoundError, ValueError) as exc:
-            QMessageBox.warning(self, "Review IDs", str(exc))
+        if not Path(review_dir).is_dir():
+            QMessageBox.warning(
+                self, "Review IDs", f"Not a folder:\n{review_dir}"
+            )
             self.setEnabled_controls(False)
             return False
+        self._start_session_load(review_dir)
+        return True
 
-        self.review_dir = pkg.review_dir
-        self.events = pkg.events
-        self.markers = pkg.markers
+    def _start_session_load(
+        self,
+        review_dir: str,
+        *,
+        visible_kind: Optional[str] = None,
+        skip_metadata: bool = False,
+        skip_video: bool = False,
+    ) -> None:
+        """Replace any in-flight session load with a new one."""
+        kind_only = bool(skip_metadata)
+        self._cancel_session_load()
+        if not kind_only:
+            self._reset_session_viewer()
+        gen = self._session_gen
+        thread = ReviewSessionLoadThread(
+            review_dir,
+            visible_kind=visible_kind,
+            video_hint=self._package_video_path or None,
+            skip_metadata=skip_metadata,
+            skip_video=skip_video,
+            metadata=self._session_meta if kind_only else None,
+            parent=self,
+        )
+        thread.metadata_ready.connect(
+            lambda meta, g=gen: self._on_session_metadata(meta, g)
+        )
+        thread.kind_ready.connect(
+            lambda kind, store, g=gen: self._on_session_kind(kind, store, g)
+        )
+        thread.frame_ready.connect(
+            lambda frame, g=gen: self._on_session_frame(frame, g)
+        )
+        thread.kind_error.connect(
+            lambda kind, msg, g=gen: self._on_session_kind_error(kind, msg, g)
+        )
+        thread.video_error.connect(
+            lambda msg, g=gen: self._on_session_video_error(msg, g)
+        )
+        thread.load_error.connect(
+            lambda msg, g=gen: self._on_session_load_error(msg, g)
+        )
+        thread.finished.connect(
+            lambda g=gen: self._on_session_thread_finished(g)
+        )
+        self._session_thread = thread
+        self.btn_cancel_load.setEnabled(True)
+        if kind_only:
+            self.status.setText(
+                f"Loading outlines for {visible_kind or 'kind'}…"
+            )
+        else:
+            self.lbl_pkg.setText(f"Loading: {review_dir}")
+            self.status.setText("Loading package JSON…")
+        thread.start()
+
+    def _cancel_session_load(self) -> None:
+        """Abort the in-flight session load without dropping loaded metadata."""
+        self._session_gen += 1
+        thread = self._session_thread
+        if thread is not None:
+            thread.cancel()
+            thread.finished.connect(thread.deleteLater)
+        self._session_thread = None
+        self.btn_cancel_load.setEnabled(False)
+
+    def _reset_session_viewer(self) -> None:
+        """Clear capture and tracklets so a new package can replace this one."""
+        self._stop_play()
+        self._release_cap()
+        self.review_dir = ""
+        self.events = []
+        self.markers = []
+        self._saved_markers = []
         self._undo_stack.clear()
-        self._stores = pkg.stores
-        self._baseline_stores = pkg.baseline_stores
-        self._already_corrected = pkg.already_corrected
-        self._has_raw = bool(pkg.has_raw)
-        self.animal_kind = pkg.animal_kind
-        self.n_frames = pkg.n_frames
-        store = self._stores[self.animal_kind]
-        self.involved_ids = list(store.ids)
-        self.fps = pkg.fps
+        self._stores.clear()
+        self._baseline_stores.clear()
+        self._already_corrected = False
+        self._has_raw = False
+        self._training_ranges = []
+        self._range_start = None
+        self._dirty = False
+        self.frame = 0
+        self.n_frames = 1
+        self._pending_bgr = None
+        self._session_canvas_error = ""
+        self._session_store_meta = {}
+        self._session_video_path = ""
+        self._session_meta = None
+        self.video_label.clear()
+        self.status.setText("")
+        self.markers_panel.set_markers([])
+        self.subjects_table.set_subjects([])
+        self.kind_combo.blockSignals(True)
+        self.kind_combo.clear()
+        self.kind_combo.blockSignals(False)
+        self.setEnabled_controls(False)
+
+    def _on_session_metadata(self, meta: object, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        if not isinstance(meta, ReviewPackageMetadata):
+            return
+        self._apply_session_metadata(meta, gen)
+
+    def _apply_session_metadata(self, meta: ReviewPackageMetadata, gen: int) -> None:
+        """Unlock timeline / subjects / n_frames from package JSON."""
+        if gen != self._session_gen:
+            return
+        self._session_meta = meta
+        self.review_dir = meta.review_dir
+        self.events = meta.events
+        self.markers = meta.markers
+        self._undo_stack.clear()
+        self._already_corrected = meta.already_corrected
+        self._has_raw = bool(meta.has_raw)
+        self.animal_kind = meta.animal_kind
+        self.n_frames = meta.n_frames
+        info = meta.kind_info.get(self.animal_kind)
+        self.involved_ids = list(info.ids) if info is not None else []
+        self.fps = meta.fps
         self.frame = 0
         self._dirty = False
         self._saved_markers = clone_markers(self.markers)
         self._training_ranges = []
         self._range_start = None
+        self._session_store_meta = dict(info.store_meta) if info is not None else {}
+        self._session_video_path = str(meta.video_path or "")
         self._refresh_range_list()
         self._prefills_hard_case_out()
 
         self.kind_combo.blockSignals(True)
         self.kind_combo.clear()
-        self.kind_combo.addItems(sorted(self._stores.keys()))
+        self.kind_combo.addItems(list(meta.kinds))
         self.kind_combo.setCurrentText(self.animal_kind)
         self.kind_combo.blockSignals(False)
         self._refresh_id_combos()
 
-        self.subjects_table.set_subjects(pkg.subjects)
+        self.subjects_table.set_subjects(meta.subjects)
         self.slider.setMaximum(max(0, self.n_frames - 1))
         self.setEnabled_controls(True)
         self._set_switch_edits_enabled(switch_edits_allowed(self.review_dir))
-        self._set_package_label(accepted=pkg.accepted, has_raw=self._has_raw)
-        self._seek(0)
+        self._set_package_label(accepted=meta.accepted, has_raw=self._has_raw)
         self._refresh_marker_list()
         self._update_undo_button()
-        return True
+        self._refresh_timeline()
+        self.status.setText(
+            f"Frame 0/{max(0, self.n_frames - 1)}  |  loading video and outlines…"
+        )
+
+    def _on_session_kind(self, kind: str, store: object, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        self._stores[kind] = store
+        self._baseline_stores[kind] = store
+        if kind == self.animal_kind:
+            self.involved_ids = list(getattr(store, "ids", []) or [])
+            n_frames = int(getattr(store, "n_frames", 0) or 0)
+            if n_frames:
+                self.n_frames = max(1, n_frames)
+            meta = dict(getattr(store, "meta", {}) or {})
+            if meta:
+                self._session_store_meta = meta
+                self.fps = float(meta.get("fps") or self.fps)
+            self._refresh_id_combos()
+        self._session_canvas_error = ""
+        self._render()
+        self._refresh_timeline()
+
+    def _on_session_frame(self, frame: object, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        self._pending_bgr = frame
+        if self.frame == 0:
+            self._render()
+
+    def _on_session_kind_error(self, kind: str, message: str, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        self._session_canvas_error = (
+            f"Could not load outlines for {kind}: {message}"
+        )
+        self._render()
+
+    def _on_session_video_error(self, message: str, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        self._session_canvas_error = message
+        if self._pending_bgr is None:
+            self._render()
+
+    def _on_session_load_error(self, message: str, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        QMessageBox.warning(self, "Review IDs", message)
+        self.setEnabled_controls(False)
+        self.lbl_pkg.setText("No package loaded.")
+        self.status.setText(message)
+
+    def _on_session_thread_finished(self, gen: int) -> None:
+        if gen != self._session_gen:
+            return
+        self._session_thread = None
+        self.btn_cancel_load.setEnabled(False)
+        if self.review_dir:
+            self._render()
+        self.session_load_finished.emit(bool(self.review_dir))
 
     def _set_switch_edits_enabled(self, on: bool) -> None:
         for w in (self.btn_mark, self.btn_remove, self.btn_del, self.btn_undo):
@@ -669,7 +864,7 @@ class ReviewIdsTab(QWidget):
 
     def _refresh_id_combos(self) -> None:
         store = self._stores.get(self.animal_kind)
-        ids = list(store.ids) if store else []
+        ids = list(store.ids) if store else list(self.involved_ids)
         self.id_a.blockSignals(True)
         self.id_b.blockSignals(True)
         self.id_a.clear()
@@ -698,14 +893,14 @@ class ReviewIdsTab(QWidget):
 
     def _video_meta(self):
         store = self._primary_store()
-        meta = dict(store.meta) if store else {}
+        meta = dict(store.meta) if store else dict(self._session_store_meta)
         if self.events and self.events[0].video:
             meta.setdefault("video", self.events[0].video)
-        video = resolve_video_path(
+        video = self._session_video_path or resolve_video_path(
             self.review_dir,
             meta,
             self.events,
-            self.project.current_video_path(),
+            self._package_video_path or self.project.current_video_path(),
         )
         fps = float(meta.get("fps") or self.fps or 10)
         return video, meta, fps
@@ -762,18 +957,55 @@ class ReviewIdsTab(QWidget):
         t = self.frame / fps if fps else 0.0
         store = self._primary_store()
 
-        frame, v_idx, err = read_preview_frame(
-            self._cap,
-            video_path=str(video) if video else "",
-            store_meta=meta,
-            analysis_frame=self.frame,
-            fps=fps,
-        )
-        if frame is None:
-            self.status.setText(
-                f"Frame {self.frame}/{self.n_frames - 1}  t={t:.2f}s  |  {err or 'no video'}"
+        frame = None
+        v_idx = None
+        err = None
+        load_in_flight = self._session_thread is not None
+        if (
+            self._pending_bgr is not None
+            and self.frame == 0
+            and self._cap.path is None
+        ):
+            frame = self._pending_bgr
+            v_idx = 0
+        elif (
+            load_in_flight
+            and self._cap.path is None
+            and not getattr(self._session_thread, "_skip_video", False)
+        ):
+            err = self._session_canvas_error or "loading video…"
+        elif video:
+            frame, v_idx, err = read_preview_frame(
+                self._cap,
+                video_path=str(video) if video else "",
+                store_meta=meta,
+                analysis_frame=self.frame,
+                fps=fps,
             )
-            self.video_label.setText("(no video)")
+        else:
+            err = self._session_canvas_error or "no video"
+        if frame is None:
+            note = err or self._session_canvas_error or "no video"
+            self.status.setText(
+                f"Frame {self.frame}/{self.n_frames - 1}  t={t:.2f}s  |  {note}"
+            )
+            self.video_label.setText(note if note else "(no video)")
+            return
+
+        if store is None:
+            self.status.setText(
+                format_frame_status(
+                    analysis_frame=self.frame,
+                    n_frames=self.n_frames,
+                    t_sec=t,
+                    video_idx=v_idx,
+                    n_markers=len(self.markers),
+                    in_risk=False,
+                    n_preview_markers=0,
+                )
+                + "  |  loading outlines…"
+            )
+            self.video_label.setPixmap(bgr_to_qpixmap(frame))
             return
 
         frame, n_prev = compose_preview_frame(
@@ -1307,16 +1539,36 @@ class ReviewIdsTab(QWidget):
         self._refresh_timeline()
 
     def _on_kind(self, kind: str) -> None:
-        if not kind or kind not in self._stores:
+        if not kind:
             return
         self.animal_kind = kind
-        store = self._primary_store()
+        info = None
+        if self._session_meta is not None:
+            info = self._session_meta.kind_info.get(kind)
+        store = self._stores.get(kind)
         if store:
             self.n_frames = store.n_frames
             self.involved_ids = list(store.ids)
             self.fps = float(store.meta.get("fps") or self.fps)
-        self._refresh_id_combos()
-        self._seek(min(self.frame, self.n_frames - 1))
+            self._session_store_meta = dict(store.meta or {})
+            self._refresh_id_combos()
+            self._seek(min(self.frame, self.n_frames - 1))
+            return
+        if info is not None:
+            self.n_frames = max(1, info.n_frames)
+            self.involved_ids = list(info.ids)
+            self.fps = float(info.fps or self.fps)
+            self._session_store_meta = dict(info.store_meta)
+            self._refresh_id_combos()
+            self._refresh_timeline()
+        if not self.review_dir:
+            return
+        self._start_session_load(
+            self.review_dir,
+            visible_kind=kind,
+            skip_metadata=True,
+            skip_video=True,
+        )
 
     # --- save ---
 
@@ -1348,29 +1600,10 @@ class ReviewIdsTab(QWidget):
 
         Does not **session load** a video and does not mark the project dirty.
         """
-        self._stop_play()
-        self._release_cap()
-        self.review_dir = ""
-        self.events = []
-        self.markers = []
-        self._saved_markers = []
-        self._undo_stack.clear()
-        self._stores.clear()
-        self._baseline_stores.clear()
-        self._already_corrected = False
-        self._has_raw = False
+        self._cancel_session_load()
         self._package_video_path = ""
-        self._training_ranges = []
-        self._range_start = None
-        self._dirty = False
-        self.frame = 0
-        self.n_frames = 1
-        self.video_label.clear()
+        self._reset_session_viewer()
         self.lbl_pkg.setText("No package loaded.")
-        self.status.setText("")
-        self.markers_panel.set_markers([])
-        self.subjects_table.set_subjects([])
-        self.setEnabled_controls(False)
 
     def save_package(self, *, notify: bool = True) -> bool:
         """Publish remapped tracklets after a fail-closed stale-file check.

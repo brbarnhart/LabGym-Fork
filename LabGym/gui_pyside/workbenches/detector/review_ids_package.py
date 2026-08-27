@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass, field
 from os import PathLike
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
+from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
 from LabGym.gui_pyside.project.model import Project
 from LabGym.gui_pyside.project.paths import (
     annotations_path_for,
@@ -24,7 +26,7 @@ from LabGym.id_review.raw_store import (
     has_accepted_identities,
     has_raw_snapshot,
     load_kind_stores,
-    load_raw_tracklets,
+    raw_dir,
 )
 from LabGym.id_review.types import ContactEvent, SwitchMarker
 from LabGym.identity.package import (
@@ -37,6 +39,38 @@ from LabGym.identity.package import (
 )
 
 _log = logging.getLogger(__name__)
+
+
+@dataclass
+class KindTrackletInfo:
+    """JSON-only facts for one **animal kind** (no npz)."""
+
+    animal_kind: str
+    ids: List[int]
+    n_frames: int
+    fps: float
+    store_meta: Dict[str, Any] = field(default_factory=dict)
+    directory: str = ""
+    npz_file: str = ""
+
+
+@dataclass
+class ReviewPackageMetadata:
+    """Identity-package JSON that can unlock Review IDs before pixels/outlines."""
+
+    review_dir: str
+    events: List[ContactEvent]
+    markers: List[SwitchMarker]
+    subjects: List[SubjectRecord]
+    kinds: List[str]
+    kind_info: Dict[str, KindTrackletInfo]
+    animal_kind: str
+    n_frames: int
+    fps: float
+    already_corrected: bool
+    has_raw: bool
+    accepted: bool
+    video_path: Optional[str] = None
 
 
 @dataclass
@@ -245,11 +279,63 @@ def check_downstream_artifacts(
         return DownstreamArtifactCheck(check_failed=True, error=str(exc))
 
 
-def load_review_package(review_dir: str) -> LoadedReviewPackage:
-    """Load events, switches, tracklets, and subjects from *review_dir*.
+def _tracklet_json_dir(review_dir: str, *, has_raw: Optional[bool] = None) -> Path:
+    """Folder whose ``*_tracklets_meta.json`` files describe the preview source."""
+    root = Path(review_dir)
+    if has_raw is None:
+        has_raw = has_raw_snapshot(root)
+    return raw_dir(root) if has_raw else root
 
-    Does not migrate public tracklets into raw. Callers that want that
-    must confirm and call ``migrate_uncorrected_public_to_raw`` first.
+
+def _read_kind_tracklet_info(directory: Path, kind: str) -> Optional[KindTrackletInfo]:
+    """Parse ``{kind}_tracklets_meta.json`` without opening the npz."""
+    path = directory / f"{kind}_tracklets_meta.json"
+    if not path.is_file():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    ids_raw = raw.get("ids") or []
+    try:
+        ids = [int(x) for x in ids_raw]
+    except (TypeError, ValueError):
+        ids = []
+    try:
+        n_frames = int(raw.get("n_frames") or 0)
+    except (TypeError, ValueError):
+        n_frames = 0
+    store_meta = raw.get("meta") if isinstance(raw.get("meta"), dict) else {}
+    try:
+        fps = float(store_meta.get("fps") or 0.0)
+    except (TypeError, ValueError):
+        fps = 0.0
+    return KindTrackletInfo(
+        animal_kind=str(raw.get("animal_kind") or kind),
+        ids=ids,
+        n_frames=max(0, n_frames),
+        fps=fps,
+        store_meta=dict(store_meta),
+        directory=str(directory),
+        npz_file=str(raw.get("npz_file") or f"{kind}_tracklets.npz"),
+    )
+
+
+def _preferred_animal_kind(kind_info: Dict[str, KindTrackletInfo]) -> str:
+    return max(
+        kind_info.keys(),
+        key=lambda k: (len(kind_info[k].ids), kind_info[k].n_frames, k),
+    )
+
+
+def load_review_package_metadata(
+    review_dir: str,
+    *,
+    video_hint: Optional[str] = None,
+) -> ReviewPackageMetadata:
+    """Load package JSON (events, switches, subjects, kind meta) without npz.
 
     Raises ``FileNotFoundError`` / ``ValueError`` with user-facing messages.
     """
@@ -261,54 +347,105 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
     markers = load_switches(review_dir)
     accepted = has_accepted_identities(review_dir)
     has_raw = has_raw_snapshot(review_dir)
-    stores: Dict[str, Any] = {}
-    baseline: Dict[str, Any] = {}
-    if has_raw:
-        loaded = load_raw_tracklets(review_dir)
-    else:
-        loaded = load_kind_stores(review_dir)
-    # Packed stores are immutable until the first switch-list edit / save
-    # clone (ADR-0009). Preview remaps labels per frame without mutating.
-    for kind, store in loaded.items():
-        baseline[kind] = store
-        stores[kind] = store
-
-    if not stores:
+    json_dir = _tracklet_json_dir(review_dir, has_raw=has_raw)
+    kinds = discover_tracklet_kinds(json_dir)
+    kind_info: Dict[str, KindTrackletInfo] = {}
+    for kind in kinds:
+        info = _read_kind_tracklet_info(json_dir, kind)
+        if info is not None:
+            kind_info[kind] = info
+    if not kind_info:
         raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
 
-    animal_kind = max(
-        stores.keys(),
-        key=lambda k: (len(stores[k].ids), stores[k].n_frames),
-    )
-    store = stores[animal_kind]
-    n_frames = max(1, store.n_frames)
+    animal_kind = _preferred_animal_kind(kind_info)
+    preferred = kind_info[animal_kind]
+    n_frames = max(1, preferred.n_frames)
     fps = float(
-        store.meta.get("fps")
+        preferred.fps
         or (events[0].fps if events else 10)
         or 10
     )
-
     recs = load_subjects(review_dir)
     if not recs:
-        kind_ids = {k: list(s.ids) for k, s in stores.items()}
-        recs = subjects_from_track_ids(kind_ids)
-
-    # Legacy baked packs have remapped geometry and no raw — freeze switch edits.
+        recs = subjects_from_track_ids({k: list(v.ids) for k, v in kind_info.items()})
     already_corrected = bool(accepted and not has_raw)
-
-    return LoadedReviewPackage(
+    video_path = video_path_for_review_package(
+        review_dir,
+        hinted_video=video_hint,
+        store_meta=preferred.store_meta,
+        events=events,
+    )
+    return ReviewPackageMetadata(
         review_dir=review_dir,
         events=events,
         markers=markers,
-        stores=stores,
-        baseline_stores=baseline,
-        already_corrected=already_corrected,
-        has_raw=has_raw,
-        accepted=accepted,
+        subjects=list(recs),
+        kinds=sorted(kind_info.keys()),
+        kind_info=kind_info,
         animal_kind=animal_kind,
         n_frames=n_frames,
         fps=fps,
-        subjects=list(recs),
+        already_corrected=already_corrected,
+        has_raw=has_raw,
+        accepted=accepted,
+        video_path=video_path,
+    )
+
+
+def load_review_kind_store(review_dir: str, animal_kind: str) -> Any:
+    """Load packed tracklets for one **animal kind** (ADR-0009).
+
+    Uses the raw snapshot when present; otherwise public package files.
+    Other kinds in the package are not opened.
+
+    Raises ``FileNotFoundError`` / ``ValueError`` / ``OSError`` on I/O or
+    corrupt npz.
+    """
+    review_dir = str(Path(review_dir).resolve())
+    if not Path(review_dir).is_dir():
+        raise FileNotFoundError(f"Not a folder:\n{review_dir}")
+    directory = _tracklet_json_dir(review_dir)
+    loaded = load_kind_stores(directory, animal_kinds=[animal_kind])
+    store = loaded.get(animal_kind)
+    if store is None:
+        raise ValueError(
+            f"No tracklets for animal kind {animal_kind!r} in:\n{directory}"
+        )
+    return store
+
+
+def load_review_package(review_dir: str) -> LoadedReviewPackage:
+    """Load events, switches, tracklets, and subjects from *review_dir*.
+
+    Does not migrate public tracklets into raw. Callers that want that
+    must confirm and call ``migrate_uncorrected_public_to_raw`` first.
+
+    Loads every discovered **animal kind**. Review IDs session load uses
+    :func:`load_review_package_metadata` plus :func:`load_review_kind_store`
+    so the visible kind can arrive first.
+
+    Raises ``FileNotFoundError`` / ``ValueError`` with user-facing messages.
+    """
+    meta = load_review_package_metadata(review_dir)
+    stores: Dict[str, Any] = {}
+    baseline: Dict[str, Any] = {}
+    for kind in meta.kinds:
+        store = load_review_kind_store(meta.review_dir, kind)
+        stores[kind] = store
+        baseline[kind] = store
+    return LoadedReviewPackage(
+        review_dir=meta.review_dir,
+        events=meta.events,
+        markers=meta.markers,
+        stores=stores,
+        baseline_stores=baseline,
+        already_corrected=meta.already_corrected,
+        has_raw=meta.has_raw,
+        accepted=meta.accepted,
+        animal_kind=meta.animal_kind,
+        n_frames=meta.n_frames,
+        fps=meta.fps,
+        subjects=list(meta.subjects),
     )
 
 

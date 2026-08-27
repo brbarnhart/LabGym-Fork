@@ -145,6 +145,10 @@ def test_smoke_review_ids_loads_package(
     tab = ReviewIdsTab(project_controller_with_videos)
     ok = tab.load_package(str(minimal_id_review_package))
     assert ok is True
+    thread = tab._session_thread
+    if thread is not None:
+        thread.wait(10000)
+    qapp.processEvents()
     assert tab.review_dir
     assert tab.n_frames >= 1
     assert "mouse" in tab._stores
