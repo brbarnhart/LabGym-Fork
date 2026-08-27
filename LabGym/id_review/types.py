@@ -208,7 +208,10 @@ class TrackletStore:
 
 	centers: shape (n_ids, n_frames, 2), invalid where valid==False
 	heights: shape (n_ids, n_frames), NaN if missing
-	contours: list length n_ids, each a list length n_frames of ndarray|None
+	contours: optional expanded list (n_ids x n_frames of ndarray|None).
+	    Session load leaves this None; outlines live in packed arrays.
+	contour_lengths: int32, length n_ids * n_frames (row-major), 0 if missing
+	contour_points: int32 (N, 2) concatenation of non-empty outlines
 	'''
 
 	schema_version: int
@@ -218,11 +221,74 @@ class TrackletStore:
 	centers: np.ndarray
 	valid: np.ndarray
 	heights: np.ndarray
-	contours: List[List[Optional[np.ndarray]]]
+	contours: Optional[List[List[Optional[np.ndarray]]]] = None
+	contour_lengths: Optional[np.ndarray] = None
+	contour_points: Optional[np.ndarray] = None
 	meta: Dict[str, Any] = field(default_factory=dict)
+
+	def __post_init__(self) -> None:
+		self._contour_offsets: Optional[np.ndarray] = None
 
 	def id_index(self, track_id: int) -> int:
 		return self.ids.index(track_id)
+
+	def contour_at(self, row: int, frame: int) -> Optional[np.ndarray]:
+		'''Outline for one analysis frame.
+
+		Args:
+			row: Index into ``ids`` (not the track id itself).
+			frame: Analysis frame index.
+
+		Returns:
+			``(L, 1, 2)`` int32 polygon matching the historic npz expand,
+			or None when missing / out of range.
+		'''
+		if frame < 0 or frame >= int(self.n_frames):
+			return None
+		if self.contours is not None:
+			if row < 0 or row >= len(self.contours):
+				return None
+			row_c = self.contours[row]
+			if frame >= len(row_c):
+				return None
+			return row_c[frame]
+		return self._slice_packed_contour(row, frame)
+
+	def _slice_packed_contour(self, row: int, frame: int) -> Optional[np.ndarray]:
+		lengths = self.contour_lengths
+		points = self.contour_points
+		n_ids = len(self.ids)
+		n_frames = int(self.n_frames)
+		if lengths is None or points is None or n_ids == 0:
+			return None
+		idx = int(row) * n_frames + int(frame)
+		if idx < 0 or idx >= int(lengths.size):
+			return None
+		length = int(lengths[idx])
+		if length <= 0:
+			return None
+		offsets = self._packed_offsets()
+		start = int(offsets[idx])
+		pts = np.array(points[start : start + length], copy=True)
+		return pts.reshape(length, 1, 2).astype(np.int32, copy=False)
+
+	def _packed_offsets(self) -> np.ndarray:
+		lengths = self.contour_lengths
+		if lengths is None:
+			raise ValueError('TrackletStore has no packed contour_lengths')
+		off = getattr(self, '_contour_offsets', None)
+		want = int(lengths.size) + 1
+		if off is None or int(off.size) != want:
+			off = np.empty(want, dtype=np.int64)
+			off[0] = 0
+			if lengths.size:
+				np.cumsum(lengths, dtype=np.int64, out=off[1:])
+			self._contour_offsets = off
+		return off
+
+	def invalidate_packed_offsets(self) -> None:
+		'''Drop cached prefix sums after packed lengths/points change.'''
+		self._contour_offsets = None
 
 
 def identity_mapping(ids: Sequence[int]) -> Dict[int, int]:

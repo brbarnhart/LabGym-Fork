@@ -254,7 +254,7 @@ def overlays_at_video_frame(
         if valid:
             c = store.centers[row, a_frame]
             center = (float(c[0]), float(c[1]))
-            cnt = store.contours[row][a_frame]
+            cnt = store.contour_at(row, a_frame)
             if cnt is not None:
                 contour = np.asarray(cnt)
         color = (subject_colors or {}).get(subj.subject_id, subj.color)

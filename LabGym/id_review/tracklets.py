@@ -102,6 +102,48 @@ def _analyzer_meta(analyzer, animal_kind: str) -> Dict[str, Any]:
 	}
 
 
+def pack_contours(
+	contours: Sequence[Sequence[Optional[np.ndarray]]],
+) -> tuple:
+	'''Flatten per-frame polygons into npz contour_lengths / contour_points.
+
+	Args:
+		contours: ``n_ids`` rows of ``n_frames`` polygons (or None).
+
+	Returns:
+		``(contour_lengths, contour_points)`` matching the on-disk npz layout.
+	'''
+	lengths: List[int] = []
+	points_list: List[np.ndarray] = []
+	for row in contours:
+		for cnt in row:
+			if cnt is None:
+				lengths.append(0)
+			else:
+				arr = np.asarray(cnt).reshape(-1, 2)
+				lengths.append(int(arr.shape[0]))
+				points_list.append(arr.astype(np.int32, copy=False))
+	if points_list:
+		points = np.concatenate(points_list, axis=0)
+	else:
+		points = np.zeros((0, 2), dtype=np.int32)
+	return np.asarray(lengths, dtype=np.int32), points
+
+
+def _packed_contour_arrays(store: TrackletStore) -> tuple:
+	'''Return (lengths, points) for npz write without expanding session-load stores.'''
+	expected = len(store.ids) * int(store.n_frames)
+	if store.contours is not None:
+		return pack_contours(store.contours)
+	lengths = store.contour_lengths
+	points = store.contour_points
+	if lengths is not None and int(lengths.size) == expected:
+		if points is None:
+			points = np.zeros((0, 2), dtype=np.int32)
+		return np.asarray(lengths, dtype=np.int32), np.asarray(points, dtype=np.int32)
+	return np.zeros((expected,), dtype=np.int32), np.zeros((0, 2), dtype=np.int32)
+
+
 def save_tracklets(store: TrackletStore, directory: str, prefix: Optional[str] = None) -> str:
 	'''
 	Save one kind's tracklets under directory.
@@ -115,21 +157,7 @@ def save_tracklets(store: TrackletStore, directory: str, prefix: Optional[str] =
 	meta_path = os.path.join(directory, f'{prefix}tracklets_meta.json')
 	npz_path = os.path.join(directory, f'{prefix}tracklets.npz')
 
-	# Flatten contours: lengths + concatenated points
-	lengths = []
-	points_list = []
-	for row in store.contours:
-		for cnt in row:
-			if cnt is None:
-				lengths.append(0)
-			else:
-				arr = np.asarray(cnt).reshape(-1, 2)
-				lengths.append(int(arr.shape[0]))
-				points_list.append(arr.astype(np.int32))
-	if points_list:
-		points = np.concatenate(points_list, axis=0)
-	else:
-		points = np.zeros((0, 2), dtype=np.int32)
+	lengths, points = _packed_contour_arrays(store)
 
 	np.savez_compressed(
 		npz_path,
@@ -157,35 +185,37 @@ def save_tracklets(store: TrackletStore, directory: str, prefix: Optional[str] =
 
 
 def load_tracklets(directory: str, animal_kind: str, prefix: Optional[str] = None) -> TrackletStore:
+	'''Load one animal kind's tracklets into packed RAM arrays.
+
+	Does not expand a Python polygon for every analysis frame. Call
+	``TrackletStore.contour_at`` to slice the outline for one frame.
+	Other kinds in the same package are not opened.
+
+	Args:
+		directory: Folder containing ``{kind}_tracklets.npz`` and meta JSON.
+		animal_kind: Detector class to load; other kinds are ignored.
+		prefix: Filename prefix; default ``{animal_kind}_``.
+
+	Returns:
+		Store whose outlines live in packed arrays (``contours`` is None).
+	'''
 	prefix = prefix or f'{animal_kind}_'
 	meta_path = os.path.join(directory, f'{prefix}tracklets_meta.json')
 	with open(meta_path, 'r', encoding='utf-8') as f:
 		meta = json.load(f)
 	npz_path = os.path.join(directory, meta.get('npz_file', f'{prefix}tracklets.npz'))
-	data = np.load(npz_path, allow_pickle=False)
-	ids = [int(x) for x in data['ids'].tolist()]
-	n_frames = int(data['n_frames'][0])
-	centers = data['centers']
-	valid = data['valid'].astype(bool)
-	heights = data['heights']
-	lengths = data['contour_lengths'].astype(int)
-	points = data['contour_points']
-
-	contours: List[List[Optional[np.ndarray]]] = []
-	cursor = 0
-	li = 0
-	for _row in range(len(ids)):
-		row_c: List[Optional[np.ndarray]] = []
-		for _f in range(n_frames):
-			L = int(lengths[li])
-			li += 1
-			if L == 0:
-				row_c.append(None)
-			else:
-				pts = points[cursor:cursor + L].copy()
-				cursor += L
-				row_c.append(pts.reshape(L, 1, 2).astype(np.int32))
-		contours.append(row_c)
+	with np.load(npz_path, allow_pickle=False) as data:
+		ids = [int(x) for x in data['ids'].tolist()]
+		n_frames = int(data['n_frames'][0])
+		centers = np.array(data['centers'], copy=True)
+		valid = np.array(data['valid'], copy=True).astype(bool, copy=False)
+		heights = np.array(data['heights'], copy=True)
+		lengths = np.array(data['contour_lengths'], copy=True).astype(np.int32, copy=False)
+		points = np.array(data['contour_points'], copy=True)
+		if points.ndim != 2 or (points.size and points.shape[1] != 2):
+			points = np.asarray(points).reshape(-1, 2).astype(np.int32, copy=False)
+		else:
+			points = points.astype(np.int32, copy=False)
 
 	return TrackletStore(
 		schema_version=int(meta.get('schema_version', SCHEMA_VERSION)),
@@ -195,7 +225,9 @@ def load_tracklets(directory: str, animal_kind: str, prefix: Optional[str] = Non
 		centers=centers,
 		valid=valid,
 		heights=heights,
-		contours=contours,
+		contours=None,
+		contour_lengths=lengths,
+		contour_points=points,
 		meta=meta.get('meta') or {},
 	)
 
@@ -231,7 +263,6 @@ def apply_mapping_to_store(
 	old_centers = {tid: store.centers[idx[tid], f0:].copy() for tid in involved}
 	old_valid = {tid: store.valid[idx[tid], f0:].copy() for tid in involved}
 	old_heights = {tid: store.heights[idx[tid], f0:].copy() for tid in involved}
-	old_contours = {tid: store.contours[idx[tid]][f0:] for tid in involved}
 
 	for src in involved:
 		dst = int(mapping[src])
@@ -239,7 +270,60 @@ def apply_mapping_to_store(
 		store.centers[di, f0:] = old_centers[src]
 		store.valid[di, f0:] = old_valid[src]
 		store.heights[di, f0:] = old_heights[src]
-		# replace contour slice
-		store.contours[di][f0:] = [
-			(c.copy() if c is not None else None) for c in old_contours[src]
-		]
+
+	if store.contours is not None:
+		old_contours = {tid: store.contours[idx[tid]][f0:] for tid in involved}
+		for src in involved:
+			dst = int(mapping[src])
+			di = idx[dst]
+			store.contours[di][f0:] = [
+				(c.copy() if c is not None else None) for c in old_contours[src]
+			]
+
+	_remap_packed_contours(store, mapping, involved, idx, f0, n)
+
+
+def _remap_packed_contours(
+	store: TrackletStore,
+	mapping: Dict[int, int],
+	involved: Sequence[int],
+	idx: Dict[int, int],
+	f0: int,
+	n_frames: int,
+) -> None:
+	'''Swap packed outline tails for frames >= f0. No-op when packed arrays are absent.'''
+	lengths = store.contour_lengths
+	points = store.contour_points
+	n_ids = len(store.ids)
+	expected = n_ids * n_frames
+	if lengths is None or points is None or int(lengths.size) != expected:
+		return
+	offsets = store._packed_offsets()
+	inv = {int(mapping[src]): int(src) for src in involved}
+	new_lengths = np.array(lengths, copy=True)
+	chunks: List[np.ndarray] = []
+	for row, tid in enumerate(store.ids):
+		head_i0 = row * n_frames
+		head_i1 = row * n_frames + f0
+		head = points[int(offsets[head_i0]) : int(offsets[head_i1])]
+		if head.size:
+			chunks.append(np.array(head, copy=True))
+		src_tid = inv.get(int(tid))
+		if src_tid is not None:
+			si = idx[src_tid]
+			tail_i0 = si * n_frames + f0
+			tail_i1 = si * n_frames + n_frames
+			new_lengths[row * n_frames + f0 : row * n_frames + n_frames] = lengths[tail_i0:tail_i1]
+			tail = points[int(offsets[tail_i0]) : int(offsets[tail_i1])]
+		else:
+			tail_i0 = row * n_frames + f0
+			tail_i1 = row * n_frames + n_frames
+			tail = points[int(offsets[tail_i0]) : int(offsets[tail_i1])]
+		if tail.size:
+			chunks.append(np.array(tail, copy=True))
+	if chunks:
+		store.contour_points = np.concatenate(chunks, axis=0).astype(np.int32, copy=False)
+	else:
+		store.contour_points = np.zeros((0, 2), dtype=np.int32)
+	store.contour_lengths = new_lengths.astype(np.int32, copy=False)
+	store.invalidate_packed_offsets()

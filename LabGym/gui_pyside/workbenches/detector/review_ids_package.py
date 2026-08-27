@@ -267,9 +267,11 @@ def load_review_package(review_dir: str) -> LoadedReviewPackage:
         loaded = load_raw_tracklets(review_dir)
     else:
         loaded = load_kind_stores(review_dir)
+    # Packed stores are immutable until the first switch-list edit / save
+    # clone (ADR-0009). Preview remaps labels per frame without mutating.
     for kind, store in loaded.items():
         baseline[kind] = store
-        stores[kind] = clone_store(store)
+        stores[kind] = store
 
     if not stores:
         raise ValueError(f"No *_tracklets_meta.json in:\n{review_dir}")
