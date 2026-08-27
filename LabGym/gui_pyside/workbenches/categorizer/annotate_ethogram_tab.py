@@ -104,7 +104,6 @@ class AnnotateEthogramTab(QWidget):
 
     def _on_project_replaced(self) -> None:
         self.refresh_video_list()
-        self._update_status_banner()
 
     def refresh_video_list(self) -> None:
         choices = list_project_video_choices(self.project.project)
@@ -130,7 +129,9 @@ class AnnotateEthogramTab(QWidget):
             self.annotator.hide()
             self.btn_load.setEnabled(False)
         self._block_combo = False
-        self._update_status_banner()
+        self.lbl_status.setText(
+            "Select a project video, then Load into annotator."
+        )
 
     def _on_video_combo(self, _index: int) -> None:
         if self._block_combo:

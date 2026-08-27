@@ -322,6 +322,8 @@ def test_detect_track_start_uses_path_job_ids(tmp_path: Path, monkeypatch):
     (det / "model_parameters.txt").write_text(
         '{"animal_names": ["mouse"]}', encoding="utf-8"
     )
+    (det / "model_final.pth").write_bytes(b"x")
+    (det / "config.yaml").write_text("{}", encoding="utf-8")
     tab.ed_detector.setEditText(str(det))
 
     captured = {}

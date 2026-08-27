@@ -44,6 +44,10 @@ from LabGym.gui_pyside.project.paths import (
     list_project_video_choices,
     resolve_video_context,
 )
+from LabGym.gui_pyside.project.video_disk_status import (
+    STATUS_UNKNOWN,
+    status_label,
+)
 from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
     set_line_edit_directory,
@@ -263,12 +267,15 @@ class ProcessVideosTab(QWidget):
 
     def _init_defaults(self) -> None:
         p = self.project.project
+        self.ed_categorizer.blockSignals(True)
         if p.defaults.categorizer_name:
             self.ed_categorizer.setText(p.defaults.categorizer_name)
+        self.ed_categorizer.blockSignals(False)
         if p.root_dir:
             # analysis results: under root/analysis or detection sibling
             self.ed_out.setText(str(p.resolve_path("analysis")))
-        self._on_categorizer_changed(self.ed_categorizer.text())
+        # Do not read categorizer files during project swap.
+        self.lbl_behaviors.setText("—")
 
     def _scan_models(self) -> None:
         p = self.project.project
@@ -336,26 +343,13 @@ class ProcessVideosTab(QWidget):
             if path in self._status_by_path:
                 status, note = self._status_by_path[path]
             else:
-                ctx = resolve_video_context(self.project.project, video_path=path)
-                tracks = ctx.tracklets_dir
-                pkg = bool(tracks) and has_identity_package(tracks)
-                if may_use_downstream(
-                    int(ctx.behavior_mode),
-                    bool(ctx.accepted_identities),
-                    identity_package=pkg,
-                ):
-                    status, note = ("pending", tracks or "")
-                elif tracks:
-                    status, note = (
-                        "blocked",
-                        "needs Review IDs save",
-                    )
-                else:
-                    status, note = (
-                        "blocked",
-                        "(no identity package — Detect + track, then Review IDs)",
-                    )
-            self.table.setItem(r, 2, QTableWidgetItem(status))
+                # Disk facts wait for the status module (Detect + track in #16;
+                # this tab's probes are a later ticket). Never fake pending/done.
+                status, note = STATUS_UNKNOWN, ""
+            st_item = QTableWidgetItem(status_label(status))
+            if status == STATUS_UNKNOWN:
+                st_item.setToolTip("Status unknown — not yet checked on disk.")
+            self.table.setItem(r, 2, st_item)
             self.table.setItem(r, 3, QTableWidgetItem(note))
 
     def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:

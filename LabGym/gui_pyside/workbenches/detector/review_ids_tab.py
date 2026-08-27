@@ -390,9 +390,8 @@ class ReviewIdsTab(QWidget):
         self.combo_video.clear()
         self.combo_video.addItem("(open package folder…)", "")
         for label, resolved in list_project_video_choices(self.project.project):
-            tracks = discover_tracklets_dir(self.project.project, resolved)
-            flag = "✓" if tracks else "·"
-            self.combo_video.addItem(f"{flag}  {label}", str(resolved))
+            # Names only on swap/refresh-from-project; do not hunt tracklets here.
+            self.combo_video.addItem(label, str(resolved))
         if current:
             for i in range(self.combo_video.count()):
                 if self.combo_video.itemData(i) == current:

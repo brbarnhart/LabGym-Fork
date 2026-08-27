@@ -20,6 +20,24 @@ def clear_tracklets_discovery_cache() -> None:
     _tracklets_cache.clear()
 
 
+def _discovery_cache_key(
+    project: Project, video_path: str
+) -> Tuple[str, str, str, str]:
+    entry = find_video_entry(project, video_path)
+    entry_det = (entry.detection_dir if entry else "") or ""
+    return (
+        project.root_dir or "",
+        (project.paths.detection_output_root or "").strip(),
+        video_path or "",
+        entry_det.strip(),
+    )
+
+
+def cache_tracklets_dir(project: Project, video_path: str, tracklets_dir: str) -> None:
+    """Remember a discovery result for this session (no project-file write)."""
+    _tracklets_cache[_discovery_cache_key(project, video_path)] = tracklets_dir or ""
+
+
 @dataclass
 class ResolvedVideoContext:
     """Paths for the project's current (or selected) video session."""
@@ -165,12 +183,7 @@ def discover_tracklets_dir(project: Project, video_path: str) -> str:
     entry_det = (entry.detection_dir if entry else "") or ""
 
     # Explicit entry: resolve once, no scan, still cache for consistency
-    cache_key = (
-        project.root_dir or "",
-        (project.paths.detection_output_root or "").strip(),
-        video_path or "",
-        entry_det.strip(),
-    )
+    cache_key = _discovery_cache_key(project, video_path)
     if cache_key in _tracklets_cache:
         return _tracklets_cache[cache_key]
 

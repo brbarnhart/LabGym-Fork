@@ -218,7 +218,7 @@ class GenerateExamplesTab(QWidget):
     def _on_project_replaced(self) -> None:
         self._load_params_from_project()
         self._refresh_video_list()
-        self._refresh_summary()
+        self.lbl_summary.setText("Select a project video.")
 
     def _on_project_light(self) -> None:
         """Dirty flag / param writes — do not rebuild video combo."""

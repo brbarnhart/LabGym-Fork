@@ -219,12 +219,12 @@ class ReviewExamplesTab(QWidget):
             self.ed_model.setText(name)
         try:
             ex = p.resolve_path(p.paths.examples_root or "examples")
-            if Path(ex).is_dir():
-                self.ed_store.setText(str(ex))
+            self.ed_store.blockSignals(True)
+            self.ed_store.setText(str(ex))
+            self.ed_store.blockSignals(False)
         except Exception as exc:
             self.manifest_status.setText(f"Could not resolve project examples path: {exc}")
-        self._refresh_runs()
-        self._on_store_changed()
+        # Do not scan the example store or eval runs on project swap.
 
     def _on_store_changed(self) -> None:
         store = self.ed_store.text().strip()

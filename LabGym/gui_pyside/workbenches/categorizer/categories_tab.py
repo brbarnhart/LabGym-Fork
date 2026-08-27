@@ -206,11 +206,12 @@ class CategoriesTab(QWidget):
         try:
             p = self.project.project
             ex = p.resolve_path(p.paths.examples_root or "examples")
-            if Path(ex).is_dir():
-                self.ed_store.setText(str(ex))
+            self.ed_store.blockSignals(True)
+            self.ed_store.setText(str(ex))
+            self.ed_store.blockSignals(False)
         except Exception as exc:
             self.status.setText(f"Could not resolve project examples path: {exc}")
-        self._reload()
+        # Do not scan the example store on project swap.
 
     def _require_manifest(self):
         if self._manifest is None:

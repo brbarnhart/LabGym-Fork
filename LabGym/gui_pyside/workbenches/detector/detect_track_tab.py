@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -44,6 +45,13 @@ from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
 )
+from LabGym.gui_pyside.project.video_disk_status import (
+    STATUS_UNKNOWN,
+    ProbeResult,
+    VideoDiskStatusProbeThread,
+    apply_probe_to_project,
+    status_label,
+)
 from LabGym.gui_pyside.widgets.path_browse import browse_existing_directory
 from LabGym.gui_pyside.workbenches.detector.detect_track_progress import (
     DetectTrackProgressDialog,
@@ -73,6 +81,12 @@ class DetectTrackTab(QWidget):
         self._status_by_path: Dict[str, Tuple[str, str]] = {}
         self._batch_active = False
         self._progress_dlg: Optional[DetectTrackProgressDialog] = None
+        self._probe_thread: Optional[VideoDiskStatusProbeThread] = None
+        self._probe_cancel: Optional[threading.Event] = None
+        self._probe_gen = 0
+        self._probe_total = 0
+        self._probe_done = 0
+        self._kinds_need_refresh = True
 
         layout = QVBoxLayout(self)
 
@@ -275,6 +289,12 @@ class DetectTrackTab(QWidget):
         row2.addWidget(btn_all)
         row2.addWidget(btn_none)
         row2.addStretch(1)
+        self.lbl_probe = QLabel("")
+        self.lbl_probe.setToolTip(
+            "Per-video disk check after Open. Rows stay status unknown (… ) "
+            "until each probe finishes."
+        )
+        row2.addWidget(self.lbl_probe)
         v_l.addLayout(row2)
 
         self.table = QTableWidget(0, 4)
@@ -320,10 +340,23 @@ class DetectTrackTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt
+        super().showEvent(event)
+        self._maybe_refresh_kinds()
+        self._maybe_start_status_probes()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt
+        self._cancel_status_probes()
+        super().hideEvent(event)
+
     def _on_project_replaced(self) -> None:
+        self._cancel_status_probes()
+        self._status_by_path.clear()
+        self._kinds_need_refresh = True
         self._init_detector_defaults()
         self._apply_project_defaults()
         self.refresh_videos()
+        self._maybe_start_status_probes()
 
     def _apply_project_defaults(self) -> None:
         """Sync Edit Project defaults into tracking params."""
@@ -338,17 +371,20 @@ class DetectTrackTab(QWidget):
         self.spin_length.setValue(max(1, int(d.window_length or 15)))
 
     def _init_detector_defaults(self) -> None:
+        """Apply detector path from the project document. Do not walk model trees."""
         p = self.project.project
-        cur = (p.defaults.detector_name or self.ed_detector.currentText() or "").strip()
+        cur = (p.defaults.detector_name or "").strip()
         self.ed_detector.blockSignals(True)
         self.ed_detector.clear()
-        for s in scan_detector_paths(p):
-            self.ed_detector.addItem(s)
         if cur:
             self.ed_detector.setEditText(cur)
-        elif self.ed_detector.count():
-            self.ed_detector.setCurrentIndex(0)
         self.ed_detector.blockSignals(False)
+        self.lbl_kinds.setText("—")
+
+    def _maybe_refresh_kinds(self) -> None:
+        if not self._kinds_need_refresh or not self.isVisible():
+            return
+        self._kinds_need_refresh = False
         self._on_detector_changed(self.ed_detector.currentText())
 
     def _scan_detectors(self) -> None:
@@ -394,21 +430,19 @@ class DetectTrackTab(QWidget):
         )
 
     def _status_for_video(self, path: str) -> Tuple[str, str]:
-        """Sticky in-session status, else done if id_review exists on disk."""
+        """Sticky in-session status, else status unknown until a probe finishes."""
         if path in self._status_by_path:
             return self._status_by_path[path]
-        tracks = discover_tracklets_dir(self.project.project, path)
-        if tracks:
-            # Persist so later refreshes stay cheap / consistent.
-            self._status_by_path[path] = ("done", tracks)
-            return "done", tracks
-        return "pending", ""
+        return STATUS_UNKNOWN, ""
 
     def _manual_refresh_videos(self) -> None:
         from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
 
+        self._cancel_status_probes()
         clear_tracklets_discovery_cache()
+        self._status_by_path.clear()
         self.refresh_videos()
+        self._start_status_probes()
 
     def refresh_videos(self) -> None:
         # Mid-batch project.changed (mark_dirty after each finished video) must not
@@ -429,6 +463,7 @@ class DetectTrackTab(QWidget):
         choices = list_project_video_choices(self.project.project)
         self.table.setRowCount(0)
         self.table.setRowCount(len(choices))
+        unknown = 0
         for r, (label, resolved) in enumerate(choices):
             path = str(resolved)
             chk = QTableWidgetItem()
@@ -449,19 +484,126 @@ class DetectTrackTab(QWidget):
             self.table.setItem(r, 0, chk)
             self.table.setItem(r, 1, QTableWidgetItem(label))
             status, note = self._status_for_video(path)
-            self.table.setItem(r, 2, QTableWidgetItem(status))
-            self.table.setItem(r, 3, QTableWidgetItem(note))
+            if status == STATUS_UNKNOWN:
+                unknown += 1
+            st_item = QTableWidgetItem(status_label(status))
+            nt_item = QTableWidgetItem(note)
+            if status == STATUS_UNKNOWN:
+                st_item.setToolTip("Status unknown — not yet checked on disk.")
+            self.table.setItem(r, 2, st_item)
+            self.table.setItem(r, 3, nt_item)
+        self._probe_total = len(choices)
+        self._probe_done = len(choices) - unknown
+        self._update_probe_progress()
 
     def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:
         self._status_by_path[path] = (status, note)
+        label = status_label(status)
         if self.table.item(row, 2):
-            self.table.item(row, 2).setText(status)
+            self.table.item(row, 2).setText(label)
         else:
-            self.table.setItem(row, 2, QTableWidgetItem(status))
+            self.table.setItem(row, 2, QTableWidgetItem(label))
         if self.table.item(row, 3):
             self.table.item(row, 3).setText(note)
         else:
             self.table.setItem(row, 3, QTableWidgetItem(note))
+        if note and status == "error":
+            item2 = self.table.item(row, 2)
+            item3 = self.table.item(row, 3)
+            if item2:
+                item2.setToolTip(note)
+            if item3:
+                item3.setToolTip(note)
+
+    def _update_probe_progress(self) -> None:
+        total = self._probe_total
+        if total <= 0:
+            self.lbl_probe.setText("")
+            return
+        self.lbl_probe.setText(f"{self._probe_done} / {total} checked")
+
+    def _row_for_path(self, path: str) -> Optional[int]:
+        for r in range(self.table.rowCount()):
+            item0 = self.table.item(r, 0)
+            if item0 and str(item0.data(Qt.ItemDataRole.UserRole) or "") == path:
+                return r
+        return None
+
+    def _unknown_video_paths(self) -> List[str]:
+        out: List[str] = []
+        for r in range(self.table.rowCount()):
+            item0 = self.table.item(r, 0)
+            if not item0:
+                continue
+            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
+            if not path:
+                continue
+            status, _note = self._status_for_video(path)
+            if status == STATUS_UNKNOWN:
+                out.append(path)
+        return out
+
+    def _cancel_status_probes(self) -> None:
+        self._probe_gen += 1
+        if self._probe_cancel is not None:
+            self._probe_cancel.set()
+        thread = self._probe_thread
+        if thread is not None:
+            thread.cancel()
+        self._probe_thread = None
+        self._probe_cancel = None
+
+    def _maybe_start_status_probes(self) -> None:
+        if self._batch_active or not self.isVisible():
+            return
+        self._start_status_probes()
+
+    def _start_status_probes(self) -> None:
+        if self._batch_active:
+            return
+        paths = self._unknown_video_paths()
+        self._update_probe_progress()
+        if not paths:
+            return
+        self._cancel_status_probes()
+        gen = self._probe_gen
+        cancel = threading.Event()
+        self._probe_cancel = cancel
+        thread = VideoDiskStatusProbeThread(
+            self.project.project,
+            paths,
+            cancel_event=cancel,
+            parent=self,
+        )
+        thread.probe_finished.connect(
+            lambda result, g=gen: self._on_probe_result(result, g)
+        )
+        thread.batch_finished.connect(
+            lambda g=gen: self._on_probe_batch_finished(g)
+        )
+        self._probe_thread = thread
+        thread.start()
+
+    def _on_probe_result(self, result: object, gen: int) -> None:
+        if gen != self._probe_gen:
+            return
+        if not isinstance(result, ProbeResult) or result.cancelled:
+            return
+        apply_probe_to_project(self.project.project, result)
+        row = self._row_for_path(result.video_path)
+        note = result.tracklets_dir or result.error
+        if row is not None:
+            self._set_status(row, result.video_path, result.status, note)
+        else:
+            self._status_by_path[result.video_path] = (result.status, note)
+        self._probe_done += 1
+        self._update_probe_progress()
+
+    def _on_probe_batch_finished(self, gen: int) -> None:
+        if gen != self._probe_gen:
+            return
+        self._probe_thread = None
+        self._update_probe_progress()
 
     def _set_all_checked(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -716,6 +858,7 @@ class DetectTrackTab(QWidget):
         clear_tracklets_discovery_cache()
         # Sync table with any project video-list changes deferred during the batch.
         self.refresh_videos()
+        self._maybe_start_status_probes()
         n_ok, n_err, _n_cancel = summarize_job_statuses(self.queue.items)
 
         QMessageBox.information(
