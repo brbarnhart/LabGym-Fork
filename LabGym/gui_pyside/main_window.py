@@ -26,6 +26,14 @@ from PySide6.QtWidgets import (
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.editor_dialog import ProjectEditorDialog
 from LabGym.gui_pyside.project.model import PROJECT_FILE_SUFFIX
+from LabGym.gui_pyside.session_swap import (
+    CHOICE_CANCEL,
+    CHOICE_DISCARD,
+    CHOICE_SAVE,
+    SessionSwapReport,
+    drop_sessions,
+    resolve_unsaved_session,
+)
 from LabGym.gui_pyside.shell.workbench_bar import WorkbenchBar
 from LabGym.gui_pyside.shell.workbench_host import WorkbenchHost
 from LabGym.gui_pyside.workbenches.categorizer import CategorizerWorkbench
@@ -183,6 +191,64 @@ class WorkbenchMainWindow(QMainWindow):
 
     # --- project file ops ---
 
+    def _session_hosts(self):
+        return (
+            self.wb_detector.review_tab,
+            self.wb_categorizer.generate_host.annotate_tab,
+        )
+
+    def _prompt_unsaved_session(self, report: SessionSwapReport) -> str:
+        parts: list[str] = []
+        if report.unsaved_switch_markers:
+            parts.append("unsaved switch markers in Review IDs")
+        if report.unsaved_ethogram:
+            parts.append("an unsaved ethogram")
+        joined = " and ".join(parts) if parts else "unsaved session edits"
+        r = QMessageBox.question(
+            self,
+            "Unsaved session",
+            f"This project swap cannot continue while there is {joined}.\n\n"
+            "Save or Discard before Open / Open Recent / Edit Project.\n"
+            "Discard does not write switch markers or the ethogram.",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if r == QMessageBox.StandardButton.Save:
+            return CHOICE_SAVE
+        if r == QMessageBox.StandardButton.Discard:
+            return CHOICE_DISCARD
+        return CHOICE_CANCEL
+
+    def _confirm_session_for_project_swap(self) -> bool:
+        """Block **project swap** until unsaved switch markers / ethogram are resolved.
+
+        Does not consult the ``*.labproj.json`` dirty flag.
+        """
+        review, ethogram = self._session_hosts()
+        return resolve_unsaved_session(
+            review_ids=review,
+            ethogram=ethogram,
+            prompt=self._prompt_unsaved_session,
+        )
+
+    def _confirm_and_drop_session_for_project_swap(
+        self, *, project_file: bool = True
+    ) -> bool:
+        """Session Save/Discard, optional project-file prompt, then drop the session.
+
+        Clean sessions skip the session prompt and drop immediately. Does not
+        start a **session load**.
+        """
+        if not self._confirm_session_for_project_swap():
+            return False
+        if project_file and not self._confirm_discard():
+            return False
+        review, ethogram = self._session_hosts()
+        drop_sessions(review_ids=review, ethogram=ethogram)
+        return True
+
     def _confirm_discard(self) -> bool:
         if not self.project.dirty:
             return True
@@ -201,14 +267,14 @@ class WorkbenchMainWindow(QMainWindow):
         return True
 
     def _new_project(self) -> None:
-        if not self._confirm_discard():
+        if not self._confirm_and_drop_session_for_project_swap():
             return
         self.project.new_project()
         self._edit_project()
         self._rebuild_recent_menu()
 
     def _open_project(self) -> None:
-        if not self._confirm_discard():
+        if not self._confirm_and_drop_session_for_project_swap():
             return
         start = self.project.last_project_path() or ""
         path, _ = QFileDialog.getOpenFileName(
@@ -231,7 +297,7 @@ class WorkbenchMainWindow(QMainWindow):
             QMessageBox.warning(self, "Open Recent", f"File not found:\n{path}")
             self._rebuild_recent_menu()
             return
-        if not self._confirm_discard():
+        if not self._confirm_and_drop_session_for_project_swap():
             return
         try:
             self.project.load_from_path(path)
@@ -284,6 +350,8 @@ class WorkbenchMainWindow(QMainWindow):
             return False
 
     def _edit_project(self) -> None:
+        if not self._confirm_and_drop_session_for_project_swap(project_file=False):
+            return
         dlg = ProjectEditorDialog(self.project, self)
         dlg.exec()
         self._update_title_and_status()

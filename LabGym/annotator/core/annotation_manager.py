@@ -38,6 +38,10 @@ class AnnotationManager:
         # Undo: (bouts_snapshot, interaction_snapshot, active_snapshot, description)
         self._undo_stack: List[Tuple[dict, dict, dict, str]] = []
         self._max_undo = 50
+        self._saved_fingerprint: str = ""
+        self._saved_session_dict: dict = {}
+        self._saved_open_starts: Dict[str, Dict[str, Optional[int]]] = {}
+        self.mark_saved()
 
     def _ensure_active_maps(self) -> None:
         for subj in self.session.subjects:
@@ -63,6 +67,49 @@ class AnnotationManager:
         data = self.session.to_dict()
         data["schema_version"] = SCHEMA_VERSION
         Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+        self.mark_saved()
+
+    def _ethogram_fingerprint(self) -> str:
+        """JSON of bout/behavior state plus open starts (not playback UI)."""
+        data = self.session.to_dict()
+        payload = {
+            "behaviors": data.get("behaviors"),
+            "bouts": data.get("bouts"),
+            "interaction_bouts": data.get("interaction_bouts"),
+            "exclusive_mode": bool(data.get("exclusive_mode")),
+            "open": sorted(
+                (sk, name, int(start))
+                for sk, omap in self._active_starts.items()
+                for name, start in omap.items()
+                if start is not None
+            ),
+        }
+        return json.dumps(payload, sort_keys=True, default=str)
+
+    def mark_saved(self) -> None:
+        """Treat the current ethogram as the last saved/loaded snapshot."""
+        self._saved_fingerprint = self._ethogram_fingerprint()
+        self._saved_session_dict = json.loads(
+            json.dumps(self.session.to_dict(), default=str)
+        )
+        self._saved_open_starts = {
+            sk: dict(omap) for sk, omap in self._active_starts.items()
+        }
+
+    def has_unsaved_changes(self) -> bool:
+        """True when bouts/behaviors or open starts differ from last save."""
+        return self._ethogram_fingerprint() != self._saved_fingerprint
+
+    def discard_unsaved_changes(self) -> None:
+        """Restore the last saved/loaded ethogram; do not write to disk."""
+        self.session = AnnotationSession.from_dict(self._saved_session_dict)
+        self.exclusive_mode = self.session.exclusive_mode
+        self._active_starts = {
+            sk: dict(omap) for sk, omap in self._saved_open_starts.items()
+        }
+        self._ensure_active_maps()
+        self._undo_stack.clear()
+        self.mark_saved()
 
     def set_active_subject(self, subject_id: int) -> None:
         self.session.set_active_subject(subject_id)

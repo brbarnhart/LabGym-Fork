@@ -22,13 +22,14 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
-from LabGym.gui_pyside.widgets.path_browse import (
-    browse_existing_directory,
-    set_line_edit_directory,
-)
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
+)
+from LabGym.gui_pyside.session_swap import switch_markers_signature
+from LabGym.gui_pyside.widgets.path_browse import (
+    browse_existing_directory,
+    set_line_edit_directory,
 )
 from LabGym.gui_pyside.workbenches.detector.hard_case_extract_dialog import (
     HardCaseExtractDialog,
@@ -134,6 +135,7 @@ class ReviewIdsTab(QWidget):
         self.review_dir: str = ""
         self.events: List[ContactEvent] = []
         self.markers: List[SwitchMarker] = []
+        self._saved_markers: List[SwitchMarker] = []
         self._undo_stack: List[List[SwitchMarker]] = []
         self._stores: Dict[str, object] = {}
         self._baseline_stores: Dict[str, object] = {}
@@ -163,7 +165,7 @@ class ReviewIdsTab(QWidget):
         self._build_ui()
         self._bind_shortcuts()
         # Tracklet discovery per video is expensive — only on replace/open/edit.
-        self.project.project_replaced.connect(self.refresh_video_list)
+        self.project.project_replaced.connect(self._on_project_replaced)
         self.project.project_replaced.connect(self._prefills_hard_case_out)
         self.refresh_video_list()
         self._prefills_hard_case_out()
@@ -402,6 +404,11 @@ class ReviewIdsTab(QWidget):
     def _on_video_combo(self, _i: int) -> None:
         pass
 
+    def _on_project_replaced(self) -> None:
+        """Drop the previous session; do not **session load** the new current video."""
+        self.drop_session()
+        self.refresh_video_list()
+
     def _browse_package(self) -> None:
         start = self.review_dir or self.project.project.root_dir or ""
         d = browse_existing_directory(
@@ -499,6 +506,7 @@ class ReviewIdsTab(QWidget):
         self.fps = pkg.fps
         self.frame = 0
         self._dirty = False
+        self._saved_markers = clone_markers(self.markers)
         self._training_ranges = []
         self._range_start = None
         self._refresh_range_list()
@@ -1187,11 +1195,70 @@ class ReviewIdsTab(QWidget):
 
     # --- save ---
 
-    def save_package(self) -> None:
-        """Publish remapped tracklets after a fail-closed stale-file check."""
+    def has_unsaved_switch_markers(self) -> bool:
+        """True when **switch markers** differ from the last load or save.
+
+        Names/roles and proposed switch markers do not count.
+        """
+        return switch_markers_signature(self.markers) != switch_markers_signature(
+            self._saved_markers
+        )
+
+    def save_switch_markers(self) -> bool:
+        """Persist the current switch-marker list via Review IDs save."""
+        return self.save_package(notify=False)
+
+    def discard_unsaved_switch_markers(self) -> None:
+        """Revert in-memory switch markers to the last load/save; do not write."""
+        self.markers = clone_markers(self._saved_markers)
+        self._undo_stack.clear()
+        if self.review_dir:
+            self._refresh_marker_list()
+            self._refresh_timeline()
+            self._render()
+            self._update_undo_button()
+
+    def drop_session(self) -> None:
+        """Release capture and tracklet arrays; clear the viewer.
+
+        Does not **session load** a video and does not mark the project dirty.
+        """
+        self._stop_play()
+        self._release_cap()
+        self.review_dir = ""
+        self.events = []
+        self.markers = []
+        self._saved_markers = []
+        self._undo_stack.clear()
+        self._stores.clear()
+        self._baseline_stores.clear()
+        self._already_corrected = False
+        self._has_raw = False
+        self._package_video_path = ""
+        self._training_ranges = []
+        self._range_start = None
+        self._dirty = False
+        self.frame = 0
+        self.n_frames = 1
+        self.video_label.clear()
+        self.lbl_pkg.setText("No package loaded.")
+        self.status.setText("")
+        self.markers_panel.set_markers([])
+        self.subjects_table.set_subjects([])
+        self.setEnabled_controls(False)
+
+    def save_package(self, *, notify: bool = True) -> bool:
+        """Publish remapped tracklets after a fail-closed stale-file check.
+
+        Args:
+            notify: When True, show the success dialog after a write.
+
+        Returns:
+            True if the package was saved (or there was nothing to save).
+        """
         if not self.review_dir:
             QMessageBox.information(self, "Save", "Load a package first.")
-            return
+            return False
         self._stop_play()
         from LabGym.id_review.raw_store import has_raw_snapshot
 
@@ -1213,7 +1280,7 @@ class ReviewIdsTab(QWidget):
             if should_confirm_stale_downstream(
                 will_rebuild=True, check=downstream
             ) and not self._confirm_stale_downstream(downstream):
-                return
+                return False
         else:
             downstream = DownstreamArtifactCheck(check_failed=False)
         result = save_review_package(
@@ -1226,13 +1293,14 @@ class ReviewIdsTab(QWidget):
         )
         if not result.ok:
             QMessageBox.critical(self, "Save failed", result.error)
-            return
+            return False
         self._already_corrected = bool(result.already_corrected)
         self._has_raw = bool(result.has_raw)
         if result.stores:
             self._stores = result.stores
             self._baseline_stores = result.baseline_stores
         self._dirty = False
+        self._saved_markers = clone_markers(self.markers)
         self._set_package_label(accepted=result.accepted, has_raw=self._has_raw)
         from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
 
@@ -1255,8 +1323,10 @@ class ReviewIdsTab(QWidget):
                 f"{result.remap_note}"
                 f"Subjects: {result.n_subjects}.{extra}"
             )
-        QMessageBox.information(self, "Saved", body)
+        if notify:
+            QMessageBox.information(self, "Saved", body)
         self._render()
+        return True
 
     def _confirm_stale_downstream(self, check: DownstreamArtifactCheck) -> bool:
         """Ask before save when artifacts exist or the lookup failed (default No)."""

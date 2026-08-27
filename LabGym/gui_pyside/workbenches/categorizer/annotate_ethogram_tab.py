@@ -103,7 +103,37 @@ class AnnotateEthogramTab(QWidget):
         self._on_project_replaced()
 
     def _on_project_replaced(self) -> None:
+        self.drop_session()
         self.refresh_video_list()
+
+    def has_unsaved_ethogram(self) -> bool:
+        """True when the embedded or detached annotator has unsaved bouts."""
+        if self.annotator.has_unsaved_ethogram():
+            return True
+        if self._detached is not None:
+            return self._detached.has_unsaved_ethogram()
+        return False
+
+    def save_ethogram(self) -> bool:
+        """Persist unsaved ethogram(s). Does not auto-save on **project swap**."""
+        ok = True
+        if self.annotator.has_unsaved_ethogram():
+            ok = self.annotator.save_ethogram() and ok
+        if self._detached is not None and self._detached.has_unsaved_ethogram():
+            ok = self._detached.save_ethogram() and ok
+        return ok
+
+    def discard_unsaved_ethogram(self) -> None:
+        """Revert in-memory ethogram edits; do not write."""
+        self.annotator.discard_unsaved_ethogram()
+        if self._detached is not None:
+            self._detached.discard_unsaved_ethogram()
+
+    def drop_session(self) -> None:
+        """Release annotator capture and tracklets; do not **session load**."""
+        self.annotator.drop_session()
+        if self._detached is not None:
+            self._detached.drop_session()
 
     def refresh_video_list(self) -> None:
         choices = list_project_video_choices(self.project.project)

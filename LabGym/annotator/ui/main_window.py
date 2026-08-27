@@ -61,6 +61,7 @@ class MainWindow(QMainWindow):
         self.bout_list_dialog: Optional["BoutListWidget"] = None
         self._bout_list_window: Optional[QDialog] = None
         self._loaded_tracklets: Optional[LoadedTracklets] = None
+        self._ethogram_path: Optional[str] = None
         self._show_track_overlays = True
         # Workbench sets this so File → Open uses the project identity gate.
         # Signature: handler(path) -> True if the video was handled (loaded or
@@ -625,6 +626,12 @@ class MainWindow(QMainWindow):
                 f"{meta.fps:.2f} fps{ann_note}{tracks_msg}"
             )
             self.setWindowTitle(f"LabGym Behavior Annotator — {Path(path).name}")
+            if auto_loaded and ann_path is not None:
+                self._ethogram_path = str(ann_path)
+            else:
+                self._ethogram_path = str(self.sidecar_annotations_path(path))
+            if self.manager is not None:
+                self.manager.mark_saved()
             self._update_undo_action()
             if self.bout_list_dialog is not None:
                 self.bout_list_dialog.set_manager(self.manager)
@@ -673,6 +680,7 @@ class MainWindow(QMainWindow):
             # Finalize any open bouts at the last viewed frame before saving
             self.manager.close_all_open_bouts(self._current_frame)
             self.manager.save_to_json(path)
+            self._ethogram_path = str(path)
             # Refresh UI in case indicators changed
             self._refresh_display_overlay()
             self.statusBar().showMessage(f"Saved: {path}")
@@ -1171,6 +1179,66 @@ class MainWindow(QMainWindow):
             self._sync_bout_list_frame()
         except Exception as e:
             self.statusBar().showMessage(f"Frame error: {e}")
+
+    def has_unsaved_ethogram(self) -> bool:
+        """True when the loaded ethogram differs from the last save/load."""
+        if self.manager is None:
+            return False
+        return self.manager.has_unsaved_changes()
+
+    def save_ethogram(self) -> bool:
+        """Write the ethogram to the last or sidecar path without a file dialog.
+
+        Returns:
+            True if there was nothing to save or the file was written.
+        """
+        if self.manager is None:
+            return True
+        if not self.manager.has_unsaved_changes():
+            return True
+        path = self._ethogram_path
+        if not path and self.manager.session.video_path:
+            path = str(self.sidecar_annotations_path(self.manager.session.video_path))
+        if not path:
+            return False
+        try:
+            self.manager.close_all_open_bouts(self._current_frame)
+            self.manager.save_to_json(path)
+            self._ethogram_path = str(path)
+            self._refresh_display_overlay()
+            self.statusBar().showMessage(f"Saved: {path}")
+            return True
+        except OSError:
+            return False
+
+    def discard_unsaved_ethogram(self) -> None:
+        """Revert in-memory ethogram edits; do not write."""
+        if self.manager is None:
+            return
+        self.manager.discard_unsaved_changes()
+        if self.palette:
+            self.palette.sync_from_manager()
+            self.palette.refresh()
+        if self.subject_panel:
+            self.subject_panel.set_manager(self.manager)
+        self._refresh_display_overlay()
+        self._update_undo_action()
+
+    def drop_session(self) -> None:
+        """Release video capture and tracklet arrays; clear the viewer."""
+        self._is_playing = False
+        self._playback_timer.stop()
+        self.video.release()
+        self._loaded_tracklets = None
+        self.manager = None
+        self._ethogram_path = None
+        self._current_frame = 0
+        if hasattr(self, "video_widget"):
+            self.video_widget.clear()
+        if hasattr(self, "timeline"):
+            self.timeline.clear_selections()
+        self.setWindowTitle("LabGym Behavior Annotator")
+        self.statusBar().showMessage("Session dropped.")
 
     # --- Cleanup ---
 
