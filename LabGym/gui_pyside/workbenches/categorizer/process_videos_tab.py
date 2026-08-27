@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -45,7 +46,12 @@ from LabGym.gui_pyside.project.paths import (
     resolve_video_context,
 )
 from LabGym.gui_pyside.project.video_disk_status import (
+    STATUS_DONE,
     STATUS_UNKNOWN,
+    ProbeResult,
+    VideoDiskStatusProbeThread,
+    apply_probe_to_project,
+    run_blocked_unknown_paths,
     status_label,
 )
 from LabGym.gui_pyside.widgets.path_browse import (
@@ -77,6 +83,13 @@ class ProcessVideosTab(QWidget):
         # path -> (status, note) survives post-batch project.changed rebuilds
         self._status_by_path: Dict[str, Tuple[str, str]] = {}
         self._batch_active = False
+        self._probe_thread: Optional[VideoDiskStatusProbeThread] = None
+        self._probe_cancel: Optional[threading.Event] = None
+        self._probe_gen = 0
+        self._probe_total = 0
+        self._probe_done = 0
+        self._models_need_scan = True
+        self._behaviors_need_refresh = True
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -219,6 +232,12 @@ class ProcessVideosTab(QWidget):
         for b in (btn_ref, btn_edit, btn_all, btn_none):
             row.addWidget(b)
         row.addStretch(1)
+        self.lbl_probe = QLabel("")
+        self.lbl_probe.setToolTip(
+            "Per-video disk check after Open. Rows stay status unknown (… ) "
+            "until each probe finishes."
+        )
+        row.addWidget(self.lbl_probe)
         vl.addLayout(row)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
@@ -232,6 +251,7 @@ class ProcessVideosTab(QWidget):
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setColumnWidth(0, 36)
+        self.table.itemChanged.connect(self._on_table_item_changed)
         vl.addWidget(self.table)
         layout.addWidget(vbox, 1)
 
@@ -254,6 +274,7 @@ class ProcessVideosTab(QWidget):
         # Full rebuild / defaults only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self._on_project_replaced)
         self._on_project_replaced()
+        self._update_run_enabled()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -261,9 +282,25 @@ class ProcessVideosTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt
+        super().showEvent(event)
+        self._maybe_refresh_behaviors()
+        self._maybe_scan_models()
+        self._maybe_start_status_probes()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt
+        self._cancel_status_probes()
+        super().hideEvent(event)
+
     def _on_project_replaced(self) -> None:
+        self._cancel_status_probes()
+        self._status_by_path.clear()
+        self._models_need_scan = True
+        self._behaviors_need_refresh = True
         self._init_defaults()
         self.refresh_videos()
+        self._maybe_start_status_probes()
+        QTimer.singleShot(0, self._maybe_scan_models)
 
     def _init_defaults(self) -> None:
         p = self.project.project
@@ -276,6 +313,19 @@ class ProcessVideosTab(QWidget):
             self.ed_out.setText(str(p.resolve_path("analysis")))
         # Do not read categorizer files during project swap.
         self.lbl_behaviors.setText("—")
+
+    def _maybe_scan_models(self) -> None:
+        """Walk categorizer folders when this tab is shown, not during project swap."""
+        if not self._models_need_scan or not self.isVisible():
+            return
+        self._models_need_scan = False
+        self._scan_models()
+
+    def _maybe_refresh_behaviors(self) -> None:
+        if not self._behaviors_need_refresh or not self.isVisible():
+            return
+        self._behaviors_need_refresh = False
+        self._on_categorizer_changed(self.ed_categorizer.text())
 
     def _scan_models(self) -> None:
         p = self.project.project
@@ -301,8 +351,11 @@ class ProcessVideosTab(QWidget):
     def _manual_refresh_videos(self) -> None:
         from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
 
+        self._cancel_status_probes()
         clear_tracklets_discovery_cache()
+        self._status_by_path.clear()
         self.refresh_videos()
+        self._start_status_probes()
 
     def refresh_videos(self) -> None:
         # Skip rebuild mid-batch so mark_dirty cannot wipe live status.
@@ -321,6 +374,7 @@ class ProcessVideosTab(QWidget):
         choices = list_project_video_choices(self.project.project)
         self.table.setRowCount(0)
         self.table.setRowCount(len(choices))
+        unknown = 0
         for r, (label, resolved) in enumerate(choices):
             path = str(resolved)
             chk = QTableWidgetItem()
@@ -343,25 +397,154 @@ class ProcessVideosTab(QWidget):
             if path in self._status_by_path:
                 status, note = self._status_by_path[path]
             else:
-                # Disk facts wait for the status module (Detect + track in #16;
-                # this tab's probes are a later ticket). Never fake pending/done.
                 status, note = STATUS_UNKNOWN, ""
+            if status == STATUS_UNKNOWN:
+                unknown += 1
             st_item = QTableWidgetItem(status_label(status))
             if status == STATUS_UNKNOWN:
                 st_item.setToolTip("Status unknown — not yet checked on disk.")
             self.table.setItem(r, 2, st_item)
             self.table.setItem(r, 3, QTableWidgetItem(note))
+        self._probe_total = len(choices)
+        self._probe_done = len(choices) - unknown
+        self._update_probe_progress()
+        self._update_run_enabled()
 
     def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:
         self._status_by_path[path] = (status, note)
+        label = status_label(status)
         if self.table.item(row, 2):
-            self.table.item(row, 2).setText(status)
+            self.table.item(row, 2).setText(label)
         else:
-            self.table.setItem(row, 2, QTableWidgetItem(status))
+            self.table.setItem(row, 2, QTableWidgetItem(label))
         if self.table.item(row, 3):
             self.table.item(row, 3).setText(note)
         else:
             self.table.setItem(row, 3, QTableWidgetItem(note))
+        if note and status == "error":
+            item2 = self.table.item(row, 2)
+            item3 = self.table.item(row, 3)
+            if item2:
+                item2.setToolTip(note)
+            if item3:
+                item3.setToolTip(note)
+
+    def _update_probe_progress(self) -> None:
+        total = self._probe_total
+        if total <= 0:
+            self.lbl_probe.setText("")
+            return
+        self.lbl_probe.setText(f"{self._probe_done} / {total} checked")
+
+    def _row_for_path(self, path: str) -> Optional[int]:
+        for r in range(self.table.rowCount()):
+            item0 = self.table.item(r, 0)
+            if item0 and str(item0.data(Qt.ItemDataRole.UserRole) or "") == path:
+                return r
+        return None
+
+    def _unknown_video_paths(self) -> List[str]:
+        out: List[str] = []
+        for r in range(self.table.rowCount()):
+            item0 = self.table.item(r, 0)
+            if not item0:
+                continue
+            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
+            if not path:
+                continue
+            status = self._status_by_path.get(path, (STATUS_UNKNOWN, ""))[0]
+            if status == STATUS_UNKNOWN:
+                out.append(path)
+        return out
+
+    def _cancel_status_probes(self) -> None:
+        self._probe_gen += 1
+        if self._probe_cancel is not None:
+            self._probe_cancel.set()
+        thread = self._probe_thread
+        if thread is not None:
+            thread.cancel()
+        self._probe_thread = None
+        self._probe_cancel = None
+
+    def _maybe_start_status_probes(self) -> None:
+        if self._batch_active or not self.isVisible():
+            return
+        self._start_status_probes()
+
+    def _start_status_probes(self) -> None:
+        if self._batch_active:
+            return
+        paths = self._unknown_video_paths()
+        self._update_probe_progress()
+        if not paths:
+            return
+        self._cancel_status_probes()
+        gen = self._probe_gen
+        cancel = threading.Event()
+        self._probe_cancel = cancel
+        thread = VideoDiskStatusProbeThread(
+            self.project.project,
+            paths,
+            cancel_event=cancel,
+            parent=self,
+        )
+        thread.probe_finished.connect(
+            lambda result, g=gen: self._on_probe_result(result, g)
+        )
+        thread.batch_finished.connect(
+            lambda g=gen: self._on_probe_batch_finished(g)
+        )
+        self._probe_thread = thread
+        thread.start()
+
+    def _on_probe_result(self, result: object, gen: int) -> None:
+        if gen != self._probe_gen:
+            return
+        if not isinstance(result, ProbeResult) or result.cancelled:
+            return
+        apply_probe_to_project(self.project.project, result)
+        note = result.error
+        if result.status == STATUS_DONE and result.tracklets_dir:
+            from LabGym.id_review.raw_store import has_accepted_identities
+
+            note = (
+                "yes"
+                if has_accepted_identities(result.tracklets_dir)
+                else "no — save Review IDs"
+            )
+        elif result.status == STATUS_UNKNOWN:
+            note = ""
+        row = self._row_for_path(result.video_path)
+        if row is not None:
+            self._set_status(row, result.video_path, result.status, note)
+        else:
+            self._status_by_path[result.video_path] = (result.status, note)
+        self._probe_done += 1
+        self._update_probe_progress()
+        self._update_run_enabled()
+
+    def _on_probe_batch_finished(self, gen: int) -> None:
+        if gen != self._probe_gen:
+            return
+        self._probe_thread = None
+        self._update_probe_progress()
+        self._update_run_enabled()
+
+    def _on_table_item_changed(self, _item) -> None:
+        self._update_run_enabled()
+
+    def _update_run_enabled(self) -> None:
+        """Disable Run while any checked row is still status unknown."""
+        if not hasattr(self, "btn_run"):
+            return
+        if self.queue.is_running or self._batch_active:
+            self.btn_run.setEnabled(False)
+            return
+        blocked = run_blocked_unknown_paths(
+            self._selected_videos(), self._status_by_path
+        )
+        self.btn_run.setEnabled(not blocked)
 
     def _set_all(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -385,14 +568,24 @@ class ProcessVideosTab(QWidget):
         categorizer = self.ed_categorizer.text().strip()
         out = self.ed_out.text().strip()
         videos = self._selected_videos()
+        if not videos:
+            QMessageBox.warning(self, "Process", "Select at least one video.")
+            return
+        unknown = run_blocked_unknown_paths(videos, self._status_by_path)
+        if unknown:
+            QMessageBox.warning(
+                self,
+                "Process",
+                "Status is still unknown for checked video(s). "
+                "Wait until disk checks finish, or uncheck those rows:\n\n"
+                + "\n".join(f"  • {Path(p).name}" for p in unknown[:12]),
+            )
+            return
         if not categorizer or not Path(categorizer).is_dir():
             QMessageBox.warning(self, "Process", "Select a valid categorizer folder.")
             return
         if not out:
             QMessageBox.warning(self, "Process", "Choose a results root folder.")
-            return
-        if not videos:
-            QMessageBox.warning(self, "Process", "Select at least one video.")
             return
 
         project = self.project.project
@@ -453,7 +646,7 @@ class ProcessVideosTab(QWidget):
             )
             return process_video(cfg, progress=prog)
 
-        self.btn_run.setEnabled(False)
+        self._update_run_enabled()
         self.btn_cancel.setEnabled(True)
         self.log.append(f"Starting process batch: {len(items)} video(s) → {out}")
         self.queue.start(items, runner)
@@ -493,7 +686,6 @@ class ProcessVideosTab(QWidget):
         self.log.append(f"[{Path(job_id).name}] FAIL: {error}")
 
     def _on_queue_done(self) -> None:
-        self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self._batch_active = False
         self.log.append("Batch finished.")
@@ -504,6 +696,7 @@ class ProcessVideosTab(QWidget):
                 if row is not None:
                     self._set_status(row, it.job_id, "cancelled", "")
         self.refresh_videos()
+        self._maybe_start_status_probes()
         n_ok, n_err, _n_cancel = summarize_job_statuses(self.queue.items)
         QMessageBox.information(
             self,

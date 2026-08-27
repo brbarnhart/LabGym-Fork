@@ -10,7 +10,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Union
+from typing import Callable, Iterable, List, Mapping, Optional, Sequence, Union
 
 from PySide6.QtCore import QThread, Signal
 
@@ -23,6 +23,7 @@ STATUS_DONE = "done"
 STATUS_ERROR = "error"
 
 STATUS_UNKNOWN_LABEL = "…"
+STATUS_DONE_MARK = "✓"
 
 # Hung NAS ``is_dir`` / glob: fail this video and continue with the rest.
 DEFAULT_PROBE_TIMEOUT_S = 10.0
@@ -46,6 +47,51 @@ def status_label(status: str) -> str:
     if status == STATUS_UNKNOWN:
         return STATUS_UNKNOWN_LABEL
     return status
+
+
+def combo_item_label(name: str, status: str) -> str:
+    """Video combo text: unknown mark until probed; never a fake done check.
+
+    Args:
+        name: Display name from the project (file name or relative path).
+        status: Disk-status value (``unknown`` / ``pending`` / ``done`` / ``error``).
+
+    Returns:
+        ``name`` plus ``…`` while unknown, ``✓`` only after a successful probe,
+        ``error`` after a failed probe, or the bare name for pending (no package).
+    """
+    if status == STATUS_UNKNOWN:
+        return f"{name}  {STATUS_UNKNOWN_LABEL}"
+    if status == STATUS_DONE:
+        return f"{name}  {STATUS_DONE_MARK}"
+    if status == STATUS_ERROR:
+        return f"{name}  error"
+    return name
+
+
+def run_blocked_unknown_paths(
+    checked_paths: Iterable[str],
+    status_by_path: Mapping[str, Sequence[str]],
+) -> List[str]:
+    """Return checked videos still **status unknown**.
+
+    Run on Detect + track or Process videos must refuse (or stay disabled)
+    while this list is non-empty. Missing map entries are unknown.
+
+    Args:
+        checked_paths: Selected video paths.
+        status_by_path: ``path -> (status, note, ...)`` from in-session probes.
+
+    Returns:
+        Paths among *checked_paths* that have not been probed yet.
+    """
+    blocked: List[str] = []
+    for path in checked_paths:
+        entry = status_by_path.get(path)
+        status = entry[0] if entry else STATUS_UNKNOWN
+        if status == STATUS_UNKNOWN:
+            blocked.append(path)
+    return blocked
 
 
 def _relative_detection_dir(project: Project, tracklets_dir: str) -> str:

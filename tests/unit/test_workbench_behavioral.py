@@ -325,6 +325,11 @@ def test_detect_track_start_uses_path_job_ids(tmp_path: Path, monkeypatch):
     (det / "model_final.pth").write_bytes(b"x")
     (det / "config.yaml").write_text("{}", encoding="utf-8")
     tab.ed_detector.setEditText(str(det))
+    from LabGym.gui_pyside.project.video_disk_status import STATUS_PENDING
+
+    for r in range(tab.table.rowCount()):
+        path = str(tab.table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+        tab._status_by_path[path] = (STATUS_PENDING, "")
 
     captured = {}
 

@@ -212,6 +212,63 @@ class CategoriesTab(QWidget):
         except Exception as exc:
             self.status.setText(f"Could not resolve project examples path: {exc}")
         # Do not scan the example store on project swap.
+        self._manifest = None
+        self.cat_table.setRowCount(0)
+        self.ops_list.clear()
+        self.status.setText("Example store path from project. Counts fill when this tab is shown.")
+
+    def begin_store_chrome(self, store: str) -> None:
+        """Paint path + existing manifest counts; scan results arrive separately."""
+        if store:
+            self.ed_store.blockSignals(True)
+            self.ed_store.setText(store)
+            self.ed_store.blockSignals(False)
+        if not store or not Path(store).is_dir():
+            self._manifest = None
+            self.status.setText("Set a valid example store folder.")
+            self.cat_table.setRowCount(0)
+            self.ops_list.clear()
+            return
+        try:
+            from LabGym.training.dataset_manifest import DatasetManifest
+
+            m = DatasetManifest.load_or_create(store)
+            self._manifest = m
+            self._refresh_views()
+            self.status.setText(
+                f"Store: {store}  |  {len(m.examples)} examples on manifest  |  scanning…"
+            )
+        except Exception as exc:
+            self._manifest = None
+            self.status.setText(f"Error: {exc}")
+
+    def apply_store_scan(self, rows: object, error: str) -> None:
+        """Apply a background ``scan_example_store`` result to the table."""
+        if error:
+            extra = f"  |  scan incomplete: {error}"
+            cur = self.status.text()
+            self.status.setText(cur + extra if cur else extra.strip(" |"))
+            return
+        if rows is None:
+            return
+        store = self.ed_store.text().strip()
+        if not store:
+            return
+        try:
+            from LabGym.training.dataset_manifest import DatasetManifest
+
+            m = self._manifest or DatasetManifest.load_or_create(store)
+            scanned = [(eid, lab, hint) for eid, lab, hint, _p in rows]
+            added = m.sync_from_scan(scanned)
+            self._manifest = m
+            self._refresh_views()
+            extra = f" (+{len(added)} new)" if added else ""
+            self.status.setText(
+                f"Store: {store}  |  {len(m.examples)} examples{extra}  |  "
+                f"undo depth={len(m.undo_stack)}  |  manifest → {m.path}"
+            )
+        except Exception as exc:
+            self.status.setText(f"Error: {exc}")
 
     def _require_manifest(self):
         if self._manifest is None:

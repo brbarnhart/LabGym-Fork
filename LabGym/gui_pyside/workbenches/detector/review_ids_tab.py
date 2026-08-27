@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -25,6 +26,13 @@ from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
     list_project_video_choices,
+)
+from LabGym.gui_pyside.project.video_disk_status import (
+    STATUS_UNKNOWN,
+    ProbeResult,
+    VideoDiskStatusProbeThread,
+    apply_probe_to_project,
+    combo_item_label,
 )
 from LabGym.gui_pyside.session_swap import switch_markers_signature
 from LabGym.gui_pyside.widgets.path_browse import (
@@ -158,6 +166,13 @@ class ReviewIdsTab(QWidget):
         self._extract_worker: Optional[_HardCaseExtractWorker] = None
         self._progress_dlg: Optional[HardCaseProgressDialog] = None
         self._hard_extract_dlg: Optional[HardCaseExtractDialog] = None
+        self._status_by_path: Dict[str, Tuple[str, str]] = {}
+        self._video_names: Dict[str, str] = {}
+        self._probe_thread: Optional[VideoDiskStatusProbeThread] = None
+        self._probe_cancel: Optional[threading.Event] = None
+        self._probe_gen = 0
+        self._probe_total = 0
+        self._probe_done = 0
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -188,6 +203,12 @@ class ReviewIdsTab(QWidget):
         self.combo_video = QComboBox()
         self.combo_video.currentIndexChanged.connect(self._on_video_combo)
         pick.addWidget(self.combo_video, 1)
+        self.lbl_probe = QLabel("")
+        self.lbl_probe.setToolTip(
+            "Per-video disk check after Open. Combo items stay status unknown "
+            "(… ) until each probe finishes — never a fake ✓."
+        )
+        pick.addWidget(self.lbl_probe)
         self.btn_open_pkg = QPushButton("Open package folder…")
         self.btn_open_pkg.setToolTip("Open an id_review / tracklets directory directly")
         self.btn_open_pkg.clicked.connect(self._browse_package)
@@ -385,29 +406,133 @@ class ReviewIdsTab(QWidget):
 
     # --- package load ---
 
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt
+        super().showEvent(event)
+        self._maybe_start_status_probes()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt
+        self._cancel_status_probes()
+        super().hideEvent(event)
+
     def refresh_video_list(self) -> None:
         # Preserve the selected video across rebuilds.
         current = self.combo_video.currentData()
         self.combo_video.blockSignals(True)
         self.combo_video.clear()
         self.combo_video.addItem("(open package folder…)", "")
-        for label, resolved in list_project_video_choices(self.project.project):
-            # Names only on swap/refresh-from-project; do not hunt tracklets here.
-            self.combo_video.addItem(label, str(resolved))
+        self._video_names.clear()
+        unknown = 0
+        choices = list_project_video_choices(self.project.project)
+        for label, resolved in choices:
+            path = str(resolved)
+            self._video_names[path] = label
+            status = self._status_by_path.get(path, (STATUS_UNKNOWN, ""))[0]
+            if status == STATUS_UNKNOWN:
+                unknown += 1
+            self.combo_video.addItem(combo_item_label(label, status), path)
         if current:
             for i in range(self.combo_video.count()):
                 if self.combo_video.itemData(i) == current:
                     self.combo_video.setCurrentIndex(i)
                     break
         self.combo_video.blockSignals(False)
+        self._probe_total = len(choices)
+        self._probe_done = len(choices) - unknown
+        self._update_probe_progress()
 
     def _on_video_combo(self, _i: int) -> None:
         pass
 
     def _on_project_replaced(self) -> None:
         """Drop the previous session; do not **session load** the new current video."""
+        self._cancel_status_probes()
+        self._status_by_path.clear()
         self.drop_session()
         self.refresh_video_list()
+        self._maybe_start_status_probes()
+
+    def _update_probe_progress(self) -> None:
+        if not hasattr(self, "lbl_probe"):
+            return
+        total = self._probe_total
+        if total <= 0:
+            self.lbl_probe.setText("")
+            return
+        self.lbl_probe.setText(f"{self._probe_done} / {total} checked")
+
+    def _unknown_video_paths(self) -> List[str]:
+        out: List[str] = []
+        for i in range(1, self.combo_video.count()):
+            path = str(self.combo_video.itemData(i) or "")
+            if not path:
+                continue
+            status = self._status_by_path.get(path, (STATUS_UNKNOWN, ""))[0]
+            if status == STATUS_UNKNOWN:
+                out.append(path)
+        return out
+
+    def _cancel_status_probes(self) -> None:
+        self._probe_gen += 1
+        if self._probe_cancel is not None:
+            self._probe_cancel.set()
+        thread = self._probe_thread
+        if thread is not None:
+            thread.cancel()
+        self._probe_thread = None
+        self._probe_cancel = None
+
+    def _maybe_start_status_probes(self) -> None:
+        if not self.isVisible():
+            return
+        self._start_status_probes()
+
+    def _start_status_probes(self) -> None:
+        paths = self._unknown_video_paths()
+        self._update_probe_progress()
+        if not paths:
+            return
+        self._cancel_status_probes()
+        gen = self._probe_gen
+        cancel = threading.Event()
+        self._probe_cancel = cancel
+        thread = VideoDiskStatusProbeThread(
+            self.project.project,
+            paths,
+            cancel_event=cancel,
+            parent=self,
+        )
+        thread.probe_finished.connect(
+            lambda result, g=gen: self._on_probe_result(result, g)
+        )
+        thread.batch_finished.connect(
+            lambda g=gen: self._on_probe_batch_finished(g)
+        )
+        self._probe_thread = thread
+        thread.start()
+
+    def _apply_combo_status(self, path: str, status: str) -> None:
+        name = self._video_names.get(path, Path(path).name)
+        for i in range(1, self.combo_video.count()):
+            if str(self.combo_video.itemData(i) or "") == path:
+                self.combo_video.setItemText(i, combo_item_label(name, status))
+                return
+
+    def _on_probe_result(self, result: object, gen: int) -> None:
+        if gen != self._probe_gen:
+            return
+        if not isinstance(result, ProbeResult) or result.cancelled:
+            return
+        apply_probe_to_project(self.project.project, result)
+        self._status_by_path[result.video_path] = (result.status, result.error)
+        self._apply_combo_status(result.video_path, result.status)
+        self._probe_done += 1
+        self._update_probe_progress()
+
+    def _on_probe_batch_finished(self, gen: int) -> None:
+        if gen != self._probe_gen:
+            return
+        self._probe_thread = None
+        self._update_probe_progress()
 
     def _browse_package(self) -> None:
         start = self.review_dir or self.project.project.root_dir or ""

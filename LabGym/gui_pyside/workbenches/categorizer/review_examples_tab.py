@@ -225,6 +225,63 @@ class ReviewExamplesTab(QWidget):
         except Exception as exc:
             self.manifest_status.setText(f"Could not resolve project examples path: {exc}")
         # Do not scan the example store or eval runs on project swap.
+        self._manifest = None
+        self.manifest_status.setText(
+            "Example store path from project. Counts fill when this tab is shown."
+        )
+
+    def begin_store_chrome(self, store: str) -> None:
+        """Paint path + existing manifest; store walk is deferred to the host scan."""
+        if store:
+            self.ed_store.blockSignals(True)
+            self.ed_store.setText(store)
+            self.ed_store.blockSignals(False)
+        if not store:
+            self._manifest = None
+            self.manifest_status.setText("Manifest: (no store)")
+            return
+        try:
+            from LabGym.training.dataset_manifest import DatasetManifest
+
+            self._manifest = DatasetManifest.load_or_create(store)
+            n = len(self._manifest.examples)
+            path = self._manifest.path
+            exists = path.is_file()
+            self.manifest_status.setText(
+                f"Manifest: {n} examples; "
+                f"{'on disk' if exists else 'not yet saved'} → {path}  |  scanning…"
+            )
+        except Exception as exc:
+            self._manifest = None
+            self.manifest_status.setText(f"Manifest error: {exc}")
+
+    def apply_store_scan(self, rows: object, error: str) -> None:
+        """Merge background example-store scan into the loaded manifest."""
+        if error:
+            self.manifest_status.setText(
+                f"Store scan incomplete (manifest still loaded): {error}"
+            )
+            return
+        if rows is None or self._manifest is None:
+            return
+        try:
+            from LabGym.training.review_queue import available_categories
+
+            scanned = [(eid, lab, hint) for eid, lab, hint, _p in rows]
+            self._manifest.sync_from_scan(scanned)
+            n = len(self._manifest.examples)
+            path = self._manifest.path
+            exists = path.is_file()
+            self.manifest_status.setText(
+                f"Manifest: {n} examples; "
+                f"{'on disk' if exists else 'not yet saved'} → {path}"
+            )
+            store = self.ed_store.text().strip()
+            cats = available_categories(store, manifest=self._manifest)
+            self.cmb_label.clear()
+            self.cmb_label.addItems(cats)
+        except Exception as exc:
+            self.manifest_status.setText(f"Manifest error: {exc}")
 
     def _on_store_changed(self) -> None:
         store = self.ed_store.text().strip()
