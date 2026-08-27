@@ -3,9 +3,12 @@
 Unsaved **switch markers** and an unsaved ethogram block swap until Save or
 Discard. This is independent of the ``*.labproj.json`` dirty flag.
 
-Clean sessions are not prompted. The session stays loaded until a **project
-swap** is committed (``load_from_path`` / ``new_project`` / editor OK);
-``project_replaced`` on the owning tabs is the drop.
+Clean sessions are not prompted and stay loaded until a **project swap** is
+committed (``load_from_path`` / ``new_project`` / editor OK);
+``project_replaced`` on the owning tabs is then the drop.
+
+After Save or Discard, the viewer is cleared and capture/tracklet memory is
+released immediately — including when the following file dialog is cancelled.
 
 Proposed switch markers are not switch markers and must not be reported here.
 """
@@ -128,11 +131,14 @@ def resolve_unsaved_session(
     ethogram: Optional[EthogramSession] = None,
     prompt: Optional[Callable[[SessionSwapReport], str]] = None,
 ) -> bool:
-    """Prompt Save or Discard when the session is dirty; do not drop yet.
+    """Prompt Save or Discard when the session is dirty, then drop it.
 
-    A clean session returns True without calling *prompt*. Cancel or a failed
-    save returns False and leaves session memory in place. Discard reverts
-    unsaved switch markers / ethogram in memory and does not write.
+    A clean session returns True without calling *prompt* and without
+    dropping (the committed **project swap** drops via ``project_replaced``).
+    Cancel or a failed save returns False and leaves session memory in place.
+    Discard reverts unsaved switch markers / ethogram in memory and does not
+    write. After a successful Save or Discard, capture and tracklet arrays
+    are released even if the caller later cancels Open / Edit Project.
 
     Save is not atomic across kinds: Review IDs is written first, then the
     ethogram. If the second write fails, the first stays on disk, the swap
@@ -162,12 +168,14 @@ def resolve_unsaved_session(
         if report.unsaved_ethogram and ethogram is not None:
             if not ethogram.save_ethogram():
                 return False
+        drop_sessions(review_ids=review_ids, ethogram=ethogram)
         return True
     if choice == CHOICE_DISCARD:
         if report.unsaved_switch_markers and review_ids is not None:
             review_ids.discard_unsaved_switch_markers()
         if report.unsaved_ethogram and ethogram is not None:
             ethogram.discard_unsaved_ethogram()
+        drop_sessions(review_ids=review_ids, ethogram=ethogram)
         return True
     return False
 

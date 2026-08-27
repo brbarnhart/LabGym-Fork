@@ -12,11 +12,13 @@ from LabGym.id_review.tracklets import (
     load_tracklets,
     save_tracklets,
 )
-from LabGym.id_review.types import SCHEMA_VERSION, TrackletStore, swap_mapping
+from LabGym.id_review.types import TrackletStore, swap_mapping
 from LabGym.identity.package import (
     apply_decisions_and_save_tracklets,
     clone_store,
 )
+
+from tests.unit.tracklet_fixtures import make_tracklet_store
 
 _NPZ_KEYS = {
     "centers",
@@ -29,42 +31,16 @@ _NPZ_KEYS = {
 }
 
 
-def _square(x: int, y: int, size: int = 5) -> np.ndarray:
-    return np.array(
-        [
-            [[x, y]],
-            [[x + size, y]],
-            [[x + size, y + size]],
-            [[x, y + size]],
-        ],
-        dtype=np.int32,
-    )
-
-
 def _store(*, n_frames: int = 12, kind: str = "mouse", ids=(0, 1)) -> TrackletStore:
-    ids = [int(i) for i in ids]
-    n_ids = len(ids)
-    centers = np.zeros((n_ids, n_frames, 2), dtype=np.float64)
-    valid = np.ones((n_ids, n_frames), dtype=bool)
-    heights = np.full((n_ids, n_frames), 10.0)
-    contours = []
-    for row, tid in enumerate(ids):
-        row_c = []
-        for f in range(n_frames):
-            centers[row, f] = [tid * 100 + f, tid * 10]
-            x, y = int(centers[row, f, 0]), int(centers[row, f, 1])
-            row_c.append(_square(x, y))
-        contours.append(row_c)
-    return TrackletStore(
-        schema_version=SCHEMA_VERSION,
-        animal_kind=kind,
-        ids=ids,
+    return make_tracklet_store(
         n_frames=n_frames,
-        centers=centers,
-        valid=valid,
-        heights=heights,
-        contours=contours,
-        meta={"video": "x.mp4", "fps": 30},
+        kind=kind,
+        ids=ids,
+        size=5,
+        x_scale=100.0,
+        y_scale=10.0,
+        video="x.mp4",
+        fps=30,
     )
 
 

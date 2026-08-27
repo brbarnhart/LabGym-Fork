@@ -162,6 +162,22 @@ def test_unsaved_switch_markers_block_until_save_or_discard() -> None:
     )
     assert review.unsaved is True
     assert review.wrote is False
+    assert review.dropped is False
+
+
+def test_save_or_discard_drops_session_before_swap_commit() -> None:
+    review = _FakeReview(unsaved=True)
+    ethogram = _FakeEthogram(unsaved=False)
+    ethogram.tracklets = object()
+    assert resolve_unsaved_session(
+        review_ids=review,
+        ethogram=ethogram,
+        prompt=lambda _r: CHOICE_DISCARD,
+    )
+    assert review.dropped is True
+    assert review.stores == {}
+    assert ethogram.dropped is True
+    assert ethogram.tracklets is None
 
 
 def test_save_then_swap_writes_and_drop_does_not_auto_load() -> None:
@@ -178,9 +194,9 @@ def test_save_then_swap_writes_and_drop_does_not_auto_load() -> None:
     assert review.saved is True
     assert review.wrote is True
     assert review.unsaved is False
-    drop_sessions(review_ids=review, ethogram=ethogram)
     assert review.dropped is True
     assert review.stores == {}
+    assert ethogram.dropped is True
     assert loaded == []
 
 
@@ -197,9 +213,10 @@ def test_discard_then_swap_does_not_write() -> None:
     assert review.wrote is False
     assert ethogram.discarded is True
     assert ethogram.wrote is False
-    drop_sessions(review_ids=review, ethogram=ethogram)
     assert review.dropped is True
     assert ethogram.dropped is True
+    assert review.stores == {}
+    assert ethogram.tracklets is None
 
 
 def test_failed_save_aborts_without_drop() -> None:
@@ -440,6 +457,34 @@ def test_open_and_edit_cancel_keep_session_loaded(monkeypatch) -> None:
     w._edit_project()
     assert review.review_dir == "pkg"
     assert "mouse" in review._stores
+    w.close()
+
+
+def test_discard_then_cancelled_file_dialog_drops_session(monkeypatch) -> None:
+    import sys
+
+    from PySide6.QtWidgets import QApplication, QFileDialog
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.gui_pyside.main_window import WorkbenchMainWindow
+
+    w = WorkbenchMainWindow()
+    review = w.wb_detector.review_tab
+    review._stores["mouse"] = object()
+    review.markers = [_marker(3)]
+    review._saved_markers = [_marker(1)]
+    monkeypatch.setattr(
+        w, "_prompt_unsaved_session", lambda _r: CHOICE_DISCARD
+    )
+    monkeypatch.setattr(w, "_confirm_discard", lambda: True)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a, **k: ("", ""))
+    loads: list[str] = []
+    monkeypatch.setattr(w.project, "load_from_path", lambda p: loads.append(p))
+    w._open_project()
+    assert loads == []
+    assert review.review_dir == ""
+    assert review._stores == {}
     w.close()
 
 

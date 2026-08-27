@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QObject, QThread, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
@@ -29,10 +28,9 @@ from LabGym.gui_pyside.project.paths import (
 )
 from LabGym.gui_pyside.project.video_disk_status import (
     STATUS_UNKNOWN,
-    ProbeResult,
-    VideoDiskStatusProbeThread,
-    apply_probe_to_project,
+    VideoDiskStatusMixin,
     combo_item_label,
+    combo_item_tooltip,
 )
 from LabGym.gui_pyside.session_swap import switch_markers_signature
 from LabGym.gui_pyside.widgets.path_browse import (
@@ -133,7 +131,7 @@ class _HardCaseExtractWorker(QObject):
             self.error.emit(str(exc))
 
 
-class ReviewIdsTab(QWidget):
+class ReviewIdsTab(VideoDiskStatusMixin, QWidget):
     """Full-video ID review + subject names/roles for an identity package folder."""
 
     request_edit_project = Signal()
@@ -170,13 +168,8 @@ class ReviewIdsTab(QWidget):
         self._extract_worker: Optional[_HardCaseExtractWorker] = None
         self._progress_dlg: Optional[HardCaseProgressDialog] = None
         self._hard_extract_dlg: Optional[HardCaseExtractDialog] = None
-        self._status_by_path: Dict[str, Tuple[str, str]] = {}
         self._video_names: Dict[str, str] = {}
-        self._probe_thread: Optional[VideoDiskStatusProbeThread] = None
-        self._probe_cancel: Optional[threading.Event] = None
-        self._probe_gen = 0
-        self._probe_total = 0
-        self._probe_done = 0
+        self._init_video_disk_status()
         self._session_thread: Optional[ReviewSessionLoadThread] = None
         self._session_gen = 0
         self._pending_bgr = None
@@ -444,21 +437,28 @@ class ReviewIdsTab(QWidget):
         for label, resolved in choices:
             path = str(resolved)
             self._video_names[path] = label
-            status = self._status_by_path.get(path, (STATUS_UNKNOWN, ""))[0]
+            status, note = self._status_for_video(path)
             if status == STATUS_UNKNOWN:
                 unknown += 1
             self.combo_video.addItem(combo_item_label(label, status), path)
+            tip = combo_item_tooltip(status, note)
+            if tip:
+                self.combo_video.setItemData(
+                    self.combo_video.count() - 1,
+                    tip,
+                    Qt.ItemDataRole.ToolTipRole,
+                )
         if current:
             for i in range(self.combo_video.count()):
                 if self.combo_video.itemData(i) == current:
                     self.combo_video.setCurrentIndex(i)
                     break
         self.combo_video.blockSignals(False)
-        self._probe_total = len(choices)
-        self._probe_done = len(choices) - unknown
-        self._update_probe_progress()
+        self._set_probe_counts(len(choices), unknown)
+        self._sync_combo_error_tooltip()
 
     def _on_video_combo(self, _i: int) -> None:
+        self._sync_combo_error_tooltip()
         if self._session_thread is None:
             return
         path = self.combo_video.currentData()
@@ -475,88 +475,37 @@ class ReviewIdsTab(QWidget):
         self.refresh_video_list()
         self._maybe_start_status_probes()
 
-    def _update_probe_progress(self) -> None:
-        if not hasattr(self, "lbl_probe"):
-            return
-        total = self._probe_total
-        if total <= 0:
-            self.lbl_probe.setText("")
-            return
-        self.lbl_probe.setText(f"{self._probe_done} / {total} checked")
-
     def _unknown_video_paths(self) -> List[str]:
         out: List[str] = []
         for i in range(1, self.combo_video.count()):
             path = str(self.combo_video.itemData(i) or "")
             if not path:
                 continue
-            status = self._status_by_path.get(path, (STATUS_UNKNOWN, ""))[0]
+            status, _note = self._status_for_video(path)
             if status == STATUS_UNKNOWN:
                 out.append(path)
         return out
 
-    def _cancel_status_probes(self) -> None:
-        self._probe_gen += 1
-        if self._probe_cancel is not None:
-            self._probe_cancel.set()
-        thread = self._probe_thread
-        if thread is not None:
-            thread.cancel()
-        self._probe_thread = None
-        self._probe_cancel = None
-
-    def _maybe_start_status_probes(self) -> None:
-        if not self.isVisible():
-            return
-        self._start_status_probes()
-
-    def _start_status_probes(self) -> None:
-        paths = self._unknown_video_paths()
-        self._update_probe_progress()
-        if not paths:
-            return
-        self._cancel_status_probes()
-        gen = self._probe_gen
-        cancel = threading.Event()
-        self._probe_cancel = cancel
-        thread = VideoDiskStatusProbeThread(
-            self.project.project,
-            paths,
-            cancel_event=cancel,
-            parent=self,
-        )
-        thread.probe_finished.connect(
-            lambda result, g=gen: self._on_probe_result(result, g)
-        )
-        thread.batch_finished.connect(
-            lambda g=gen: self._on_probe_batch_finished(g)
-        )
-        self._probe_thread = thread
-        thread.start()
-
     def _apply_combo_status(self, path: str, status: str) -> None:
+        """Update combo text and error tooltip (failing path) for *path*."""
         name = self._video_names.get(path, Path(path).name)
+        _status, note = self._status_for_video(path)
+        tip = combo_item_tooltip(status, note)
         for i in range(1, self.combo_video.count()):
             if str(self.combo_video.itemData(i) or "") == path:
                 self.combo_video.setItemText(i, combo_item_label(name, status))
+                self.combo_video.setItemData(i, tip, Qt.ItemDataRole.ToolTipRole)
+                self._sync_combo_error_tooltip()
                 return
 
-    def _on_probe_result(self, result: object, gen: int) -> None:
-        if gen != self._probe_gen:
+    def _sync_combo_error_tooltip(self) -> None:
+        """Show the failing path on the closed combo when the current row errored."""
+        path = str(self.combo_video.currentData() or "")
+        if not path:
+            self.combo_video.setToolTip("")
             return
-        if not isinstance(result, ProbeResult) or result.cancelled:
-            return
-        apply_probe_to_project(self.project.project, result)
-        self._status_by_path[result.video_path] = (result.status, result.error)
-        self._apply_combo_status(result.video_path, result.status)
-        self._probe_done += 1
-        self._update_probe_progress()
-
-    def _on_probe_batch_finished(self, gen: int) -> None:
-        if gen != self._probe_gen:
-            return
-        self._probe_thread = None
-        self._update_probe_progress()
+        status, note = self._status_for_video(path)
+        self.combo_video.setToolTip(combo_item_tooltip(status, note))
 
     def _browse_package(self) -> None:
         start = self.review_dir or self.project.project.root_dir or ""

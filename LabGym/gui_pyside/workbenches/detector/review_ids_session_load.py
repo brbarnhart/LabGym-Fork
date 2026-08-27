@@ -11,6 +11,12 @@ from typing import Any, Callable, Optional
 
 from PySide6.QtCore import QThread, Signal
 
+from LabGym.gui_pyside.session_load import (
+    join_session_workers,
+    load_cancelled,
+    load_session_frame0,
+    run_session_io,
+)
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
     ReviewPackageMetadata,
     load_review_kind_store,
@@ -27,10 +33,6 @@ OnFrame = Callable[[Any], None]
 OnKindError = Callable[[str, str], None]
 OnVideoError = Callable[[str], None]
 OnError = Callable[[str], None]
-
-
-def _cancelled(cancel_event: Optional[threading.Event]) -> bool:
-    return cancel_event is not None and cancel_event.is_set()
 
 
 def read_session_frame0(
@@ -129,18 +131,18 @@ def run_review_session_load(
                 review_dir, video_hint=video_hint
             )
         except (FileNotFoundError, ValueError, OSError) as exc:
-            if _cancelled(cancel_event):
+            if load_cancelled(cancel_event):
                 return "cancelled"
             if on_error is not None:
                 on_error(str(exc))
             else:
                 raise
             return "error"
-        if _cancelled(cancel_event):
+        if load_cancelled(cancel_event):
             return "cancelled"
         if on_metadata is not None:
             on_metadata(meta)
-        if _cancelled(cancel_event):
+        if load_cancelled(cancel_event):
             return "cancelled"
     elif meta is None:
         try:
@@ -148,7 +150,7 @@ def run_review_session_load(
                 review_dir, video_hint=video_hint
             )
         except (FileNotFoundError, ValueError, OSError) as exc:
-            if _cancelled(cancel_event):
+            if load_cancelled(cancel_event):
                 return "cancelled"
             if on_error is not None:
                 on_error(str(exc))
@@ -179,51 +181,29 @@ def run_review_session_load(
         )
 
     def _load_kind() -> None:
-        if _cancelled(cancel_event):
-            return
-        try:
-            store = load_kind_fn(review_dir, kind)
-        except Exception as exc:
-            if not _cancelled(cancel_event) and on_kind_error is not None:
-                on_kind_error(kind, str(exc))
-            return
-        if _cancelled(cancel_event):
-            return
-        if on_kind is not None:
-            on_kind(kind, store)
+        run_session_io(
+            cancel_event,
+            lambda: load_kind_fn(review_dir, kind),
+            on_ok=(lambda store: on_kind(kind, store)) if on_kind else None,
+            on_error=(lambda msg: on_kind_error(kind, msg)) if on_kind_error else None,
+        )
 
     def _load_frame() -> None:
-        if skip_video or _cancelled(cancel_event):
-            return
-        try:
-            frame, err = read_frame_fn(
-                video_path=video_path,
-                store_meta=store_meta,
-                fps=fps,
-            )
-        except Exception as exc:
-            if not _cancelled(cancel_event) and on_video_error is not None:
-                on_video_error(str(exc))
-            return
-        if _cancelled(cancel_event):
-            return
-        if err:
-            if on_video_error is not None:
-                on_video_error(str(err))
-            return
-        if on_frame is not None:
-            on_frame(frame)
+        load_session_frame0(
+            skip_video=skip_video,
+            cancel_event=cancel_event,
+            read_frame_fn=read_frame_fn,
+            video_path=video_path,
+            store_meta=store_meta,
+            fps=fps,
+            on_frame=on_frame,
+            on_video_error=on_video_error,
+        )
 
-    workers = [threading.Thread(target=_load_kind, name="review-ids-kind")]
+    tasks = [("review-ids-kind", _load_kind)]
     if not skip_video:
-        workers.append(threading.Thread(target=_load_frame, name="review-ids-frame"))
-    for t in workers:
-        t.start()
-    for t in workers:
-        t.join()
-    if _cancelled(cancel_event):
-        return "cancelled"
-    return "ok"
+        tasks.append(("review-ids-frame", _load_frame))
+    return join_session_workers(tasks, cancel_event)
 
 
 class ReviewSessionLoadThread(QThread):

@@ -19,7 +19,10 @@ from PySide6.QtWidgets import (
 from LabGym.annotator.core.tracklets_bridge import LoadedTracklets
 from LabGym.annotator.ui.main_window import MainWindow
 from LabGym.gui_pyside.project.controller import ProjectController
-from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.gui_pyside.project.paths import (
+    ResolvedVideoContext,
+    list_project_video_choices,
+)
 from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
     AnnotateSessionLoadThread,
     AnnotateSessionMetadata,
@@ -185,6 +188,7 @@ class AnnotateEthogramTab(QWidget):
         self._session_window = None
 
     def refresh_video_list(self) -> None:
+        """Fill the video combo from the project document (no disk probe)."""
         choices = list_project_video_choices(self.project.project)
         self._block_combo = True
         self.combo_video.clear()
@@ -250,9 +254,15 @@ class AnnotateEthogramTab(QWidget):
             self.lbl_status.setText("  ·  ".join(lines))
 
     def load_current(self) -> bool:
+        """Start a session load of the selected video into the embedded annotator.
+
+        Returns:
+            False if no video is selected or the accepted-identities gate fails.
+        """
         return self._apply_to(self.annotator)
 
     def open_detached(self) -> None:
+        """Open or raise a top-level annotator window and session-load into it."""
         if self._detached is not None and self._detached.isVisible():
             self._detached.raise_()
             self._detached.activateWindow()
@@ -318,8 +328,6 @@ class AnnotateEthogramTab(QWidget):
             self.request_edit_project.emit()
             return False
         ctx = self.project.resolve_context(video)
-        self.project.set_current_video(video, dirty=True)
-
         pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
         if not may_use_downstream(
             int(ctx.behavior_mode),
@@ -333,11 +341,19 @@ class AnnotateEthogramTab(QWidget):
             )
             return False
 
+        self.project.set_current_video(video, dirty=True)
         self._start_session_load(window, ctx)
         return True
 
-    def _start_session_load(self, window: MainWindow, ctx) -> None:
-        """Replace any in-flight session load with a new one."""
+    def _start_session_load(
+        self, window: MainWindow, ctx: ResolvedVideoContext
+    ) -> None:
+        """Replace any in-flight session load with a new one.
+
+        Args:
+            window: Embedded or detached annotator window.
+            ctx: Resolved paths and defaults for the selected video.
+        """
         self._cancel_session_load()
         window.drop_session()
         gen = self._session_gen
@@ -350,7 +366,6 @@ class AnnotateEthogramTab(QWidget):
             review_dir,
             video_path=str(getattr(ctx, "video_path", "") or ""),
             annotations_path=ann_arg or None,
-            skip_video=False,
             behavior_mode=int(ctx.behavior_mode),
             exclusive_mode=bool(getattr(ctx, "exclusive_mode", False)),
             parent=self,

@@ -20,6 +20,12 @@ from LabGym.annotator.core.tracklets_bridge import (
     discover_tracklet_kinds,
     load_tracklets_for_annotator,
 )
+from LabGym.gui_pyside.session_load import (
+    join_session_workers,
+    load_cancelled,
+    load_session_frame0,
+    run_session_io,
+)
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
     ReviewPackageMetadata,
     load_review_package_metadata,
@@ -34,10 +40,6 @@ OnFrame = Callable[[Any], None]
 OnTrackletsError = Callable[[str], None]
 OnVideoError = Callable[[str], None]
 OnError = Callable[[str], None]
-
-
-def _cancelled(cancel_event: Optional[threading.Event]) -> bool:
-    return cancel_event is not None and cancel_event.is_set()
 
 
 @dataclass
@@ -219,8 +221,6 @@ def run_annotate_session_load(
     *,
     video_path: Optional[str] = None,
     annotations_path: Optional[str] = None,
-    skip_metadata: bool = False,
-    skip_video: bool = False,
     cancel_event: Optional[threading.Event] = None,
     on_metadata: Optional[OnMetadata] = None,
     on_tracklets: Optional[OnTracklets] = None,
@@ -230,35 +230,31 @@ def run_annotate_session_load(
     on_error: Optional[OnError] = None,
     load_tracklets: Optional[LoadTrackletsFn] = None,
     read_frame: Optional[ReadFrameFn] = None,
-    metadata: Optional[AnnotateSessionMetadata] = None,
     behavior_mode: int = 0,
     exclusive_mode: bool = False,
 ) -> str:
     """Run one Annotate session load to completion or cancel.
 
-    Metadata (unless skipped) is applied before geometry or pixels. Packed
-    remapped npz for **every overlay kind** and frame 0 are loaded in
-    parallel so either can arrive first. This is not an analysis job-queue
-    item.
+    Metadata is applied before geometry or pixels. Packed remapped npz for
+    **every overlay kind** and frame 0 are loaded in parallel so either can
+    arrive first. This is not an analysis job-queue item. Annotate does not
+    support Review IDs kind-only skip; every load reads metadata and frame 0.
 
     Args:
         review_dir: Identity package folder (published remapped tracklets).
         video_path: Video path for the throwaway frame-0 preview reader.
         annotations_path: Sidecar ethogram path (parsed on this thread).
-        skip_metadata: When True, do not re-read package JSON.
-        skip_video: When True, skip the throwaway frame-0 read.
         cancel_event: Set to abort; in-flight npz/video may still finish I/O
             but callbacks after cancel are skipped.
         on_metadata: Called with JSON metadata before npz/video work.
         on_tracklets: Called with ``LoadedTracklets`` (all overlay kinds).
-        on_frame: Called with a BGR/RGB frame-0 array when not skipped.
+        on_frame: Called with a BGR/RGB frame-0 array.
         on_tracklets_error: Called with a message on corrupt/missing npz.
         on_video_error: Called when the video cannot be opened.
         on_error: Called when package JSON cannot be read (no metadata).
         load_tracklets: Injectable loader (tests); default is
             ``load_tracklets_for_annotator``.
         read_frame: Injectable frame-0 reader (tests).
-        metadata: Preloaded metadata when *skip_metadata* is True.
         behavior_mode: Passed through to metadata.
         exclusive_mode: Passed through to metadata.
 
@@ -268,51 +264,8 @@ def run_annotate_session_load(
     load_fn = load_tracklets or _default_load_tracklets
     read_frame_fn = read_frame or _default_read_frame
 
-    meta = metadata
     directory = str(review_dir or "").strip()
-    if not skip_metadata:
-        if directory:
-            try:
-                meta = load_annotate_session_metadata(
-                    directory,
-                    video_hint=video_path,
-                    annotations_path=str(annotations_path or ""),
-                    behavior_mode=behavior_mode,
-                    exclusive_mode=exclusive_mode,
-                )
-            except (FileNotFoundError, ValueError, OSError) as exc:
-                if _cancelled(cancel_event):
-                    return "cancelled"
-                if on_error is not None:
-                    on_error(str(exc))
-                else:
-                    raise
-                return "error"
-        else:
-            meta = AnnotateSessionMetadata(
-                video_path=str(video_path or ""),
-                annotations_path=str(annotations_path or ""),
-                review_dir="",
-                n_frames=None,
-                fps=None,
-                kinds=[],
-                behavior_mode=int(behavior_mode),
-                exclusive_mode=bool(exclusive_mode),
-                accepted=False,
-            )
-        if video_path:
-            meta.video_path = str(video_path)
-        if annotations_path:
-            meta.annotations_path = str(annotations_path)
-        if meta is not None:
-            _attach_sidecar(meta)
-        if _cancelled(cancel_event):
-            return "cancelled"
-        if on_metadata is not None:
-            on_metadata(meta)
-        if _cancelled(cancel_event):
-            return "cancelled"
-    elif meta is None and directory:
+    if directory:
         try:
             meta = load_annotate_session_metadata(
                 directory,
@@ -322,73 +275,75 @@ def run_annotate_session_load(
                 exclusive_mode=exclusive_mode,
             )
         except (FileNotFoundError, ValueError, OSError) as exc:
-            if _cancelled(cancel_event):
+            if load_cancelled(cancel_event):
                 return "cancelled"
             if on_error is not None:
                 on_error(str(exc))
             else:
                 raise
             return "error"
-        if meta is not None:
-            _attach_sidecar(meta)
+    else:
+        meta = AnnotateSessionMetadata(
+            video_path=str(video_path or ""),
+            annotations_path=str(annotations_path or ""),
+            review_dir="",
+            n_frames=None,
+            fps=None,
+            kinds=[],
+            behavior_mode=int(behavior_mode),
+            exclusive_mode=bool(exclusive_mode),
+            accepted=False,
+        )
+    if video_path:
+        meta.video_path = str(video_path)
+    if annotations_path:
+        meta.annotations_path = str(annotations_path)
+    _attach_sidecar(meta)
+    if load_cancelled(cancel_event):
+        return "cancelled"
+    if on_metadata is not None:
+        on_metadata(meta)
+    if load_cancelled(cancel_event):
+        return "cancelled"
 
-    resolved_video = str(
-        video_path or (meta.video_path if meta is not None else "") or ""
-    )
-    fps = float(meta.fps) if (meta is not None and meta.fps) else 10.0
+    resolved_video = str(video_path or meta.video_path or "")
+    fps = float(meta.fps) if meta.fps else 10.0
     store_meta = {}
-    if meta is not None and meta.package is not None:
+    if meta.package is not None:
         kind = meta.package.animal_kind
         info = meta.package.kind_info.get(kind)
         if info is not None:
             store_meta = dict(info.store_meta)
 
     def _load_tracklets() -> None:
-        if not directory or _cancelled(cancel_event):
+        if not directory:
             return
-        try:
-            loaded = load_fn(directory)
-        except (OSError, ValueError, FileNotFoundError, KeyError, TypeError) as exc:
-            if not _cancelled(cancel_event) and on_tracklets_error is not None:
-                on_tracklets_error(str(exc))
-            return
-        if _cancelled(cancel_event):
-            return
-        if on_tracklets is not None:
-            on_tracklets(loaded)
+        run_session_io(
+            cancel_event,
+            lambda: load_fn(directory),
+            on_ok=on_tracklets,
+            on_error=on_tracklets_error,
+        )
 
     def _load_frame() -> None:
-        if skip_video or _cancelled(cancel_event):
-            return
-        try:
-            frame, err = read_frame_fn(
-                video_path=resolved_video,
-                store_meta=store_meta,
-                fps=fps,
-            )
-        except Exception as exc:
-            if not _cancelled(cancel_event) and on_video_error is not None:
-                on_video_error(str(exc))
-            return
-        if _cancelled(cancel_event):
-            return
-        if err:
-            if on_video_error is not None:
-                on_video_error(str(err))
-            return
-        if on_frame is not None:
-            on_frame(frame)
+        load_session_frame0(
+            skip_video=False,
+            cancel_event=cancel_event,
+            read_frame_fn=read_frame_fn,
+            video_path=resolved_video,
+            store_meta=store_meta,
+            fps=fps,
+            on_frame=on_frame,
+            on_video_error=on_video_error,
+        )
 
-    workers = [threading.Thread(target=_load_tracklets, name="annotate-tracklets")]
-    if not skip_video:
-        workers.append(threading.Thread(target=_load_frame, name="annotate-frame"))
-    for t in workers:
-        t.start()
-    for t in workers:
-        t.join()
-    if _cancelled(cancel_event):
-        return "cancelled"
-    return "ok"
+    return join_session_workers(
+        [
+            ("annotate-tracklets", _load_tracklets),
+            ("annotate-frame", _load_frame),
+        ],
+        cancel_event,
+    )
 
 
 class AnnotateSessionLoadThread(QThread):
@@ -407,9 +362,6 @@ class AnnotateSessionLoadThread(QThread):
         *,
         video_path: Optional[str] = None,
         annotations_path: Optional[str] = None,
-        skip_metadata: bool = False,
-        skip_video: bool = False,
-        metadata: Optional[AnnotateSessionMetadata] = None,
         behavior_mode: int = 0,
         exclusive_mode: bool = False,
         parent=None,
@@ -418,9 +370,6 @@ class AnnotateSessionLoadThread(QThread):
         self._review_dir = review_dir
         self._video_path = video_path
         self._annotations_path = annotations_path
-        self._skip_metadata = skip_metadata
-        self._skip_video = skip_video
-        self._metadata = metadata
         self._behavior_mode = behavior_mode
         self._exclusive_mode = exclusive_mode
         self._cancel = threading.Event()
@@ -434,10 +383,7 @@ class AnnotateSessionLoadThread(QThread):
             self._review_dir,
             video_path=self._video_path,
             annotations_path=self._annotations_path,
-            skip_metadata=self._skip_metadata,
-            skip_video=self._skip_video,
             cancel_event=self._cancel,
-            metadata=self._metadata,
             behavior_mode=self._behavior_mode,
             exclusive_mode=self._exclusive_mode,
             on_metadata=self.metadata_ready.emit,

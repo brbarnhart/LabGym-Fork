@@ -30,6 +30,8 @@ from LabGym.gui_pyside.session_swap import (
     CHOICE_CANCEL,
     CHOICE_DISCARD,
     CHOICE_SAVE,
+    EthogramSession,
+    ReviewIdsSession,
     SessionSwapReport,
     resolve_unsaved_session,
 )
@@ -190,7 +192,8 @@ class WorkbenchMainWindow(QMainWindow):
 
     # --- project file ops ---
 
-    def _session_hosts(self):
+    def _session_hosts(self) -> tuple[ReviewIdsSession, EthogramSession]:
+        """Review IDs and Annotate ethogram hosts for the project-swap gate."""
         return (
             self.wb_detector.review_tab,
             self.wb_categorizer.generate_host.annotate_tab,
@@ -241,13 +244,14 @@ class WorkbenchMainWindow(QMainWindow):
         )
 
     def _confirm_project_swap(self, *, project_file: bool = True) -> bool:
-        """Session Save/Discard, then optional project-file prompt. Does not drop.
+        """Session Save/Discard, then optional project-file prompt.
 
-        The previous **session load** stays until a swap is committed
-        (``load_from_path`` / ``new_project`` / editor OK). ``project_replaced``
-        drops capture and tracklets. Cancel of Open's file dialog or Edit
-        Project leaves the current session loaded. Does not start a
-        **session load**.
+        A clean **session load** stays until a swap is committed
+        (``load_from_path`` / ``new_project`` / editor OK); ``project_replaced``
+        then drops capture and tracklets. Save or Discard of a dirty session
+        drops immediately, even if Open's file dialog or Edit Project is
+        cancelled afterwards. Cancel of the Save/Discard prompt leaves the
+        session loaded. Does not start a **session load**.
         """
         if not self._confirm_session_for_project_swap():
             return False

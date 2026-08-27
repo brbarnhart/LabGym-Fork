@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import threading
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
@@ -21,7 +20,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -42,17 +40,14 @@ from LabGym.gui_pyside.jobs.sequential_queue import (
 from LabGym.gui_pyside.model_paths import scan_categorizer_paths
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
-    list_project_video_choices,
     resolve_video_context,
 )
 from LabGym.gui_pyside.project.video_disk_status import (
     STATUS_DONE,
     STATUS_UNKNOWN,
     ProbeResult,
-    VideoDiskStatusProbeThread,
-    apply_probe_to_project,
+    VideoTableDiskStatusMixin,
     run_blocked_unknown_paths,
-    status_label,
 )
 from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
@@ -62,7 +57,7 @@ from LabGym.identity.downstream import may_use_downstream
 from LabGym.identity.package import has_identity_package
 
 
-class ProcessVideosTab(QWidget):
+class ProcessVideosTab(VideoTableDiskStatusMixin, QWidget):
     """Batch-categorize project videos from accepted remapped tracklets."""
 
     request_edit_project = Signal()
@@ -80,14 +75,8 @@ class ProcessVideosTab(QWidget):
         self.queue.queue_finished.connect(self._on_queue_done)
         # job_id is the video path
         self._job_rows: Dict[str, int] = {}
-        # path -> (status, note) survives post-batch project.changed rebuilds
-        self._status_by_path: Dict[str, Tuple[str, str]] = {}
         self._batch_active = False
-        self._probe_thread: Optional[VideoDiskStatusProbeThread] = None
-        self._probe_cancel: Optional[threading.Event] = None
-        self._probe_gen = 0
-        self._probe_total = 0
-        self._probe_done = 0
+        self._init_video_disk_status()
         self._models_need_scan = True
         self._behaviors_need_refresh = True
 
@@ -348,203 +337,22 @@ class ProcessVideosTab(QWidget):
         else:
             self.lbl_behaviors.setText("—")
 
-    def _manual_refresh_videos(self) -> None:
-        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
-
-        self._cancel_status_probes()
-        clear_tracklets_discovery_cache()
-        self._status_by_path.clear()
-        self.refresh_videos()
-        self._start_status_probes()
-
-    def refresh_videos(self) -> None:
-        # Skip rebuild mid-batch so mark_dirty cannot wipe live status.
-        if self._batch_active:
-            return
-
-        prev_checked: Dict[str, bool] = {}
-        for r in range(self.table.rowCount()):
-            item0 = self.table.item(r, 0)
-            if not item0:
-                continue
-            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
-            if path:
-                prev_checked[path] = item0.checkState() == Qt.CheckState.Checked
-
-        choices = list_project_video_choices(self.project.project)
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(choices))
-        unknown = 0
-        for r, (label, resolved) in enumerate(choices):
-            path = str(resolved)
-            chk = QTableWidgetItem()
-            chk.setFlags(
-                Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-            )
-            if path in prev_checked:
-                chk.setCheckState(
-                    Qt.CheckState.Checked
-                    if prev_checked[path]
-                    else Qt.CheckState.Unchecked
-                )
-            else:
-                chk.setCheckState(Qt.CheckState.Checked)
-            chk.setData(Qt.ItemDataRole.UserRole, path)
-            self.table.setItem(r, 0, chk)
-            self.table.setItem(r, 1, QTableWidgetItem(label))
-            if path in self._status_by_path:
-                status, note = self._status_by_path[path]
-            else:
-                status, note = STATUS_UNKNOWN, ""
-            if status == STATUS_UNKNOWN:
-                unknown += 1
-            st_item = QTableWidgetItem(status_label(status))
-            if status == STATUS_UNKNOWN:
-                st_item.setToolTip("Status unknown — not yet checked on disk.")
-            self.table.setItem(r, 2, st_item)
-            self.table.setItem(r, 3, QTableWidgetItem(note))
-        self._probe_total = len(choices)
-        self._probe_done = len(choices) - unknown
-        self._update_probe_progress()
-        self._update_run_enabled()
-
-    def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:
-        self._status_by_path[path] = (status, note)
-        label = status_label(status)
-        if self.table.item(row, 2):
-            self.table.item(row, 2).setText(label)
-        else:
-            self.table.setItem(row, 2, QTableWidgetItem(label))
-        if self.table.item(row, 3):
-            self.table.item(row, 3).setText(note)
-        else:
-            self.table.setItem(row, 3, QTableWidgetItem(note))
-        if note and status == "error":
-            item2 = self.table.item(row, 2)
-            item3 = self.table.item(row, 3)
-            if item2:
-                item2.setToolTip(note)
-            if item3:
-                item3.setToolTip(note)
-
-    def _update_probe_progress(self) -> None:
-        total = self._probe_total
-        if total <= 0:
-            self.lbl_probe.setText("")
-            return
-        self.lbl_probe.setText(f"{self._probe_done} / {total} checked")
-
-    def _row_for_path(self, path: str) -> Optional[int]:
-        for r in range(self.table.rowCount()):
-            item0 = self.table.item(r, 0)
-            if item0 and str(item0.data(Qt.ItemDataRole.UserRole) or "") == path:
-                return r
-        return None
-
-    def _unknown_video_paths(self) -> List[str]:
-        out: List[str] = []
-        for r in range(self.table.rowCount()):
-            item0 = self.table.item(r, 0)
-            if not item0:
-                continue
-            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
-            if not path:
-                continue
-            status = self._status_by_path.get(path, (STATUS_UNKNOWN, ""))[0]
-            if status == STATUS_UNKNOWN:
-                out.append(path)
-        return out
-
-    def _cancel_status_probes(self) -> None:
-        self._probe_gen += 1
-        if self._probe_cancel is not None:
-            self._probe_cancel.set()
-        thread = self._probe_thread
-        if thread is not None:
-            thread.cancel()
-        self._probe_thread = None
-        self._probe_cancel = None
-
-    def _maybe_start_status_probes(self) -> None:
-        if self._batch_active or not self.isVisible():
-            return
-        self._start_status_probes()
-
-    def _start_status_probes(self) -> None:
-        if self._batch_active:
-            return
-        paths = self._unknown_video_paths()
-        self._update_probe_progress()
-        if not paths:
-            return
-        self._cancel_status_probes()
-        gen = self._probe_gen
-        cancel = threading.Event()
-        self._probe_cancel = cancel
-        thread = VideoDiskStatusProbeThread(
-            self.project.project,
-            paths,
-            cancel_event=cancel,
-            parent=self,
-        )
-        thread.probe_finished.connect(
-            lambda result, g=gen: self._on_probe_result(result, g)
-        )
-        thread.batch_finished.connect(
-            lambda g=gen: self._on_probe_batch_finished(g)
-        )
-        self._probe_thread = thread
-        thread.start()
-
-    def _on_probe_result(self, result: object, gen: int) -> None:
-        if gen != self._probe_gen:
-            return
-        if not isinstance(result, ProbeResult) or result.cancelled:
-            return
-        apply_probe_to_project(self.project.project, result)
-        note = result.error
+    def _probe_result_note(self, result: ProbeResult) -> str:
+        """Accepted-identities note for Process videos, not a package path."""
         if result.status == STATUS_DONE and result.tracklets_dir:
             from LabGym.id_review.raw_store import has_accepted_identities
 
-            note = (
+            return (
                 "yes"
                 if has_accepted_identities(result.tracklets_dir)
                 else "no — save Review IDs"
             )
-        elif result.status == STATUS_UNKNOWN:
-            note = ""
-        row = self._row_for_path(result.video_path)
-        if row is not None:
-            self._set_status(row, result.video_path, result.status, note)
-        else:
-            self._status_by_path[result.video_path] = (result.status, note)
-        self._probe_done += 1
-        self._update_probe_progress()
-        self._update_run_enabled()
-
-    def _on_probe_batch_finished(self, gen: int) -> None:
-        if gen != self._probe_gen:
-            return
-        self._probe_thread = None
-        self._update_probe_progress()
-        self._update_run_enabled()
+        if result.status == STATUS_UNKNOWN:
+            return ""
+        return result.error
 
     def _on_table_item_changed(self, _item) -> None:
         self._update_run_enabled()
-
-    def _update_run_enabled(self) -> None:
-        """Disable Run while any checked row is still status unknown."""
-        if not hasattr(self, "btn_run"):
-            return
-        if self.queue.is_running or self._batch_active:
-            self.btn_run.setEnabled(False)
-            return
-        blocked = run_blocked_unknown_paths(
-            self._selected_videos(), self._status_by_path
-        )
-        self.btn_run.setEnabled(not blocked)
 
     def _set_all(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -552,14 +360,6 @@ class ProcessVideosTab(QWidget):
             it = self.table.item(r, 0)
             if it:
                 it.setCheckState(state)
-
-    def _selected_videos(self) -> List[str]:
-        out = []
-        for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
-            if it and it.checkState() == Qt.CheckState.Checked:
-                out.append(str(it.data(Qt.ItemDataRole.UserRole)))
-        return out
 
     def _start(self) -> None:
         if self.queue.is_running:

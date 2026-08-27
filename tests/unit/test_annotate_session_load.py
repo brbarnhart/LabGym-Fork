@@ -14,43 +14,24 @@ from LabGym.id_review.apply import write_tracklets_identity_status
 from LabGym.id_review.tracklets import save_tracklets
 from LabGym.id_review.types import SCHEMA_VERSION, TrackletStore
 
+from tests.unit.tracklet_fixtures import make_tracklet_store
 
-def _square(x: int, y: int, size: int = 4) -> np.ndarray:
-    return np.array(
-        [
-            [[x, y]],
-            [[x + size, y]],
-            [[x + size, y + size]],
-            [[x, y + size]],
-        ],
-        dtype=np.int32,
-    )
+
+def _dummy_frame(**_kwargs):
+    """Throwaway frame-0 for tests that do not exercise video open."""
+    return np.zeros((2, 2, 3), dtype=np.uint8), None
 
 
 def _store(*, n_frames: int = 8, kind: str = "mouse", ids=(0, 1)) -> TrackletStore:
-    ids = [int(i) for i in ids]
-    n_ids = len(ids)
-    centers = np.zeros((n_ids, n_frames, 2), dtype=np.float64)
-    valid = np.ones((n_ids, n_frames), dtype=bool)
-    heights = np.full((n_ids, n_frames), 10.0)
-    contours = []
-    for row, tid in enumerate(ids):
-        row_c = []
-        for f in range(n_frames):
-            centers[row, f] = [tid * 40.0 + f, float(tid)]
-            x, y = int(centers[row, f, 0]), int(centers[row, f, 1])
-            row_c.append(_square(x, y))
-        contours.append(row_c)
-    return TrackletStore(
-        schema_version=SCHEMA_VERSION,
-        animal_kind=kind,
-        ids=ids,
+    return make_tracklet_store(
         n_frames=n_frames,
-        centers=centers,
-        valid=valid,
-        heights=heights,
-        contours=contours,
-        meta={"video": "clip.avi", "fps": 10.0},
+        kind=kind,
+        ids=ids,
+        size=4,
+        x_scale=40.0,
+        y_scale=1.0,
+        video="clip.avi",
+        fps=10.0,
     )
 
 
@@ -193,7 +174,7 @@ def test_session_load_uses_published_tracklets_not_raw(tmp_path: Path, monkeypat
     got = {"loaded": None}
     state = run_annotate_session_load(
         str(review),
-        skip_video=True,
+        read_frame=_dummy_frame,
         on_tracklets=lambda loaded: got.__setitem__("loaded", loaded),
     )
     assert state == "ok"
@@ -316,7 +297,7 @@ def test_no_package_metadata_does_not_invent_n_frames():
     state = run_annotate_session_load(
         "",
         video_path="clip.avi",
-        skip_video=True,
+        read_frame=_dummy_frame,
         on_metadata=lambda m: got.__setitem__("meta", m),
     )
     assert state == "ok"
@@ -350,7 +331,7 @@ def test_sidecar_fills_n_frames_when_no_package(tmp_path: Path):
         "",
         video_path=str(tmp_path / "clip.avi"),
         annotations_path=str(sidecar),
-        skip_video=True,
+        read_frame=_dummy_frame,
         on_metadata=lambda m: got.__setitem__("meta", m),
     )
     assert state == "ok"
@@ -373,7 +354,7 @@ def test_worker_does_not_pass_package_length_as_video_length(tmp_path: Path):
         return load_tracklets_for_annotator(directory)
 
     state = run_annotate_session_load(
-        str(review), skip_video=True, load_tracklets=spy
+        str(review), read_frame=_dummy_frame, load_tracklets=spy
     )
     assert state == "ok"
     assert seen.get("video_total_frames") is None
@@ -506,7 +487,7 @@ def test_annotate_cancel_aborts_in_flight_load(tmp_path: Path, monkeypatch):
             return load_tracklets_for_annotator(review_dir)
 
         kwargs["load_tracklets"] = blocked
-        kwargs["skip_video"] = True
+        kwargs["read_frame"] = _dummy_frame
         return real_run(*args, **kwargs)
 
     monkeypatch.setattr(sl, "run_annotate_session_load", gated_run)
@@ -646,11 +627,13 @@ def test_accepted_identities_gate_does_not_open_video(tmp_path: Path, monkeypatc
     )
 
     tab = _make_tab(tmp_path, accepted=False)
+    assert tab.project.dirty is False
     ok = tab.load_current()
     app = QApplication.instance()
     assert app is not None
     app.processEvents()
     assert ok is False
+    assert tab.project.dirty is False
     assert opened == []
     assert tab._session_thread is None
     assert tab.annotator.video.is_loaded is False
@@ -872,7 +855,7 @@ def test_in_flight_tracklets_load_is_cancellable(tmp_path: Path):
     def worker():
         run_annotate_session_load(
             str(review),
-            skip_video=True,
+            read_frame=_dummy_frame,
             cancel_event=cancel,
             load_tracklets=blocked_tracks,
             on_tracklets=lambda *_a: called.append("delivered"),

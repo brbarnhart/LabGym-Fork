@@ -15,6 +15,7 @@ from LabGym.gui_pyside.project.video_disk_status import (
     STATUS_UNKNOWN,
     apply_probe_to_project,
     combo_item_label,
+    combo_item_tooltip,
     probe_video,
     probe_videos,
     run_blocked_unknown_paths,
@@ -284,6 +285,16 @@ def test_combo_item_label_never_fakes_done_while_unknown():
     assert "✓" not in combo_item_label("clip.avi", STATUS_PENDING)
 
 
+def test_combo_item_tooltip_shows_failing_path_only_on_error():
+    path_note = "Timed out after 10s probing /share/clip.avi"
+    assert combo_item_tooltip(STATUS_ERROR, path_note) == path_note
+    assert "/share/clip.avi" in combo_item_tooltip(STATUS_ERROR, path_note)
+    assert combo_item_tooltip(STATUS_UNKNOWN, path_note) == ""
+    assert combo_item_tooltip(STATUS_PENDING, path_note) == ""
+    assert combo_item_tooltip(STATUS_DONE, path_note) == ""
+    assert combo_item_tooltip(STATUS_ERROR, "") == ""
+
+
 def test_run_blocked_unknown_paths_treats_missing_as_unknown():
     checked = ["a.avi", "b.avi", "c.avi"]
     status = {
@@ -397,6 +408,53 @@ def test_review_ids_combo_unknown_marks_not_fake_check(tmp_path: Path, monkeypat
     for text in texts:
         assert "✓" not in text
         assert "…" in text
+
+
+def test_review_ids_combo_error_tooltip_includes_failing_path(
+    tmp_path: Path, monkeypatch
+):
+    _app()
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication
+
+    from LabGym.gui_pyside.project import video_disk_status as vds
+    from LabGym.gui_pyside.workbenches.detector.review_ids_tab import ReviewIdsTab
+
+    def fake_probe(project, video_path, **kwargs):
+        return vds.ProbeResult(
+            video_path=video_path,
+            status=STATUS_ERROR,
+            error=f"Timed out after 10s probing {video_path}",
+            timed_out=True,
+        )
+
+    monkeypatch.setattr(vds, "probe_video", fake_probe)
+    proj = _project_with_videos(tmp_path)
+    ctrl = ProjectController()
+    ctrl.replace(proj, dirty=False)
+    tab = ReviewIdsTab(ctrl)
+    tab._start_status_probes()
+    thread = tab._probe_thread
+    assert thread is not None
+    thread.wait(5000)
+    app = QApplication.instance()
+    assert app is not None
+    app.processEvents()
+
+    found = 0
+    for i in range(1, tab.combo_video.count()):
+        path = str(tab.combo_video.itemData(i) or "")
+        assert path
+        text = tab.combo_video.itemText(i)
+        assert text.endswith("error")
+        assert "✓" not in text
+        tip = str(tab.combo_video.itemData(i, Qt.ItemDataRole.ToolTipRole) or "")
+        assert path in tip
+        found += 1
+    assert found == 2
+    tab.combo_video.setCurrentIndex(1)
+    current = str(tab.combo_video.currentData() or "")
+    assert current in tab.combo_video.toolTip()
 
 
 def test_review_ids_load_unknown_starts_session_load(tmp_path: Path, monkeypatch):
