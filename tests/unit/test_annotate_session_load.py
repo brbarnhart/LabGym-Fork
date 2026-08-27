@@ -749,6 +749,108 @@ def test_sidecar_bouts_survive_subset_subjects_and_stay_saved(tmp_path: Path):
     win.drop_session()
 
 
+@pytest.mark.gui
+def test_timeline_length_without_live_decoder():
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.annotator.ui.main_window import MainWindow
+
+    win = MainWindow()
+    win.begin_session_from_metadata(
+        video_path="clip.avi", n_frames=8, fps=10.0
+    )
+    assert win.video.is_loaded is False
+    assert win.timeline._total_frames() == 8
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QPaintEvent
+
+    win.timeline.resize(400, 48)
+    win.timeline.paintEvent(QPaintEvent(QRect(0, 0, 400, 48)))
+    win.drop_session()
+
+
+@pytest.mark.gui
+def test_step_frame_opens_live_decoder(monkeypatch):
+    import sys
+
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    QApplication.instance() or QApplication(sys.argv)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: 0)
+
+    from LabGym.annotator.ui.main_window import MainWindow
+
+    win = MainWindow()
+    win.begin_session_from_metadata(
+        video_path="clip.avi", n_frames=8, fps=10.0
+    )
+    opened: list[str] = []
+    monkeypatch.setattr(
+        win, "ensure_live_video", lambda: opened.append("open") or "unavailable"
+    )
+    win.step_frame(1)
+    assert opened == ["open"]
+    assert win.video.is_loaded is False
+    win.drop_session()
+
+
+@pytest.mark.gui
+def test_bout_toggle_and_save_after_metadata_without_play(
+    tmp_path: Path, monkeypatch
+):
+    import sys
+
+    from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+
+    QApplication.instance() or QApplication(sys.argv)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: 0)
+
+    from LabGym.annotator.ui.main_window import MainWindow
+
+    sidecar = {
+        "schema_version": 2,
+        "video_path": str(tmp_path / "clip.avi"),
+        "fps": 10.0,
+        "total_frames": 8,
+        "behaviors": [{"name": "grooming", "color": "#00AAFF", "hotkey": "1"}],
+        "subjects": [
+            {
+                "subject_id": 0,
+                "animal_kind": "mouse",
+                "display_name": "a",
+                "color": "#4FC3F7",
+            }
+        ],
+        "bouts": {"0": {"grooming": []}},
+        "interaction_bouts": {},
+        "exclusive_mode": False,
+        "behavior_mode": 0,
+    }
+    win = MainWindow()
+    win.begin_session_from_metadata(
+        video_path=str(tmp_path / "clip.avi"),
+        n_frames=8,
+        fps=10.0,
+        annotations_data=sidecar,
+        annotations_path=str(tmp_path / "clip.annotations.json"),
+    )
+    assert win.video.is_loaded is False
+    win._toggle_bout_for_behavior("grooming")
+    assert win.has_unsaved_ethogram() is True
+    out = tmp_path / "saved.json"
+    monkeypatch.setattr(
+        QFileDialog, "getSaveFileName", lambda *a, **k: (str(out), "JSON (*.json)")
+    )
+    win.save_annotations()
+    assert out.is_file()
+    assert win.video.is_loaded is False
+    win.drop_session()
+
+
 def test_in_flight_tracklets_load_is_cancellable(tmp_path: Path):
     from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
         run_annotate_session_load,

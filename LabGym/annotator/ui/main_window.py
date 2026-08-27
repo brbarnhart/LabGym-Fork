@@ -343,7 +343,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Selected: {name}  (press hotkey or double-click to toggle bout)")
 
     def _toggle_bout_for_behavior(self, name: str):
-        if not self.manager or not self.video.is_loaded:
+        if not self.manager:
             return
         try:
             partners = []
@@ -892,7 +892,7 @@ class MainWindow(QMainWindow):
     # --- Annotation save/load ---
 
     def save_annotations(self):
-        if not self.manager or not self.video.is_loaded:
+        if not self.manager:
             QMessageBox.information(self, "Save", "No video or annotations loaded.")
             return
         default = str(self.sidecar_annotations_path(self.manager.session.video_path))
@@ -1393,10 +1393,7 @@ class MainWindow(QMainWindow):
             self.controls.set_playing(True)
 
     def step_frame(self, delta: int):
-        if not self.video.is_loaded:
-            return
-        new_f = max(0, min(self._current_frame + delta, self.video.total_frames - 1))
-        self.seek_to(new_f)
+        self.seek_to(self._current_frame + int(delta))
 
     def set_speed(self, speed: float):
         self._playback_speed = max(0.1, float(speed))
