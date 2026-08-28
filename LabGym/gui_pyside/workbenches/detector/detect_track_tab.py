@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -350,7 +350,6 @@ class DetectTrackTab(VideoTableDiskStatusMixin, QWidget):
         self._apply_project_defaults()
         self.refresh_videos()
         self._maybe_start_status_probes()
-        QTimer.singleShot(0, self._maybe_scan_models)
 
     def _apply_project_defaults(self) -> None:
         """Sync Edit Project defaults into tracking params."""

@@ -269,8 +269,16 @@ class TrackletStore:
 			return None
 		offsets = self._packed_offsets()
 		start = int(offsets[idx])
-		pts = np.array(points[start : start + length], copy=True)
-		return pts.reshape(length, 1, 2).astype(np.int32, copy=False)
+		view = points[start : start + length]
+		out = np.reshape(view, (length, 1, 2))
+		if out.dtype != np.int32:
+			out = out.astype(np.int32, copy=False)
+		if out.flags.writeable:
+			try:
+				out.setflags(write=False)
+			except ValueError:
+				pass
+		return out
 
 	def _packed_offsets(self) -> np.ndarray:
 		lengths = self.contour_lengths

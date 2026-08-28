@@ -472,3 +472,35 @@ def test_kind_combo_starts_cancellable_kind_load(tmp_path: Path, monkeypatch):
     tab.kind_combo.blockSignals(False)
     tab.kind_combo.setCurrentText("object")
     assert started == ["object"]
+
+
+@pytest.mark.gui
+def test_first_switch_edit_clones_packed_stores(tmp_path: Path):
+    import sys
+
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.instance() or QApplication(sys.argv)
+
+    from LabGym.gui_pyside.project.controller import ProjectController
+    from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
+        load_review_kind_store,
+        load_review_package_metadata,
+    )
+    from LabGym.gui_pyside.workbenches.detector.review_ids_tab import ReviewIdsTab
+
+    review = _package_two_kinds(tmp_path)
+    tab = ReviewIdsTab(ProjectController())
+    meta = load_review_package_metadata(str(review))
+    tab._apply_session_metadata(meta, gen=tab._session_gen)
+    loaded = load_review_kind_store(str(review), "mouse")
+    tab._on_session_kind("mouse", loaded, tab._session_gen)
+    assert tab._stores["mouse"] is tab._baseline_stores["mouse"]
+    tab._ensure_mutable_stores()
+    assert tab._stores["mouse"] is not tab._baseline_stores["mouse"]
+    assert tab._stores["mouse"].contours is None
+    tab._ensure_mutable_stores()
+    cloned = tab._stores["mouse"]
+    tab._ensure_mutable_stores()
+    assert tab._stores["mouse"] is cloned
+    tab.drop_session()

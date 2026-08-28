@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -289,7 +289,6 @@ class ProcessVideosTab(VideoTableDiskStatusMixin, QWidget):
         self._init_defaults()
         self.refresh_videos()
         self._maybe_start_status_probes()
-        QTimer.singleShot(0, self._maybe_scan_models)
 
     def _init_defaults(self) -> None:
         p = self.project.project

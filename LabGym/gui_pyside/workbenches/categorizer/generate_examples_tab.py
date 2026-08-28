@@ -25,7 +25,10 @@ from PySide6.QtWidgets import (
 
 from LabGym.annotator.core.annotation_manager import AnnotationManager
 from LabGym.gui_pyside.project.controller import ProjectController
-from LabGym.gui_pyside.project.paths import list_project_video_choices
+from LabGym.gui_pyside.project.paths import (
+    list_project_video_choices,
+    paths_refer_to_same_video,
+)
 from LabGym.identity.downstream import may_use_downstream
 from LabGym.identity.package import has_identity_package
 from LabGym.training.ethogram_examples import GenerationConfig, generate_examples_from_ethogram
@@ -260,11 +263,8 @@ class GenerateExamplesTab(QWidget):
         select = 0
         for i, (label, resolved) in enumerate(choices):
             self.combo_video.addItem(label, resolved)
-            try:
-                if cur and Path(resolved).resolve() == Path(cur).resolve():
-                    select = i
-            except OSError:
-                pass
+            if cur and paths_refer_to_same_video(str(resolved), cur):
+                select = i
         if choices:
             self.combo_video.setCurrentIndex(select)
             self.btn_run.setEnabled(True)

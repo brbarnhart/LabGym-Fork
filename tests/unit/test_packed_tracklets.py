@@ -113,6 +113,18 @@ def test_load_one_kind_does_not_require_other_kinds(tmp_path: Path):
     assert list(stores) == ["mouse"]
 
 
+def test_contour_at_does_not_copy_packed_points(tmp_path: Path):
+    save_tracklets(_store(n_frames=6), str(tmp_path))
+    loaded = load_tracklets(str(tmp_path), "mouse")
+    got = loaded.contour_at(0, 0)
+    assert got is not None
+    assert loaded.contour_points is not None
+    assert got.base is loaded.contour_points or (
+        got.base is not None and got.base.base is loaded.contour_points
+    )
+    assert not got.flags.writeable
+
+
 def test_clone_store_of_packed_load_does_not_expand(tmp_path: Path):
     save_tracklets(_store(n_frames=8), str(tmp_path))
     loaded = load_tracklets(str(tmp_path), "mouse")

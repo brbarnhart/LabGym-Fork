@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -104,7 +104,7 @@ def _analyzer_meta(analyzer, animal_kind: str) -> Dict[str, Any]:
 
 def pack_contours(
 	contours: Sequence[Sequence[Optional[np.ndarray]]],
-) -> tuple:
+) -> Tuple[np.ndarray, np.ndarray]:
 	'''Flatten per-frame polygons into npz contour_lengths / contour_points.
 
 	Args:
@@ -112,6 +112,8 @@ def pack_contours(
 
 	Returns:
 		``(contour_lengths, contour_points)`` matching the on-disk npz layout.
+		``contour_lengths`` is int32 of size ``n_ids * n_frames``; ``contour_points``
+		is int32 ``(N, 2)``.
 	'''
 	lengths: List[int] = []
 	points_list: List[np.ndarray] = []
@@ -130,7 +132,7 @@ def pack_contours(
 	return np.asarray(lengths, dtype=np.int32), points
 
 
-def _packed_contour_arrays(store: TrackletStore) -> tuple:
+def _packed_contour_arrays(store: TrackletStore) -> Tuple[np.ndarray, np.ndarray]:
 	'''Return (lengths, points) for npz write without expanding session-load stores.'''
 	expected = len(store.ids) * int(store.n_frames)
 	if store.contours is not None:

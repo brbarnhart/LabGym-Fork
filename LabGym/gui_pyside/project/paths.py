@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -294,6 +295,31 @@ def resolve_video_context(
         write_soft_labels=bool(d.write_soft_labels),
         background_free=bool(d.background_free),
     )
+
+
+def paths_refer_to_same_video(left: str, right: str) -> bool:
+    """True when two video paths name the same file without touching disk.
+
+    Uses string identity and ``os.path.normcase`` / ``normpath`` only — no
+    ``Path.resolve()`` (hidden tabs must not hit disk on **project swap**).
+    """
+    a = (left or "").strip()
+    b = (right or "").strip()
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    return os.path.normcase(os.path.normpath(a)) == os.path.normcase(
+        os.path.normpath(b)
+    )
+
+
+def cached_tracklets_dir(project: Project, video_path: str) -> Optional[str]:
+    """Return a previously probed tracklets dir, or None if not yet cached."""
+    key = _discovery_cache_key(project, video_path)
+    if key not in _tracklets_cache:
+        return None
+    return _tracklets_cache[key]
 
 
 def list_project_video_choices(project: Project) -> List[Tuple[str, str]]:

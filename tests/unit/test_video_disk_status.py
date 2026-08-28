@@ -459,6 +459,8 @@ def test_review_ids_combo_error_tooltip_includes_failing_path(
 
 def test_review_ids_load_unknown_starts_session_load(tmp_path: Path, monkeypatch):
     _app()
+    from PySide6.QtWidgets import QApplication
+
     from LabGym.gui_pyside.project import paths as paths_mod
     from LabGym.gui_pyside.workbenches.detector.review_ids_tab import ReviewIdsTab
 
@@ -469,10 +471,162 @@ def test_review_ids_load_unknown_starts_session_load(tmp_path: Path, monkeypatch
     ctrl.replace(proj, dirty=False)
     tab = ReviewIdsTab(ctrl)
     loads = []
-    tab.load_package = lambda d: loads.append(d) or True
+    tab.load_package = lambda d: loads.append(d) or True  # type: ignore[method-assign]
     tab.combo_video.setCurrentIndex(1)
     tab._load_selected_video_package()
+    thread = tab._session_thread
+    if thread is not None:
+        thread.wait(5000)
+    app = QApplication.instance()
+    assert app is not None
+    app.processEvents()
     assert loads == [str(pkg)]
+
+
+def test_review_ids_load_hunt_does_not_dirty_detection_dir(tmp_path: Path, monkeypatch):
+    _app()
+    from PySide6.QtWidgets import QApplication
+
+    from LabGym.gui_pyside.project import paths as paths_mod
+    from LabGym.gui_pyside.project.video_disk_status import ProbeResult, STATUS_DONE
+    from LabGym.gui_pyside.workbenches.detector.review_ids_tab import ReviewIdsTab
+
+    pkg = _package_at(tmp_path, "a")
+    monkeypatch.setattr(paths_mod, "discover_tracklets_dir", lambda *a, **k: str(pkg))
+    proj = _project_with_videos(tmp_path)
+    vid = str((tmp_path / "a.avi").resolve())
+    proj.defaults.current_video = vid
+    ctrl = ProjectController()
+    ctrl.replace(proj, dirty=False)
+    tab = ReviewIdsTab(ctrl)
+    tab.load_package = lambda d: True  # type: ignore[method-assign]
+    result = ProbeResult(
+        video_path=vid,
+        status=STATUS_DONE,
+        tracklets_dir=str(pkg),
+        detection_dir="detection/a/id_review",
+    )
+    tab._on_session_hunt_ready(result, tab._session_gen, vid)
+    app = QApplication.instance()
+    assert app is not None
+    app.processEvents()
+    assert ctrl.dirty is False
+    assert ctrl.project.videos[0].detection_dir
+
+
+def test_hidden_annotate_combo_refresh_does_not_resolve(tmp_path: Path, monkeypatch):
+    _app()
+    from pathlib import Path as P
+
+    from LabGym.gui_pyside.workbenches.categorizer.annotate_ethogram_tab import (
+        AnnotateEthogramTab,
+    )
+
+    hits = []
+    orig = P.resolve
+
+    def wrapped(self, *a, **k):
+        hits.append("resolve")
+        return orig(self, *a, **k)
+
+    monkeypatch.setattr(P, "resolve", wrapped)
+    proj = _project_with_videos(tmp_path)
+    ctrl = ProjectController()
+    ctrl.replace(proj, dirty=False)
+    tab = AnnotateEthogramTab(ctrl)
+    hits.clear()
+    ctrl.replace(Project.new(name="other", root_dir=str(tmp_path)), dirty=False)
+    assert hits == []
+    tab.close()
+
+
+def test_detect_track_swap_while_visible_does_not_scan(tmp_path: Path, monkeypatch):
+    _app()
+    from LabGym.gui_pyside.workbenches.detector import detect_track_tab as dtt
+    from LabGym.gui_pyside.workbenches.detector.detect_track_tab import DetectTrackTab
+
+    hits = []
+    monkeypatch.setattr(
+        dtt, "scan_detector_paths", lambda *a, **k: hits.append("scan_det") or []
+    )
+    proj = _project_with_videos(tmp_path)
+    ctrl = ProjectController()
+    ctrl.replace(proj, dirty=False)
+    tab = DetectTrackTab(ctrl)
+    tab.show()
+    tab._maybe_scan_models()
+    assert "scan_det" in hits
+    hits.clear()
+    ctrl.replace(Project.new(name="other", root_dir=str(tmp_path)), dirty=False)
+    assert hits == []
+    tab._maybe_scan_models()
+    assert "scan_det" in hits
+    tab.close()
+
+
+def test_process_videos_swap_while_visible_does_not_scan(tmp_path: Path, monkeypatch):
+    _app()
+    from LabGym.gui_pyside.workbenches.categorizer import process_videos_tab as pvt
+    from LabGym.gui_pyside.workbenches.categorizer.process_videos_tab import (
+        ProcessVideosTab,
+    )
+
+    hits = []
+    monkeypatch.setattr(
+        pvt, "scan_categorizer_paths", lambda *a, **k: hits.append("scan_cat") or []
+    )
+    proj = _project_with_videos(tmp_path)
+    ctrl = ProjectController()
+    ctrl.replace(proj, dirty=False)
+    tab = ProcessVideosTab(ctrl)
+    tab.show()
+    tab._maybe_scan_models()
+    assert "scan_cat" in hits
+    hits.clear()
+    ctrl.replace(Project.new(name="other", root_dir=str(tmp_path)), dirty=False)
+    assert hits == []
+    tab._maybe_scan_models()
+    assert "scan_cat" in hits
+    tab.close()
+
+
+def test_cached_probe_skips_timeout_wrapper(tmp_path: Path, monkeypatch):
+    proj = _project_with_videos(tmp_path, names=("clip.avi",))
+    pkg = _package_at(tmp_path, "clip")
+    vid = str((tmp_path / "clip.avi").resolve())
+    first = probe_video(proj, vid)
+    assert first.status == STATUS_DONE
+    assert Path(first.tracklets_dir) == pkg
+
+    def boom(*_a, **_k):
+        raise AssertionError("cached probe must not hunt disk")
+
+    from LabGym.gui_pyside.project import paths as paths_mod
+
+    monkeypatch.setattr(paths_mod, "discover_tracklets_dir", boom)
+    second = probe_video(proj, vid, timeout_s=10.0)
+    assert second.status == STATUS_DONE
+    assert second.tracklets_dir == first.tracklets_dir
+
+
+def test_local_probe_completes_quickly(tmp_path: Path):
+    proj = _project_with_videos(tmp_path, names=("clip.avi",))
+    _package_at(tmp_path, "clip")
+    vid = str((tmp_path / "clip.avi").resolve())
+    t0 = time.perf_counter()
+    result = probe_video(proj, vid, timeout_s=10.0)
+    elapsed = time.perf_counter() - t0
+    assert result.status == STATUS_DONE
+    assert elapsed < 1.0
+
+
+def test_paths_refer_to_same_video_is_string_only():
+    from LabGym.gui_pyside.project.paths import paths_refer_to_same_video
+
+    assert paths_refer_to_same_video(r"C:\data\a.avi", r"C:\data\a.avi")
+    assert paths_refer_to_same_video(r"C:\data\a.avi", r"C:\data\..\data\a.avi")
+    assert not paths_refer_to_same_video("a.avi", "b.avi")
+    assert not paths_refer_to_same_video("", "a.avi")
 
 
 def test_manage_dataset_does_not_scan_on_swap(tmp_path: Path, monkeypatch):

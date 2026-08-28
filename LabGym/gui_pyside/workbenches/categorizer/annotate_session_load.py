@@ -11,9 +11,9 @@ import json
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from LabGym.annotator.core.tracklets_bridge import (
     LoadedTracklets,
@@ -33,13 +33,15 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
 from LabGym.identity.package import SubjectRecord
 
 LoadTrackletsFn = Callable[..., Any]
-ReadFrameFn = Callable[..., tuple]
+ReadFrameFn = Callable[..., Tuple[Any, Optional[str]]]
+Frame0Result = Tuple[Any, Optional[str]]
 OnMetadata = Callable[["AnnotateSessionMetadata"], None]
 OnTracklets = Callable[[Any], None]
 OnFrame = Callable[[Any], None]
 OnTrackletsError = Callable[[str], None]
 OnVideoError = Callable[[str], None]
 OnError = Callable[[str], None]
+OnGateFailed = Callable[[str], None]
 
 
 @dataclass
@@ -201,7 +203,7 @@ def _default_read_frame(
     store_meta: Optional[dict] = None,
     fps: float = 0,
     **_kwargs,
-) -> tuple:
+) -> Frame0Result:
     from LabGym.gui_pyside.workbenches.detector.review_ids_session_load import (
         read_session_frame0,
     )
@@ -228,10 +230,12 @@ def run_annotate_session_load(
     on_tracklets_error: Optional[OnTrackletsError] = None,
     on_video_error: Optional[OnVideoError] = None,
     on_error: Optional[OnError] = None,
+    on_gate_failed: Optional[OnGateFailed] = None,
     load_tracklets: Optional[LoadTrackletsFn] = None,
     read_frame: Optional[ReadFrameFn] = None,
     behavior_mode: int = 0,
     exclusive_mode: bool = False,
+    project: Optional[Any] = None,
 ) -> str:
     """Run one Annotate session load to completion or cancel.
 
@@ -252,17 +256,56 @@ def run_annotate_session_load(
         on_tracklets_error: Called with a message on corrupt/missing npz.
         on_video_error: Called when the video cannot be opened.
         on_error: Called when package JSON cannot be read (no metadata).
+        on_gate_failed: Called when **accepted identities** refuse Load.
         load_tracklets: Injectable loader (tests); default is
             ``load_tracklets_for_annotator``.
         read_frame: Injectable frame-0 reader (tests).
         behavior_mode: Passed through to metadata.
         exclusive_mode: Passed through to metadata.
+        project: When set, resolve the video context and apply the
+            **accepted identities** gate on this worker thread.
 
     Returns:
         ``"ok"``, ``"cancelled"``, or ``"error"``.
     """
     load_fn = load_tracklets or _default_load_tracklets
     read_frame_fn = read_frame or _default_read_frame
+
+    if project is not None:
+        from LabGym.gui_pyside.project.paths import resolve_video_context
+        from LabGym.identity.downstream import (
+            may_use_downstream,
+            review_ids_required_message,
+        )
+        from LabGym.identity.package import has_identity_package
+
+        if load_cancelled(cancel_event):
+            return "cancelled"
+        ctx = resolve_video_context(project, video_path=video_path)
+        tracks = str(getattr(ctx, "tracklets_dir", "") or "")
+        package = bool(tracks) and has_identity_package(tracks)
+        if not may_use_downstream(
+            int(ctx.behavior_mode),
+            bool(ctx.accepted_identities),
+            identity_package=package,
+        ):
+            if load_cancelled(cancel_event):
+                return "cancelled"
+            msg = review_ids_required_message(tracks)
+            if on_gate_failed is not None:
+                on_gate_failed(msg)
+            elif on_error is not None:
+                on_error(msg)
+            return "error"
+        if not review_dir:
+            review_dir = tracks if (package and bool(ctx.accepted_identities)) else ""
+        if not video_path:
+            video_path = str(getattr(ctx, "video_path", "") or "")
+        if annotations_path is None:
+            ann = getattr(ctx, "annotations_path", None) or ""
+            annotations_path = str(ann) if getattr(ctx, "annotations_exists", False) else ""
+        behavior_mode = int(ctx.behavior_mode)
+        exclusive_mode = bool(getattr(ctx, "exclusive_mode", exclusive_mode))
 
     directory = str(review_dir or "").strip()
     if directory:
@@ -356,6 +399,8 @@ class AnnotateSessionLoadThread(QThread):
     video_error = Signal(str)
     load_error = Signal(str)
 
+    gate_failed = Signal(str)
+
     def __init__(
         self,
         review_dir: str = "",
@@ -364,14 +409,28 @@ class AnnotateSessionLoadThread(QThread):
         annotations_path: Optional[str] = None,
         behavior_mode: int = 0,
         exclusive_mode: bool = False,
-        parent=None,
-    ):
+        project: Optional[Any] = None,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        """Create a worker for one Annotate **session load**.
+
+        Args:
+            review_dir: Identity package folder. Empty when *project* should hunt.
+            video_path: Video path for the throwaway frame-0 preview reader.
+            annotations_path: Sidecar ethogram path (parsed on this thread).
+            behavior_mode: Detect-world behavior mode fallback.
+            exclusive_mode: Ethogram exclusive-mode fallback.
+            project: When set, resolve context and the accepted-identities gate
+                off the UI thread.
+            parent: Qt owner (usually the Annotate ethogram tab).
+        """
         super().__init__(parent)
         self._review_dir = review_dir
         self._video_path = video_path
         self._annotations_path = annotations_path
         self._behavior_mode = behavior_mode
         self._exclusive_mode = exclusive_mode
+        self._project = project
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -386,10 +445,12 @@ class AnnotateSessionLoadThread(QThread):
             cancel_event=self._cancel,
             behavior_mode=self._behavior_mode,
             exclusive_mode=self._exclusive_mode,
+            project=self._project,
             on_metadata=self.metadata_ready.emit,
             on_tracklets=self.tracklets_ready.emit,
             on_frame=self.frame_ready.emit,
             on_tracklets_error=self.tracklets_error.emit,
             on_video_error=self.video_error.emit,
             on_error=self.load_error.emit,
+            on_gate_failed=self.gate_failed.emit,
         )

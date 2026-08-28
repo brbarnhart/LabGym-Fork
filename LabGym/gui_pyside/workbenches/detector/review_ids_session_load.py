@@ -7,9 +7,9 @@ independently off the UI thread. Cancel or a newer load replaces in-flight work.
 from __future__ import annotations
 
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from LabGym.gui_pyside.session_load import (
     join_session_workers,
@@ -26,7 +26,8 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
 from LabGym.id_review.samples import analysis_frame_to_video_frame
 
 LoadKindFn = Callable[[str, str], Any]
-ReadFrameFn = Callable[..., tuple]
+ReadFrameFn = Callable[..., Tuple[Any, Optional[str]]]
+Frame0Result = Tuple[Any, Optional[str]]
 OnMetadata = Callable[[ReviewPackageMetadata], None]
 OnKind = Callable[[str, Any], None]
 OnFrame = Callable[[Any], None]
@@ -39,11 +40,16 @@ def read_session_frame0(
     video_path: Optional[str],
     store_meta: Optional[dict],
     fps: float,
-) -> tuple:
+) -> Frame0Result:
     """Open the video, read analysis frame 0, and release the capture.
 
     Decoder strategy matches Review IDs preview (``CAP_PROP_POS_FRAMES`` +
     read). The live play capture is not used here.
+
+    Args:
+        video_path: Preview video path; empty skips with an error string.
+        store_meta: Store metadata used to map analysis frame 0 to a video index.
+        fps: Analysis FPS for that mapping.
 
     Returns:
         ``(bgr_frame, error)``. Frame is None when opening or reading fails.
@@ -215,6 +221,8 @@ class ReviewSessionLoadThread(QThread):
     kind_error = Signal(str, str)
     video_error = Signal(str)
     load_error = Signal(str)
+    hunt_ready = Signal(object)
+    hunt_failed = Signal(str)
 
     def __init__(
         self,
@@ -225,8 +233,24 @@ class ReviewSessionLoadThread(QThread):
         skip_metadata: bool = False,
         skip_video: bool = False,
         metadata: Optional[ReviewPackageMetadata] = None,
-        parent=None,
-    ):
+        hunt_video: Optional[str] = None,
+        hunt_project: Optional[Any] = None,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        """Create a worker for one hunt or **session load**.
+
+        Args:
+            review_dir: Identity package folder. Empty when *hunt_video* is set.
+            visible_kind: **Animal kind** to load; default is the preferred kind.
+            video_hint: Project video path used to resolve the preview file.
+            skip_metadata: When True, do not re-read package JSON (kind change).
+            skip_video: When True, do not open the video (kind-only load).
+            metadata: Preloaded metadata when *skip_metadata* is True.
+            hunt_video: When set with empty *review_dir*, probe disk for the
+                identity package instead of loading npz.
+            hunt_project: Project document used by the hunt.
+            parent: Qt owner (usually the Review IDs tab).
+        """
         super().__init__(parent)
         self._review_dir = review_dir
         self._visible_kind = visible_kind
@@ -234,6 +258,8 @@ class ReviewSessionLoadThread(QThread):
         self._skip_metadata = skip_metadata
         self._skip_video = skip_video
         self._metadata = metadata
+        self._hunt_video = hunt_video
+        self._hunt_project = hunt_project
         self._cancel = threading.Event()
 
     def cancel(self) -> None:
@@ -241,6 +267,24 @@ class ReviewSessionLoadThread(QThread):
         self._cancel.set()
 
     def run(self) -> None:
+        if self._hunt_video and not (self._review_dir or "").strip():
+            from LabGym.gui_pyside.project.video_disk_status import (
+                STATUS_DONE,
+                probe_video,
+            )
+
+            result = probe_video(
+                self._hunt_project,
+                self._hunt_video,
+                cancel_event=self._cancel,
+            )
+            if self._cancel.is_set() or result.cancelled:
+                return
+            if result.status == STATUS_DONE and result.tracklets_dir:
+                self.hunt_ready.emit(result)
+            else:
+                self.hunt_failed.emit(result.error or "")
+            return
         run_review_session_load(
             self._review_dir,
             visible_kind=self._visible_kind,

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QObject, Qt, QThread, Signal
 from PySide6.QtWidgets import QTableWidgetItem
 
 from . import paths as paths_mod
@@ -110,7 +110,16 @@ def run_blocked_unknown_paths(
     return blocked
 
 
-def _relative_detection_dir(project: Project, tracklets_dir: str) -> str:
+def relative_detection_dir(project: Project, tracklets_dir: str) -> str:
+    """Project-root-relative detection path for an in-memory ``detection_dir``.
+
+    Args:
+        project: Open project document.
+        tracklets_dir: Absolute (or already relative) identity-package folder.
+
+    Returns:
+        Path relative to ``project.root_dir`` when possible, else *tracklets_dir*.
+    """
     if not tracklets_dir:
         return ""
     root = (project.root_dir or "").strip()
@@ -124,10 +133,24 @@ def _relative_detection_dir(project: Project, tracklets_dir: str) -> str:
     return tracklets_dir
 
 
+def _relative_detection_dir(project: Project, tracklets_dir: str) -> str:
+    """Backward-compatible alias for :func:`relative_detection_dir`."""
+    return relative_detection_dir(project, tracklets_dir)
+
+
 def _probe_impl(project: Project, video_path: str) -> ProbeResult:
+    """Discover the identity package for one video (may hit disk / NAS).
+
+    Args:
+        project: Open project document (``detection_dir`` is a hint).
+        video_path: Video to probe.
+
+    Returns:
+        ``STATUS_DONE`` with package paths, or ``STATUS_PENDING`` when none.
+    """
     tracks = paths_mod.discover_tracklets_dir(project, video_path)
     if tracks:
-        det = _relative_detection_dir(project, tracks)
+        det = relative_detection_dir(project, tracks)
         return ProbeResult(
             video_path=video_path,
             status=STATUS_DONE,
@@ -148,7 +171,8 @@ def probe_video(
 
     Uses a stored ``detection_dir`` as a hint (via discovery). Does not mark
     the project dirty. Until this returns, callers must treat the row as
-    **status unknown**.
+    **status unknown**. A cache hit returns immediately without a timeout
+    thread. ``timeout_s <= 0`` also runs in-process (no hang watchdog).
     """
     if cancel_event is not None and cancel_event.is_set():
         return ProbeResult(
@@ -156,6 +180,28 @@ def probe_video(
             status=STATUS_UNKNOWN,
             cancelled=True,
         )
+
+    cached = paths_mod.cached_tracklets_dir(project, video_path)
+    if cached is not None:
+        if cached:
+            det = relative_detection_dir(project, cached)
+            return ProbeResult(
+                video_path=video_path,
+                status=STATUS_DONE,
+                tracklets_dir=cached,
+                detection_dir=det,
+            )
+        return ProbeResult(video_path=video_path, status=STATUS_PENDING)
+
+    if timeout_s <= 0:
+        try:
+            return _probe_impl(project, video_path)
+        except Exception as exc:
+            return ProbeResult(
+                video_path=video_path,
+                status=STATUS_ERROR,
+                error=f"{exc} ({video_path})",
+            )
 
     box: List[Union[ProbeResult, Exception]] = []
     done = threading.Event()
@@ -250,8 +296,17 @@ class VideoDiskStatusProbeThread(QThread):
         *,
         timeout_s: float = DEFAULT_PROBE_TIMEOUT_S,
         cancel_event: Optional[threading.Event] = None,
-        parent=None,
-    ):
+        parent: Optional[QObject] = None,
+    ) -> None:
+        """Create a sequential probe worker.
+
+        Args:
+            project: Open project document.
+            video_paths: Videos still **status unknown**.
+            timeout_s: Per-video hang timeout (NAS). Cached hits skip the wrapper.
+            cancel_event: Shared cancel; a new event is created when omitted.
+            parent: Qt owner (usually the list tab).
+        """
         super().__init__(parent)
         self._project = project
         self._paths = list(video_paths)

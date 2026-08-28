@@ -20,8 +20,8 @@ from LabGym.annotator.core.tracklets_bridge import LoadedTracklets
 from LabGym.annotator.ui.main_window import MainWindow
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
-    ResolvedVideoContext,
     list_project_video_choices,
+    paths_refer_to_same_video,
 )
 from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
     AnnotateSessionLoadThread,
@@ -29,11 +29,6 @@ from LabGym.gui_pyside.workbenches.categorizer.annotate_session_load import (
     loaded_tracklets_placeholder,
     overlay_subject_display,
 )
-from LabGym.identity.downstream import (
-    may_use_downstream,
-    review_ids_required_message,
-)
-from LabGym.identity.package import has_identity_package
 
 
 def _annotator_alive(window: Optional[MainWindow]) -> bool:
@@ -196,12 +191,11 @@ class AnnotateEthogramTab(QWidget):
         select_idx = 0
         for i, (label, resolved) in enumerate(choices):
             self.combo_video.addItem(label, resolved)
-            try:
-                if cur and Path(resolved).resolve() == Path(cur).resolve():
-                    select_idx = i
-            except OSError:
-                if resolved == cur or label == cur:
-                    select_idx = i
+            if cur and (
+                paths_refer_to_same_video(str(resolved), cur)
+                or paths_refer_to_same_video(label, cur)
+            ):
+                select_idx = i
         if choices:
             self.combo_video.setCurrentIndex(select_idx)
             self.empty.hide()
@@ -291,30 +285,16 @@ class AnnotateEthogramTab(QWidget):
         )
 
     def _open_video_from_file(self, window: MainWindow, path: str) -> bool:
-        """Gate File → Open and load through project context (do not skip Review IDs).
+        """Start a **session load** for File → Open (gate runs off the UI thread).
 
-        Returns True when the attempt was handled (loaded or refused).
+        Returns True when the attempt was handled (started or refused).
         """
-        if not path or not Path(path).is_file():
+        if not path:
             QMessageBox.warning(
-                window, "Annotate ethogram", f"Video file not found:\n{path}"
+                window, "Annotate ethogram", "No video path given."
             )
             return True
-        ctx = self.project.resolve_context(path)
-        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
-        if not may_use_downstream(
-            int(ctx.behavior_mode),
-            bool(ctx.accepted_identities),
-            identity_package=pkg,
-        ):
-            QMessageBox.warning(
-                window,
-                "Review IDs required",
-                review_ids_required_message(ctx.tracklets_dir),
-            )
-            return True
-        self.project.set_current_video(path, dirty=True)
-        self._start_session_load(window, ctx)
+        self._start_session_load(window, path)
         return True
 
     def _apply_to(self, window: MainWindow) -> bool:
@@ -327,47 +307,28 @@ class AnnotateEthogramTab(QWidget):
             )
             self.request_edit_project.emit()
             return False
-        ctx = self.project.resolve_context(video)
-        pkg = bool(ctx.tracklets_dir) and has_identity_package(ctx.tracklets_dir)
-        if not may_use_downstream(
-            int(ctx.behavior_mode),
-            bool(ctx.accepted_identities),
-            identity_package=pkg,
-        ):
-            QMessageBox.warning(
-                self,
-                "Review IDs required",
-                review_ids_required_message(ctx.tracklets_dir),
-            )
-            return False
-
-        self.project.set_current_video(video, dirty=True)
-        self._start_session_load(window, ctx)
+        self._start_session_load(window, video)
         return True
 
-    def _start_session_load(
-        self, window: MainWindow, ctx: ResolvedVideoContext
-    ) -> None:
+    def _start_session_load(self, window: MainWindow, video_path: str) -> None:
         """Replace any in-flight session load with a new one.
+
+        Hunt, accepted-identities gate, and npz/video I/O run on the worker.
+        Does not mark the project dirty until metadata unlocks.
 
         Args:
             window: Embedded or detached annotator window.
-            ctx: Resolved paths and defaults for the selected video.
+            video_path: Selected project video (document path, not probed).
         """
         self._cancel_session_load()
         window.drop_session()
         gen = self._session_gen
-        tracks = str(getattr(ctx, "tracklets_dir", "") or "")
-        package = bool(tracks) and has_identity_package(tracks)
-        review_dir = tracks if (package and bool(ctx.accepted_identities)) else ""
-        ann = getattr(ctx, "annotations_path", None) or None
-        ann_arg = str(ann) if (ann and Path(str(ann)).is_file()) else ""
         thread = AnnotateSessionLoadThread(
-            review_dir,
-            video_path=str(getattr(ctx, "video_path", "") or ""),
-            annotations_path=ann_arg or None,
-            behavior_mode=int(ctx.behavior_mode),
-            exclusive_mode=bool(getattr(ctx, "exclusive_mode", False)),
+            "",
+            video_path=str(video_path or ""),
+            project=self.project.project,
+            behavior_mode=int(self.project.project.defaults.behavior_mode),
+            exclusive_mode=bool(self.project.project.defaults.exclusive_mode),
             parent=self,
         )
         thread.metadata_ready.connect(
@@ -387,6 +348,9 @@ class AnnotateEthogramTab(QWidget):
         )
         thread.load_error.connect(
             lambda msg, g=gen, w=window: self._on_session_load_error(w, msg, g)
+        )
+        thread.gate_failed.connect(
+            lambda msg, g=gen, w=window: self._on_session_gate_failed(w, msg, g)
         )
         thread.finished.connect(lambda g=gen: self._on_session_thread_finished(g))
         self._session_thread = thread
@@ -419,6 +383,8 @@ class AnnotateEthogramTab(QWidget):
         if gen != self._session_gen or not _annotator_alive(window):
             return
         self._session_meta = meta
+        if meta.video_path:
+            self.project.set_current_video(str(meta.video_path), dirty=True)
         sidecar = meta.annotations_data is not None
         placeholder = None
         if meta.subjects and not sidecar:
@@ -484,6 +450,14 @@ class AnnotateEthogramTab(QWidget):
         if gen != self._session_gen or not _annotator_alive(window):
             return
         QMessageBox.warning(window, "Annotate ethogram", message)
+        self.lbl_status.setText(message)
+
+    def _on_session_gate_failed(
+        self, window: MainWindow, message: str, gen: int
+    ) -> None:
+        if gen != self._session_gen or not _annotator_alive(window):
+            return
+        QMessageBox.warning(window, "Review IDs required", message)
         self.lbl_status.setText(message)
 
     def _on_session_thread_finished(self, gen: int) -> None:

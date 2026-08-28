@@ -10,6 +10,8 @@ import threading
 import zipfile
 from typing import Any, Callable, Optional, Sequence, Tuple
 
+Frame0Result = Tuple[Any, Optional[str]]
+
 # User-visible npz / path / OpenCV failures. Do not swallow programming errors.
 SESSION_IO_ERRORS: Tuple[type, ...] = (
     OSError,
@@ -66,7 +68,7 @@ def load_session_frame0(
     *,
     skip_video: bool,
     cancel_event: Optional[threading.Event],
-    read_frame_fn: Callable[..., tuple],
+    read_frame_fn: Callable[..., Frame0Result],
     video_path: Optional[str],
     store_meta: Optional[dict],
     fps: float,
@@ -88,14 +90,14 @@ def load_session_frame0(
     if skip_video or load_cancelled(cancel_event):
         return
 
-    def _read() -> tuple:
+    def _read() -> Frame0Result:
         return read_frame_fn(
             video_path=video_path,
             store_meta=store_meta,
             fps=fps,
         )
 
-    def _got(outcome: tuple) -> None:
+    def _got(outcome: Frame0Result) -> None:
         frame, err = outcome
         if err:
             if on_video_error is not None:

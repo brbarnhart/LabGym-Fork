@@ -414,6 +414,35 @@ def _make_tab(tmp_path: Path, *, accepted: bool = True):
 
 
 @pytest.mark.gui
+def test_annotate_load_resolves_context_off_ui_thread(tmp_path: Path, monkeypatch):
+    from PySide6.QtWidgets import QApplication, QMessageBox
+
+    from LabGym.gui_pyside.project import paths as paths_mod
+
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: 0)
+    hits: list[str] = []
+    real = paths_mod.resolve_video_context
+
+    def tracking_resolve(project, video_path=None):
+        hits.append(threading.current_thread().name)
+        return real(project, video_path=video_path)
+
+    monkeypatch.setattr(paths_mod, "resolve_video_context", tracking_resolve)
+    tab = _make_tab(tmp_path)
+    started = tab.load_current()
+    assert started is True
+    thread = tab._session_thread
+    if thread is not None:
+        thread.wait(8000)
+    app = QApplication.instance()
+    assert app is not None
+    app.processEvents()
+    assert hits
+    assert "MainThread" not in hits
+    tab.drop_session()
+
+
+@pytest.mark.gui
 def test_annotate_load_does_not_enqueue_job_queue(tmp_path: Path, monkeypatch):
     from PySide6.QtWidgets import QApplication, QMessageBox
 
@@ -525,10 +554,6 @@ def test_video_combo_during_load_replaces(tmp_path: Path, monkeypatch):
     )
 
     monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: 0)
-    monkeypatch.setattr(
-        "LabGym.gui_pyside.workbenches.categorizer.annotate_ethogram_tab.may_use_downstream",
-        lambda *a, **k: True,
-    )
 
     vid_a = tmp_path / "a.avi"
     vid_b = tmp_path / "b.avi"
@@ -572,8 +597,8 @@ def test_video_combo_during_load_replaces(tmp_path: Path, monkeypatch):
     tab = AnnotateEthogramTab(ctrl)
     orig_start = tab._start_session_load
 
-    def tracking_start(window, ctx):
-        orig_start(window, ctx)
+    def tracking_start(window, video_path):
+        orig_start(window, video_path)
         gens_seen.append(tab._session_gen)
 
     monkeypatch.setattr(tab, "_start_session_load", tracking_start)
@@ -628,11 +653,15 @@ def test_accepted_identities_gate_does_not_open_video(tmp_path: Path, monkeypatc
 
     tab = _make_tab(tmp_path, accepted=False)
     assert tab.project.dirty is False
-    ok = tab.load_current()
+    started = tab.load_current()
     app = QApplication.instance()
     assert app is not None
-    app.processEvents()
-    assert ok is False
+    thread = tab._session_thread
+    if thread is not None:
+        thread.wait(8000)
+    for _ in range(20):
+        app.processEvents()
+    assert started is True
     assert tab.project.dirty is False
     assert opened == []
     assert tab._session_thread is None
