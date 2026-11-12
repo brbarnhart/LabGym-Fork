@@ -50,8 +50,9 @@ def test_save_load_roundtrip():
 		assert loaded.n_frames == store.n_frames
 		assert np.allclose(loaded.centers, store.centers)
 		assert np.array_equal(loaded.valid, store.valid)
-		assert loaded.contours[0][5] is not None
-		assert loaded.contours[0][5].shape[-1] == 2
+		cnt = loaded.contour_at(0, 5)
+		assert cnt is not None
+		assert cnt.shape[-1] == 2
 
 
 def test_apply_mapping_swap_from_frame():

@@ -292,10 +292,14 @@ def clone_store(store: "TrackletStore") -> "TrackletStore":
         store: Source store (typically a raw snapshot).
 
     Returns:
-        Independent ``TrackletStore`` with copied arrays and contours.
+        Independent ``TrackletStore`` with copied arrays (packed outlines
+        stay packed; expanded polygons are deep-copied only when present).
     """
     from LabGym.id_review.types import TrackletStore
 
+    contours = None if store.contours is None else copy.deepcopy(store.contours)
+    lengths = None if store.contour_lengths is None else store.contour_lengths.copy()
+    points = None if store.contour_points is None else store.contour_points.copy()
     return TrackletStore(
         schema_version=store.schema_version,
         animal_kind=store.animal_kind,
@@ -304,7 +308,9 @@ def clone_store(store: "TrackletStore") -> "TrackletStore":
         centers=store.centers.copy(),
         valid=store.valid.copy(),
         heights=store.heights.copy(),
-        contours=copy.deepcopy(store.contours),
+        contours=contours,
+        contour_lengths=lengths,
+        contour_points=points,
         meta=dict(store.meta or {}),
     )
 

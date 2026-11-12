@@ -108,6 +108,11 @@ def test_smoke_detect_and_process_queue_start_path_ids(
 
     det_tab = DetectTrackTab(ctrl)
     det_tab.ed_detector.setEditText(str(det))
+    from LabGym.gui_pyside.project.video_disk_status import STATUS_PENDING
+
+    for r in range(det_tab.table.rowCount()):
+        path = str(det_tab.table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+        det_tab._status_by_path[path] = (STATUS_PENDING, "")
     det_tab._start_batch()
     assert det_tab._batch_active is True
     assert len(captured["batches"][0]) == 2
@@ -117,6 +122,9 @@ def test_smoke_detect_and_process_queue_start_path_ids(
     proc = ProcessVideosTab(ctrl)
     proc.ed_categorizer.setText(str(cat))
     proc.ed_out.setText(str(tmp_path / "analysis"))
+    for r in range(proc.table.rowCount()):
+        path = str(proc.table.item(r, 0).data(Qt.ItemDataRole.UserRole))
+        proc._status_by_path[path] = (STATUS_PENDING, "")
     monkeypatch.setattr(
         "LabGym.gui_pyside.workbenches.categorizer.process_videos_tab.QMessageBox.warning",
         lambda *a, **k: None,
@@ -137,6 +145,10 @@ def test_smoke_review_ids_loads_package(
     tab = ReviewIdsTab(project_controller_with_videos)
     ok = tab.load_package(str(minimal_id_review_package))
     assert ok is True
+    thread = tab._session_thread
+    if thread is not None:
+        thread.wait(10000)
+    qapp.processEvents()
     assert tab.review_dir
     assert tab.n_frames >= 1
     assert "mouse" in tab._stores

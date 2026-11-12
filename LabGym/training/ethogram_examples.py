@@ -264,7 +264,7 @@ def _contour_at(
         return None
     if not bool(store.valid[row, analysis_frame]):
         return None
-    cnt = store.contours[row][analysis_frame]
+    cnt = store.contour_at(row, analysis_frame)
     if cnt is None:
         return None
     return np.asarray(cnt, dtype=np.int32)

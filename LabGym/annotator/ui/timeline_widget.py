@@ -120,10 +120,18 @@ class TimelineWidget(QWidget):
         self._active_button = None
 
     def _total_frames(self) -> int:
+        """Video length when the decoder is open; else session ``total_frames``."""
         vid = self.video_getter()
-        if not vid or getattr(vid, "total_frames", 0) < 1:
-            return 0
-        return int(vid.total_frames)
+        if vid is not None and bool(getattr(vid, "is_loaded", False)):
+            n = int(vid.total_frames)
+            if n > 0:
+                return n
+        mgr = self.manager_getter()
+        if mgr is not None:
+            n = int(getattr(mgr.session, "total_frames", 0) or 0)
+            if n > 0:
+                return n
+        return 0
 
     def _x_to_frame(self, x: float) -> int:
         total = self._total_frames()
@@ -182,15 +190,14 @@ class TimelineWidget(QWidget):
         painter.fillRect(0, 0, w, h, bg)
 
         mgr = self.manager_getter()
-        vid = self.video_getter()
-        if not mgr or not vid or vid.total_frames < 1:
+        total = self._total_frames()
+        if not mgr or total < 1:
             if self._selection_mode:
                 painter.setPen(QColor(150, 180, 220))
                 painter.drawText(8, h // 2 + 4, "Selection mode (load a video)")
             painter.end()
             return
 
-        total = vid.total_frames
         scale = w / total
 
         subjects = list(mgr.session.subjects)

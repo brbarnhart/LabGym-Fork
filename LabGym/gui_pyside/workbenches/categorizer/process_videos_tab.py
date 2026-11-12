@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -41,8 +40,14 @@ from LabGym.gui_pyside.jobs.sequential_queue import (
 from LabGym.gui_pyside.model_paths import scan_categorizer_paths
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
-    list_project_video_choices,
     resolve_video_context,
+)
+from LabGym.gui_pyside.project.video_disk_status import (
+    STATUS_DONE,
+    STATUS_UNKNOWN,
+    ProbeResult,
+    VideoTableDiskStatusMixin,
+    run_blocked_unknown_paths,
 )
 from LabGym.gui_pyside.widgets.path_browse import (
     path_edit_row,
@@ -52,7 +57,7 @@ from LabGym.identity.downstream import may_use_downstream
 from LabGym.identity.package import has_identity_package
 
 
-class ProcessVideosTab(QWidget):
+class ProcessVideosTab(VideoTableDiskStatusMixin, QWidget):
     """Batch-categorize project videos from accepted remapped tracklets."""
 
     request_edit_project = Signal()
@@ -70,9 +75,10 @@ class ProcessVideosTab(QWidget):
         self.queue.queue_finished.connect(self._on_queue_done)
         # job_id is the video path
         self._job_rows: Dict[str, int] = {}
-        # path -> (status, note) survives post-batch project.changed rebuilds
-        self._status_by_path: Dict[str, Tuple[str, str]] = {}
         self._batch_active = False
+        self._init_video_disk_status()
+        self._models_need_scan = True
+        self._behaviors_need_refresh = True
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel(
@@ -215,6 +221,12 @@ class ProcessVideosTab(QWidget):
         for b in (btn_ref, btn_edit, btn_all, btn_none):
             row.addWidget(b)
         row.addStretch(1)
+        self.lbl_probe = QLabel("")
+        self.lbl_probe.setToolTip(
+            "Per-video disk check after Open. Rows stay status unknown (… ) "
+            "until each probe finishes."
+        )
+        row.addWidget(self.lbl_probe)
         vl.addLayout(row)
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(
@@ -228,6 +240,7 @@ class ProcessVideosTab(QWidget):
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setColumnWidth(0, 36)
+        self.table.itemChanged.connect(self._on_table_item_changed)
         vl.addWidget(self.table)
         layout.addWidget(vbox, 1)
 
@@ -250,6 +263,7 @@ class ProcessVideosTab(QWidget):
         # Full rebuild / defaults only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self._on_project_replaced)
         self._on_project_replaced()
+        self._update_run_enabled()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -257,17 +271,48 @@ class ProcessVideosTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt
+        super().showEvent(event)
+        self._maybe_refresh_behaviors()
+        self._maybe_scan_models()
+        self._maybe_start_status_probes()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt
+        self._cancel_status_probes()
+        super().hideEvent(event)
+
     def _on_project_replaced(self) -> None:
+        self._cancel_status_probes()
+        self._status_by_path.clear()
+        self._models_need_scan = True
+        self._behaviors_need_refresh = True
         self._init_defaults()
         self.refresh_videos()
+        self._maybe_start_status_probes()
 
     def _init_defaults(self) -> None:
         p = self.project.project
+        self.ed_categorizer.blockSignals(True)
         if p.defaults.categorizer_name:
             self.ed_categorizer.setText(p.defaults.categorizer_name)
+        self.ed_categorizer.blockSignals(False)
         if p.root_dir:
             # analysis results: under root/analysis or detection sibling
             self.ed_out.setText(str(p.resolve_path("analysis")))
+        # Do not read categorizer files during project swap.
+        self.lbl_behaviors.setText("—")
+
+    def _maybe_scan_models(self) -> None:
+        """Walk categorizer folders when this tab is shown, not during project swap."""
+        if not self._models_need_scan or not self.isVisible():
+            return
+        self._models_need_scan = False
+        self._scan_models()
+
+    def _maybe_refresh_behaviors(self) -> None:
+        if not self._behaviors_need_refresh or not self.isVisible():
+            return
+        self._behaviors_need_refresh = False
         self._on_categorizer_changed(self.ed_categorizer.text())
 
     def _scan_models(self) -> None:
@@ -291,83 +336,22 @@ class ProcessVideosTab(QWidget):
         else:
             self.lbl_behaviors.setText("—")
 
-    def _manual_refresh_videos(self) -> None:
-        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
+    def _probe_result_note(self, result: ProbeResult) -> str:
+        """Accepted-identities note for Process videos, not a package path."""
+        if result.status == STATUS_DONE and result.tracklets_dir:
+            from LabGym.id_review.raw_store import has_accepted_identities
 
-        clear_tracklets_discovery_cache()
-        self.refresh_videos()
-
-    def refresh_videos(self) -> None:
-        # Skip rebuild mid-batch so mark_dirty cannot wipe live status.
-        if self._batch_active:
-            return
-
-        prev_checked: Dict[str, bool] = {}
-        for r in range(self.table.rowCount()):
-            item0 = self.table.item(r, 0)
-            if not item0:
-                continue
-            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
-            if path:
-                prev_checked[path] = item0.checkState() == Qt.CheckState.Checked
-
-        choices = list_project_video_choices(self.project.project)
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(choices))
-        for r, (label, resolved) in enumerate(choices):
-            path = str(resolved)
-            chk = QTableWidgetItem()
-            chk.setFlags(
-                Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
+            return (
+                "yes"
+                if has_accepted_identities(result.tracklets_dir)
+                else "no — save Review IDs"
             )
-            if path in prev_checked:
-                chk.setCheckState(
-                    Qt.CheckState.Checked
-                    if prev_checked[path]
-                    else Qt.CheckState.Unchecked
-                )
-            else:
-                chk.setCheckState(Qt.CheckState.Checked)
-            chk.setData(Qt.ItemDataRole.UserRole, path)
-            self.table.setItem(r, 0, chk)
-            self.table.setItem(r, 1, QTableWidgetItem(label))
-            if path in self._status_by_path:
-                status, note = self._status_by_path[path]
-            else:
-                ctx = resolve_video_context(self.project.project, video_path=path)
-                tracks = ctx.tracklets_dir
-                pkg = bool(tracks) and has_identity_package(tracks)
-                if may_use_downstream(
-                    int(ctx.behavior_mode),
-                    bool(ctx.accepted_identities),
-                    identity_package=pkg,
-                ):
-                    status, note = ("pending", tracks or "")
-                elif tracks:
-                    status, note = (
-                        "blocked",
-                        "needs Review IDs save",
-                    )
-                else:
-                    status, note = (
-                        "blocked",
-                        "(no identity package — Detect + track, then Review IDs)",
-                    )
-            self.table.setItem(r, 2, QTableWidgetItem(status))
-            self.table.setItem(r, 3, QTableWidgetItem(note))
+        if result.status == STATUS_UNKNOWN:
+            return ""
+        return result.error
 
-    def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:
-        self._status_by_path[path] = (status, note)
-        if self.table.item(row, 2):
-            self.table.item(row, 2).setText(status)
-        else:
-            self.table.setItem(row, 2, QTableWidgetItem(status))
-        if self.table.item(row, 3):
-            self.table.item(row, 3).setText(note)
-        else:
-            self.table.setItem(row, 3, QTableWidgetItem(note))
+    def _on_table_item_changed(self, _item) -> None:
+        self._update_run_enabled()
 
     def _set_all(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -376,14 +360,6 @@ class ProcessVideosTab(QWidget):
             if it:
                 it.setCheckState(state)
 
-    def _selected_videos(self) -> List[str]:
-        out = []
-        for r in range(self.table.rowCount()):
-            it = self.table.item(r, 0)
-            if it and it.checkState() == Qt.CheckState.Checked:
-                out.append(str(it.data(Qt.ItemDataRole.UserRole)))
-        return out
-
     def _start(self) -> None:
         if self.queue.is_running:
             QMessageBox.information(self, "Busy", "A batch is already running.")
@@ -391,14 +367,24 @@ class ProcessVideosTab(QWidget):
         categorizer = self.ed_categorizer.text().strip()
         out = self.ed_out.text().strip()
         videos = self._selected_videos()
+        if not videos:
+            QMessageBox.warning(self, "Process", "Select at least one video.")
+            return
+        unknown = run_blocked_unknown_paths(videos, self._status_by_path)
+        if unknown:
+            QMessageBox.warning(
+                self,
+                "Process",
+                "Status is still unknown for checked video(s). "
+                "Wait until disk checks finish, or uncheck those rows:\n\n"
+                + "\n".join(f"  • {Path(p).name}" for p in unknown[:12]),
+            )
+            return
         if not categorizer or not Path(categorizer).is_dir():
             QMessageBox.warning(self, "Process", "Select a valid categorizer folder.")
             return
         if not out:
             QMessageBox.warning(self, "Process", "Choose a results root folder.")
-            return
-        if not videos:
-            QMessageBox.warning(self, "Process", "Select at least one video.")
             return
 
         project = self.project.project
@@ -459,7 +445,7 @@ class ProcessVideosTab(QWidget):
             )
             return process_video(cfg, progress=prog)
 
-        self.btn_run.setEnabled(False)
+        self._update_run_enabled()
         self.btn_cancel.setEnabled(True)
         self.log.append(f"Starting process batch: {len(items)} video(s) → {out}")
         self.queue.start(items, runner)
@@ -499,7 +485,6 @@ class ProcessVideosTab(QWidget):
         self.log.append(f"[{Path(job_id).name}] FAIL: {error}")
 
     def _on_queue_done(self) -> None:
-        self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self._batch_active = False
         self.log.append("Batch finished.")
@@ -510,6 +495,7 @@ class ProcessVideosTab(QWidget):
                 if row is not None:
                     self._set_status(row, it.job_id, "cancelled", "")
         self.refresh_videos()
+        self._maybe_start_status_probes()
         n_ok, n_err, _n_cancel = summarize_job_statuses(self.queue.items)
         QMessageBox.information(
             self,

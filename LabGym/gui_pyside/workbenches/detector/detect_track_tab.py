@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QTableWidget,
-    QTableWidgetItem,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -42,7 +41,10 @@ from LabGym.gui_pyside.model_paths import scan_detector_paths
 from LabGym.gui_pyside.project.controller import ProjectController
 from LabGym.gui_pyside.project.paths import (
     discover_tracklets_dir,
-    list_project_video_choices,
+)
+from LabGym.gui_pyside.project.video_disk_status import (
+    VideoTableDiskStatusMixin,
+    run_blocked_unknown_paths,
 )
 from LabGym.gui_pyside.widgets.path_browse import browse_existing_directory
 from LabGym.gui_pyside.workbenches.detector.detect_track_progress import (
@@ -50,7 +52,7 @@ from LabGym.gui_pyside.workbenches.detector.detect_track_progress import (
 )
 
 
-class DetectTrackTab(QWidget):
+class DetectTrackTab(VideoTableDiskStatusMixin, QWidget):
     """Batch detect+track project videos into identity packages."""
 
     request_edit_project = Signal()
@@ -69,10 +71,11 @@ class DetectTrackTab(QWidget):
         self.queue.queue_finished.connect(self._on_queue_done)
         # job_id is the video path; maps to table row for the current batch
         self._job_rows: Dict[str, int] = {}
-        # path -> (status, note) so post-batch project.changed refreshes keep results
-        self._status_by_path: Dict[str, Tuple[str, str]] = {}
         self._batch_active = False
         self._progress_dlg: Optional[DetectTrackProgressDialog] = None
+        self._init_video_disk_status()
+        self._kinds_need_refresh = True
+        self._models_need_scan = True
 
         layout = QVBoxLayout(self)
 
@@ -275,6 +278,12 @@ class DetectTrackTab(QWidget):
         row2.addWidget(btn_all)
         row2.addWidget(btn_none)
         row2.addStretch(1)
+        self.lbl_probe = QLabel("")
+        self.lbl_probe.setToolTip(
+            "Per-video disk check after Open. Rows stay status unknown (… ) "
+            "until each probe finishes."
+        )
+        row2.addWidget(self.lbl_probe)
         v_l.addLayout(row2)
 
         self.table = QTableWidget(0, 4)
@@ -287,6 +296,7 @@ class DetectTrackTab(QWidget):
         )
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setColumnWidth(0, 36)
+        self.table.itemChanged.connect(self._on_table_item_changed)
         v_l.addWidget(self.table)
         layout.addWidget(v_box, 1)
 
@@ -313,6 +323,7 @@ class DetectTrackTab(QWidget):
         # Full rebuild / defaults only on project replace/open/edit — not every dirty/save.
         self.project.project_replaced.connect(self._on_project_replaced)
         self._on_project_replaced()
+        self._update_run_enabled()
 
     @staticmethod
     def _lab(text: str, tip: str) -> QLabel:
@@ -320,10 +331,25 @@ class DetectTrackTab(QWidget):
         lab.setToolTip(tip)
         return lab
 
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt
+        super().showEvent(event)
+        self._maybe_refresh_kinds()
+        self._maybe_scan_models()
+        self._maybe_start_status_probes()
+
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt
+        self._cancel_status_probes()
+        super().hideEvent(event)
+
     def _on_project_replaced(self) -> None:
+        self._cancel_status_probes()
+        self._status_by_path.clear()
+        self._kinds_need_refresh = True
+        self._models_need_scan = True
         self._init_detector_defaults()
         self._apply_project_defaults()
         self.refresh_videos()
+        self._maybe_start_status_probes()
 
     def _apply_project_defaults(self) -> None:
         """Sync Edit Project defaults into tracking params."""
@@ -338,18 +364,28 @@ class DetectTrackTab(QWidget):
         self.spin_length.setValue(max(1, int(d.window_length or 15)))
 
     def _init_detector_defaults(self) -> None:
+        """Apply detector path from the project document. Do not walk model trees."""
         p = self.project.project
-        cur = (p.defaults.detector_name or self.ed_detector.currentText() or "").strip()
+        cur = (p.defaults.detector_name or "").strip()
         self.ed_detector.blockSignals(True)
         self.ed_detector.clear()
-        for s in scan_detector_paths(p):
-            self.ed_detector.addItem(s)
         if cur:
             self.ed_detector.setEditText(cur)
-        elif self.ed_detector.count():
-            self.ed_detector.setCurrentIndex(0)
         self.ed_detector.blockSignals(False)
+        self.lbl_kinds.setText("—")
+
+    def _maybe_refresh_kinds(self) -> None:
+        if not self._kinds_need_refresh or not self.isVisible():
+            return
+        self._kinds_need_refresh = False
         self._on_detector_changed(self.ed_detector.currentText())
+
+    def _maybe_scan_models(self) -> None:
+        """Walk detector folders when this tab is shown, not during project swap."""
+        if not self._models_need_scan or not self.isVisible():
+            return
+        self._models_need_scan = False
+        self._scan_detectors()
 
     def _scan_detectors(self) -> None:
         cur = self.ed_detector.currentText()
@@ -393,75 +429,8 @@ class DetectTrackTab(QWidget):
             "Animal/object category names defined inside the selected detector."
         )
 
-    def _status_for_video(self, path: str) -> Tuple[str, str]:
-        """Sticky in-session status, else done if id_review exists on disk."""
-        if path in self._status_by_path:
-            return self._status_by_path[path]
-        tracks = discover_tracklets_dir(self.project.project, path)
-        if tracks:
-            # Persist so later refreshes stay cheap / consistent.
-            self._status_by_path[path] = ("done", tracks)
-            return "done", tracks
-        return "pending", ""
-
-    def _manual_refresh_videos(self) -> None:
-        from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
-
-        clear_tracklets_discovery_cache()
-        self.refresh_videos()
-
-    def refresh_videos(self) -> None:
-        # Mid-batch project.changed (mark_dirty after each finished video) must not
-        # rebuild the table — that was wiping live status. Keep sticky statuses for
-        # post-batch rebuilds via _status_by_path.
-        if self._batch_active:
-            return
-
-        prev_checked: Dict[str, bool] = {}
-        for r in range(self.table.rowCount()):
-            item0 = self.table.item(r, 0)
-            if not item0:
-                continue
-            path = str(item0.data(Qt.ItemDataRole.UserRole) or "")
-            if path:
-                prev_checked[path] = item0.checkState() == Qt.CheckState.Checked
-
-        choices = list_project_video_choices(self.project.project)
-        self.table.setRowCount(0)
-        self.table.setRowCount(len(choices))
-        for r, (label, resolved) in enumerate(choices):
-            path = str(resolved)
-            chk = QTableWidgetItem()
-            chk.setFlags(
-                Qt.ItemFlag.ItemIsUserCheckable
-                | Qt.ItemFlag.ItemIsEnabled
-                | Qt.ItemFlag.ItemIsSelectable
-            )
-            if path in prev_checked:
-                chk.setCheckState(
-                    Qt.CheckState.Checked
-                    if prev_checked[path]
-                    else Qt.CheckState.Unchecked
-                )
-            else:
-                chk.setCheckState(Qt.CheckState.Checked)
-            chk.setData(Qt.ItemDataRole.UserRole, path)
-            self.table.setItem(r, 0, chk)
-            self.table.setItem(r, 1, QTableWidgetItem(label))
-            status, note = self._status_for_video(path)
-            self.table.setItem(r, 2, QTableWidgetItem(status))
-            self.table.setItem(r, 3, QTableWidgetItem(note))
-
-    def _set_status(self, row: int, path: str, status: str, note: str = "") -> None:
-        self._status_by_path[path] = (status, note)
-        if self.table.item(row, 2):
-            self.table.item(row, 2).setText(status)
-        else:
-            self.table.setItem(row, 2, QTableWidgetItem(status))
-        if self.table.item(row, 3):
-            self.table.item(row, 3).setText(note)
-        else:
-            self.table.setItem(row, 3, QTableWidgetItem(note))
+    def _on_table_item_changed(self, _item) -> None:
+        self._update_run_enabled()
 
     def _set_all_checked(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -469,16 +438,6 @@ class DetectTrackTab(QWidget):
             item = self.table.item(r, 0)
             if item:
                 item.setCheckState(state)
-
-    def _selected_videos(self) -> List[str]:
-        out = []
-        for r in range(self.table.rowCount()):
-            item = self.table.item(r, 0)
-            if item and item.checkState() == Qt.CheckState.Checked:
-                path = item.data(Qt.ItemDataRole.UserRole)
-                if path:
-                    out.append(str(path))
-        return out
 
     def _results_root(self) -> Path:
         p = self.project.project
@@ -495,6 +454,22 @@ class DetectTrackTab(QWidget):
         if self.queue.is_running:
             QMessageBox.information(self, "Busy", "A batch is already running.")
             return
+        videos = self._selected_videos()
+        if not videos:
+            QMessageBox.warning(
+                self, "Detect + track", "Select at least one project video."
+            )
+            return
+        unknown = run_blocked_unknown_paths(videos, self._status_by_path)
+        if unknown:
+            QMessageBox.warning(
+                self,
+                "Detect + track",
+                "Status is still unknown for checked video(s). "
+                "Wait until disk checks finish, or uncheck those rows:\n\n"
+                + "\n".join(f"  • {Path(p).name}" for p in unknown[:12]),
+            )
+            return
         detector = self.ed_detector.currentText().strip()
         if not detector:
             QMessageBox.warning(self, "Detect + track", "Select a valid detector folder.")
@@ -507,12 +482,6 @@ class DetectTrackTab(QWidget):
                 self,
                 "Detect + track — invalid detector",
                 str(exc),
-            )
-            return
-        videos = self._selected_videos()
-        if not videos:
-            QMessageBox.warning(
-                self, "Detect + track", "Select at least one project video."
             )
             return
         if not self._confirm_overwrite_identity_packages(videos):
@@ -568,7 +537,7 @@ class DetectTrackTab(QWidget):
                 pass
             return detect_and_track_video(cfg, progress=prog)
 
-        self.btn_run.setEnabled(False)
+        self._update_run_enabled()
         self.btn_cancel.setEnabled(True)
         self.log.append(f"Starting batch: {len(items)} video(s) → {results_root}")
         dlg = self._ensure_progress_dialog()
@@ -696,7 +665,6 @@ class DetectTrackTab(QWidget):
             self.project.mark_dirty()
 
     def _on_queue_done(self) -> None:
-        self.btn_run.setEnabled(True)
         self.btn_cancel.setEnabled(False)
         self._batch_active = False
         self.log.append("Batch finished.")
@@ -716,6 +684,7 @@ class DetectTrackTab(QWidget):
         clear_tracklets_discovery_cache()
         # Sync table with any project video-list changes deferred during the batch.
         self.refresh_videos()
+        self._maybe_start_status_probes()
         n_ok, n_err, _n_cancel = summarize_job_statuses(self.queue.items)
 
         QMessageBox.information(
