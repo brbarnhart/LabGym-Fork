@@ -55,7 +55,7 @@ def draw_tracklet_overlay(
 		row = store.id_index(tid)
 		if frame_idx >= store.n_frames or not store.valid[row, frame_idx]:
 			continue
-		cnt = store.contours[row][frame_idx]
+		cnt = store.contour_at(row, frame_idx)
 		cx, cy = store.centers[row, frame_idx]
 		color = colors[tid]
 		thick = 3 if tid in highlight_ids else 1
@@ -201,7 +201,7 @@ def export_event_samples(
 	for tid in event.involved_ids:
 		row = store.id_index(tid)
 		# pre
-		cnt = store.contours[row][event.pre_frame] if store.valid[row, event.pre_frame] else None
+		cnt = store.contour_at(row, event.pre_frame) if store.valid[row, event.pre_frame] else None
 		ctr = tuple(store.centers[row, event.pre_frame]) if store.valid[row, event.pre_frame] else (0, 0)
 		crop = _crop_rgb(pre_frame, cnt, ctr)
 		pre_name = f'pre_id_{tid}.png'
@@ -209,7 +209,7 @@ def export_event_samples(
 		pre_crops[str(tid)] = pre_name
 		features['pre'][str(tid)] = compute_marker_features(crop)
 		# post
-		cnt = store.contours[row][event.post_frame] if store.valid[row, event.post_frame] else None
+		cnt = store.contour_at(row, event.post_frame) if store.valid[row, event.post_frame] else None
 		ctr = tuple(store.centers[row, event.post_frame]) if store.valid[row, event.post_frame] else (0, 0)
 		crop = _crop_rgb(post_frame, cnt, ctr)
 		post_name = f'post_id_{tid}.png'
@@ -277,7 +277,7 @@ def detections_at_frame_after_markers(
 		row = store.id_index(tid)
 		if frame_idx < store.n_frames and store.valid[row, frame_idx]:
 			c = store.centers[row, frame_idx]
-			out[tid] = (True, (float(c[0]), float(c[1])), store.contours[row][frame_idx])
+			out[tid] = (True, (float(c[0]), float(c[1])), store.contour_at(row, frame_idx))
 		else:
 			out[tid] = (False, (0.0, 0.0), None)
 
@@ -394,7 +394,7 @@ def export_switch_samples(out_dir: str, marker: SwitchMarker, window: int = 5) -
 			('pre', pre_f, pre_img, pre_crops, 'pre'),
 			('post', post_f, post_img, post_crops, 'post'),
 		):
-			cnt = store.contours[row][f_idx] if store.valid[row, f_idx] else None
+			cnt = store.contour_at(row, f_idx) if store.valid[row, f_idx] else None
 			ctr = tuple(store.centers[row, f_idx]) if store.valid[row, f_idx] else (0, 0)
 			crop = _crop_rgb(img, cnt, ctr)
 			name = f'{tag}_id_{tid}.png'

@@ -42,7 +42,7 @@ class VideoCaptureCache:
         if self._cap is not None:
             self._cap.release()
             self._cap = None
-            self._path = None
+        self._path = None
 
     def read_at_video_index(self, v_idx: int) -> Optional[np.ndarray]:
         if self._cap is None:

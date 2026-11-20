@@ -252,9 +252,9 @@ class TrainDetectorTab(QWidget):
                 self.ed_out.setText(str(resource_filename("LabGym", "detectors")))
             except Exception:
                 pass
-        # Prefill base detector from project default when it looks like a detector path.
+        # Prefill from the project document; do not stat detector folders on swap.
         det = (p.defaults.detector_name or "").strip()
-        if det and Path(det).is_dir() and not self.ed_base.text().strip():
+        if det and not self.ed_base.text().strip():
             self.ed_base.setText(det)
 
     @staticmethod

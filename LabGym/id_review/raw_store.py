@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Iterable, Iterator, Union
+from typing import Any, Dict, Iterable, Iterator, Optional, Union
 
 from LabGym.annotator.core.tracklets_bridge import discover_tracklet_kinds
 
@@ -40,11 +40,16 @@ def save_raw_tracklets(directory: PathLike, stores: Dict[str, Any]) -> Path:
     return dest
 
 
-def load_kind_stores(directory: PathLike) -> Dict[str, Any]:
-    """Load every discovered ``*_tracklets.npz`` kind from *directory*.
+def load_kind_stores(
+    directory: PathLike,
+    animal_kinds: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """Load ``*_tracklets.npz`` kinds from *directory*.
 
     Args:
         directory: Folder that may contain remapped or raw tracklet files.
+        animal_kinds: If given, load only these kinds. Other kinds in the
+            package are not opened.
 
     Returns:
         Mapping of animal kind to ``TrackletStore``. Empty if none found.
@@ -52,13 +57,21 @@ def load_kind_stores(directory: PathLike) -> Dict[str, Any]:
     directory = Path(directory)
     if not directory.is_dir():
         return {}
-    kinds = discover_tracklet_kinds(directory)
+    kinds = list(animal_kinds) if animal_kinds is not None else discover_tracklet_kinds(directory)
     return {kind: load_tracklets(str(directory), kind) for kind in kinds}
 
 
-def load_raw_tracklets(directory: PathLike) -> Dict[str, Any]:
-    """Load raw tracklets from ``raw/``. Empty dict if none."""
-    return load_kind_stores(raw_dir(directory))
+def load_raw_tracklets(
+    directory: PathLike,
+    animal_kinds: Optional[Iterable[str]] = None,
+) -> Dict[str, Any]:
+    """Load raw tracklets from ``raw/``. Empty dict if none.
+
+    Args:
+        directory: Identity package directory (not the ``raw/`` folder).
+        animal_kinds: If given, load only these kinds.
+    """
+    return load_kind_stores(raw_dir(directory), animal_kinds=animal_kinds)
 
 
 def has_raw_snapshot(directory: PathLike) -> bool:

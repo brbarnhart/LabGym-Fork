@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 from PySide6.QtCore import Qt, QTimer, QSettings
@@ -28,6 +28,7 @@ from LabGym.annotator.core.data_models import AnnotationSession
 from LabGym.annotator.core.tracklets_bridge import (
     LoadedTracklets,
     apply_subjects_to_session,
+    infer_analysis_start_frame,
     load_tracklets_for_annotator,
     overlays_at_video_frame,
     try_autoload_id_review,
@@ -61,7 +62,10 @@ class MainWindow(QMainWindow):
         self.bout_list_dialog: Optional["BoutListWidget"] = None
         self._bout_list_window: Optional[QDialog] = None
         self._loaded_tracklets: Optional[LoadedTracklets] = None
+        self._ethogram_path: Optional[str] = None
         self._show_track_overlays = True
+        self._pending_preview = None
+        self._pending_video_path = ""
         # Workbench sets this so File → Open uses the project identity gate.
         # Signature: handler(path) -> True if the video was handled (loaded or
         # refused); False to fall through to the standalone loader.
@@ -339,7 +343,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Selected: {name}  (press hotkey or double-click to toggle bout)")
 
     def _toggle_bout_for_behavior(self, name: str):
-        if not self.manager or not self.video.is_loaded:
+        if not self.manager:
             return
         try:
             partners = []
@@ -377,14 +381,26 @@ class MainWindow(QMainWindow):
         )
 
     def _refresh_display_overlay(self):
-        if not self.manager or not self.video.is_loaded:
+        if not self.manager:
+            if self._pending_preview is not None and self._current_frame == 0:
+                self.video_widget.show_frame(
+                    self._pending_preview,
+                    track_overlays=self._current_track_overlays(),
+                )
+            return
+        if not self.video.is_loaded and not (
+            self._pending_preview is not None and self._current_frame == 0
+        ):
             return
         open_names = self.manager.get_open_behaviors_at_frame(self._current_frame)
         annotated = self.manager.get_annotated_behaviors_at_frame(self._current_frame)
         if self.palette:
             self.palette.update_active_indicators(open_names, annotated)
         try:
-            frame = self.video.get_frame(self._current_frame)
+            if self.video.is_loaded:
+                frame = self.video.get_frame(self._current_frame)
+            else:
+                frame = self._pending_preview
             self.video_widget.show_frame(
                 frame,
                 open_behaviors=open_names,
@@ -478,6 +494,214 @@ class MainWindow(QMainWindow):
         if hasattr(self, "timeline"):
             self.timeline._adjust_height_for_subjects()
         self._refresh_display_overlay()
+
+    def apply_loaded_tracklets(self, loaded: LoadedTracklets) -> None:
+        """Apply packed remapped tracklets (all overlay kinds) already in RAM."""
+        self._apply_tracklets(loaded)
+        self._sync_analysis_start_from_video()
+        if self.manager:
+            self.manager.mark_saved()
+
+    def begin_session_from_metadata(
+        self,
+        *,
+        video_path: str,
+        n_frames: Optional[int] = None,
+        fps: Optional[float] = None,
+        subjects: Optional[Sequence[Any]] = None,
+        annotations_path: Optional[str] = None,
+        annotations_data: Optional[dict] = None,
+        behavior_mode: Optional[int] = None,
+        exclusive_mode: Optional[bool] = None,
+        tracklets_placeholder: Optional[LoadedTracklets] = None,
+    ) -> None:
+        """Unlock subjects, n_frames, and ethogram before pixels and outlines.
+
+        Does not open ``VideoHandler`` (not thread-safe).
+        """
+        total = int(n_frames) if n_frames and int(n_frames) > 0 else None
+        fps_v = float(fps) if fps else None
+        path = str(video_path or "")
+        self._is_playing = False
+        self._playback_timer.stop()
+        self._current_frame = 0
+        self._loaded_tracklets = None
+        self._ethogram_path = None
+        self._pending_preview = None
+        self._pending_video_path = path
+        self.video_widget.clear()
+
+        applied_sidecar = False
+        if annotations_data is not None:
+            try:
+                sess = AnnotationSession.from_dict(annotations_data)
+                self._bind_annotation_manager(AnnotationManager(sess), load_tracks=False)
+                applied_sidecar = True
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                QMessageBox.warning(
+                    self,
+                    "Annotations",
+                    f"Found annotations but failed to load:\n"
+                    f"{annotations_path or ''}\n\n{exc}\n\n"
+                    "Starting with a fresh annotation session instead.",
+                )
+        elif annotations_path and Path(str(annotations_path)).is_file():
+            try:
+                self._apply_loaded_annotations(
+                    annotations_path, warn_mismatch=False, load_tracks=False
+                )
+                applied_sidecar = True
+            except (OSError, ValueError, TypeError, KeyError) as exc:
+                QMessageBox.warning(
+                    self,
+                    "Annotations",
+                    f"Found annotations but failed to load:\n{annotations_path}\n\n"
+                    f"{exc}\n\nStarting with a fresh annotation session instead.",
+                )
+
+        if applied_sidecar and self.manager:
+            self.manager.session.video_path = path or self.manager.session.video_path
+        elif total is not None:
+            self._init_or_reset_manager(path, fps_v or 10.0, total)
+
+        if self.manager:
+            if behavior_mode is not None:
+                self.manager.session.behavior_mode = int(behavior_mode)
+            if exclusive_mode is not None:
+                self.manager.set_exclusive_mode(bool(exclusive_mode))
+            if (
+                not applied_sidecar
+                and tracklets_placeholder is not None
+                and tracklets_placeholder.subjects
+            ):
+                apply_subjects_to_session(self.manager.session, tracklets_placeholder)
+                self._loaded_tracklets = tracklets_placeholder
+                self.manager._ensure_active_maps()
+            if self.subject_panel:
+                self.subject_panel.set_manager(self.manager)
+            if hasattr(self, "timeline"):
+                self.timeline._adjust_height_for_subjects()
+                self.timeline.set_current_frame(0)
+                self.timeline.clear_selections()
+                self.timeline.set_selection_mode(False)
+                self._sync_selection_mode_ui(False)
+            info_n = int(self.manager.session.total_frames or 0)
+            info_fps = float(self.manager.session.fps or fps_v or 10.0)
+            if info_n > 0:
+                self.controls.set_video_info(info_n, info_fps)
+            self.controls.update_position(0)
+            if annotations_path:
+                self._ethogram_path = str(annotations_path)
+            elif path:
+                self._ethogram_path = str(self.sidecar_annotations_path(path))
+            self.manager.mark_saved()
+            self._update_undo_action()
+            if self.bout_list_dialog is not None:
+                self.bout_list_dialog.set_manager(self.manager)
+                self.bout_list_dialog.set_current_frame(self._current_frame, scroll=True)
+            self.statusBar().showMessage(
+                f"Session ready ({self.manager.session.total_frames} frames) "
+                "— loading video and outlines…"
+            )
+
+    def show_session_preview(self, frame: Any) -> None:
+        """Show an off-thread frame-0 RGB preview without opening VideoHandler."""
+        self._pending_preview = frame
+        if self._current_frame != 0 or self.video.is_loaded:
+            return
+        if self.manager:
+            self._refresh_display_overlay()
+            return
+        self.video_widget.show_frame(frame, track_overlays=self._current_track_overlays())
+
+    def ensure_live_video(self) -> Optional[str]:
+        """Open VideoHandler on this thread if needed (Play/seek).
+
+        Returns:
+            An error message, or None when the live decoder is ready.
+        """
+        if self.video.is_loaded:
+            return None
+        path = str(self._pending_video_path or "")
+        if not path and self.manager:
+            path = str(self.manager.session.video_path or "")
+        err = self.open_session_video(path)
+        if err is None:
+            self._pending_preview = None
+            self._sync_analysis_start_from_video()
+        return err
+
+    def _sync_analysis_start_from_video(self) -> None:
+        loaded = self._loaded_tracklets
+        if loaded is None or not self.video.is_loaded:
+            return
+        first = next(iter(loaded.stores.values()), None)
+        if first is None:
+            return
+        loaded.analysis_start_frame = infer_analysis_start_frame(
+            first.meta or {},
+            first.n_frames,
+            video_total_frames=self.video.total_frames,
+        )
+        if self.manager is not None:
+            self.manager.session.tracks_ref = loaded.tracks_ref()
+
+    def open_session_video(self, path: str) -> Optional[str]:
+        """Open the live decoder. Playback uses this VideoHandler.
+
+        Args:
+            path: Video file to open.
+
+        Returns:
+            An error message when the decoder cannot open; otherwise None.
+        """
+        path = str(path or "")
+        if not path or not Path(path).is_file():
+            return f"video unavailable: {path or '(none)'}"
+        try:
+            meta = self.video.load(path)
+        except (FileNotFoundError, RuntimeError, OSError, ValueError) as exc:
+            return str(exc)
+        self._pending_video_path = path
+        self._current_frame = 0
+        self._target_fps = meta.fps
+        self.controls.set_video_info(meta.total_frames, meta.fps)
+        if self.manager is None:
+            self._init_or_reset_manager(path, meta.fps, meta.total_frames)
+            if self.manager:
+                self.manager.mark_saved()
+        else:
+            self.manager.session.video_path = path
+            session_n = int(self.manager.session.total_frames or 0)
+            if session_n <= 1:
+                self.manager.session.total_frames = meta.total_frames
+                self.manager.session.fps = meta.fps
+            elif (
+                session_n != meta.total_frames
+                or abs(float(self.manager.session.fps) - float(meta.fps)) > 0.1
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Warning",
+                    "Annotation file fps/total_frames differ from loaded video. Loading anyway.",
+                )
+        self.controls.update_position(0)
+        if hasattr(self, "timeline"):
+            self.timeline.set_current_frame(0)
+        self._sync_analysis_start_from_video()
+        self._refresh_display_overlay()
+        if not self.video.is_loaded:
+            return f"video unavailable: {path}"
+        self.setWindowTitle(f"LabGym Behavior Annotator — {Path(path).name}")
+        return None
+
+    def show_canvas_error(self, message: str) -> None:
+        """Show a session-load error on the canvas; keep session metadata."""
+        text = str(message or "Session load failed")
+        if self._pending_preview is None:
+            self.video_widget.clear()
+            self.video_widget.setText(text)
+        self.statusBar().showMessage(text)
 
     def _sync_bout_list_frame(self) -> None:
         """Keep the Edit Bouts window highlight in sync with the current video frame."""
@@ -625,6 +849,12 @@ class MainWindow(QMainWindow):
                 f"{meta.fps:.2f} fps{ann_note}{tracks_msg}"
             )
             self.setWindowTitle(f"LabGym Behavior Annotator — {Path(path).name}")
+            if auto_loaded and ann_path is not None:
+                self._ethogram_path = str(ann_path)
+            else:
+                self._ethogram_path = str(self.sidecar_annotations_path(path))
+            if self.manager is not None:
+                self.manager.mark_saved()
             self._update_undo_action()
             if self.bout_list_dialog is not None:
                 self.bout_list_dialog.set_manager(self.manager)
@@ -662,7 +892,7 @@ class MainWindow(QMainWindow):
     # --- Annotation save/load ---
 
     def save_annotations(self):
-        if not self.manager or not self.video.is_loaded:
+        if not self.manager:
             QMessageBox.information(self, "Save", "No video or annotations loaded.")
             return
         default = str(self.sidecar_annotations_path(self.manager.session.video_path))
@@ -673,14 +903,29 @@ class MainWindow(QMainWindow):
             # Finalize any open bouts at the last viewed frame before saving
             self.manager.close_all_open_bouts(self._current_frame)
             self.manager.save_to_json(path)
+            self._ethogram_path = str(path)
             # Refresh UI in case indicators changed
             self._refresh_display_overlay()
             self.statusBar().showMessage(f"Saved: {path}")
         except Exception as e:
             QMessageBox.critical(self, "Save Error", str(e))
 
-    def _apply_loaded_annotations(self, path: str | Path, *, warn_mismatch: bool = True) -> None:
-        """Load annotations from JSON and rebuild the palette / UI bindings."""
+    def _apply_loaded_annotations(
+        self,
+        path: str | Path,
+        *,
+        warn_mismatch: bool = True,
+        load_tracks: bool = True,
+    ) -> None:
+        """Load annotations from JSON and rebuild the palette / UI bindings.
+
+        Args:
+            path: Ethogram JSON path.
+            warn_mismatch: When True, warn if fps/frame count differ from the
+                open video.
+            load_tracks: When False, skip ``tracks_ref`` npz autoload (session
+                load applies packed arrays separately).
+        """
         new_mgr = AnnotationManager.load_from_json(path)
         # Basic sanity: fps / frame count should roughly match the open video
         if self.video.is_loaded and warn_mismatch:
@@ -693,8 +938,13 @@ class MainWindow(QMainWindow):
                     "Warning",
                     "Annotation file fps/total_frames differ from loaded video. Loading anyway.",
                 )
+        self._bind_annotation_manager(new_mgr, load_tracks=load_tracks)
+
+    def _bind_annotation_manager(
+        self, new_mgr: AnnotationManager, *, load_tracks: bool = True
+    ) -> None:
+        """Wire palette / subjects / optional tracks_ref for an AnnotationManager."""
         self.manager = new_mgr
-        # Rebuild palette
         for i in reversed(range(self.palette_container.layout().count())):
             w = self.palette_container.layout().itemAt(i).widget()
             if w:
@@ -707,9 +957,8 @@ class MainWindow(QMainWindow):
         self.palette.sync_from_manager()
         if self.subject_panel:
             self.subject_panel.set_manager(self.manager)
-        # Reload tracklets from tracks_ref if present
         tr = self.manager.session.tracks_ref
-        if tr and tr.path:
+        if load_tracks and tr and tr.path:
             try:
                 meta_parent = Path(tr.meta_path or tr.path).parent
                 self._loaded_tracklets = load_tracklets_for_annotator(
@@ -719,7 +968,7 @@ class MainWindow(QMainWindow):
                         self.video.total_frames if self.video.is_loaded else None
                     ),
                 )
-            except Exception:
+            except (OSError, ValueError, FileNotFoundError):
                 self._loaded_tracklets = None
         self._on_behaviors_changed()
         self._rebind_behavior_hotkeys()
@@ -1085,7 +1334,11 @@ class MainWindow(QMainWindow):
 
     def toggle_play(self):
         if not self.video.is_loaded:
-            return
+            err = self.ensure_live_video()
+            if err or not self.video.is_loaded:
+                if err:
+                    self.show_canvas_error(err)
+                return
 
         self._is_playing = not self._is_playing
         self.controls.set_playing(self._is_playing)
@@ -1115,7 +1368,11 @@ class MainWindow(QMainWindow):
 
     def seek_to(self, frame: int):
         if not self.video.is_loaded:
-            return
+            err = self.ensure_live_video()
+            if err or not self.video.is_loaded:
+                if err:
+                    self.show_canvas_error(err)
+                return
 
         frame = max(0, min(frame, self.video.total_frames - 1))
         was_playing = self._is_playing
@@ -1136,10 +1393,7 @@ class MainWindow(QMainWindow):
             self.controls.set_playing(True)
 
     def step_frame(self, delta: int):
-        if not self.video.is_loaded:
-            return
-        new_f = max(0, min(self._current_frame + delta, self.video.total_frames - 1))
-        self.seek_to(new_f)
+        self.seek_to(self._current_frame + int(delta))
 
     def set_speed(self, speed: float):
         self._playback_speed = max(0.1, float(speed))
@@ -1171,6 +1425,91 @@ class MainWindow(QMainWindow):
             self._sync_bout_list_frame()
         except Exception as e:
             self.statusBar().showMessage(f"Frame error: {e}")
+
+    def has_unsaved_ethogram(self) -> bool:
+        """True when the loaded ethogram differs from the last save/load."""
+        if self.manager is None:
+            return False
+        return self.manager.has_unsaved_changes()
+
+    def save_ethogram(self) -> bool:
+        """Write the ethogram to the last or sidecar path without a file dialog.
+
+        Returns:
+            True if there was nothing to save or the file was written.
+        """
+        if self.manager is None:
+            return True
+        if not self.manager.has_unsaved_changes():
+            return True
+        path = self._ethogram_path
+        if not path and self.manager.session.video_path:
+            path = str(self.sidecar_annotations_path(self.manager.session.video_path))
+        if not path:
+            QMessageBox.critical(
+                self,
+                "Save Error",
+                "No sidecar or last-save path for this ethogram.",
+            )
+            return False
+        try:
+            self.manager.close_all_open_bouts(self._current_frame)
+            self.manager.save_to_json(path)
+            self._ethogram_path = str(path)
+            self._refresh_display_overlay()
+            self.statusBar().showMessage(f"Saved: {path}")
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", str(e))
+            return False
+
+    def discard_unsaved_ethogram(self) -> None:
+        """Revert in-memory ethogram edits; do not write."""
+        if self.manager is None:
+            return
+        self.manager.discard_unsaved_changes()
+        if self.palette:
+            self.palette.sync_from_manager()
+            self.palette.refresh()
+        if self.subject_panel:
+            self.subject_panel.set_manager(self.manager)
+        self._refresh_display_overlay()
+        self._update_undo_action()
+
+    def drop_session(self) -> None:
+        """Release video capture and tracklet arrays; clear the viewer."""
+        self._is_playing = False
+        self._playback_timer.stop()
+        self.video.release()
+        self._pending_preview = None
+        self._pending_video_path = ""
+        self._loaded_tracklets = None
+        self.manager = None
+        self._ethogram_path = None
+        self._current_frame = 0
+        if hasattr(self, "palette_container"):
+            layout = self.palette_container.layout()
+            if layout is not None:
+                for i in reversed(range(layout.count())):
+                    w = layout.itemAt(i).widget()
+                    if w:
+                        w.setParent(None)
+        self.palette = None
+        if self.subject_panel:
+            self.subject_panel.set_manager(None)
+        if self.bout_list_dialog is not None:
+            self.bout_list_dialog.set_manager(None)
+        if self._bout_list_window is not None:
+            self._bout_list_window.close()
+        if hasattr(self, "video_widget"):
+            self.video_widget.clear()
+        if hasattr(self, "timeline"):
+            self.timeline.clear_selections()
+            self.timeline.update()
+        self._rebind_behavior_hotkeys()
+        self._update_undo_action()
+        self.setWindowTitle("LabGym Behavior Annotator")
+        self.statusBar().showMessage("Session dropped.")
 
     # --- Cleanup ---
 

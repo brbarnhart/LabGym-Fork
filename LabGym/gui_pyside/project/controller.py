@@ -26,7 +26,8 @@ class ProjectController(QObject):
     -------
     project_replaced
         Whole project object replaced (new / open / edit dialog OK). Heavy UI
-        refresh (video tables, tracklet discovery) should listen **only** here.
+        refresh (video tables) should listen **only** here. Must not invoke
+        video disk-status probes; tabs probe on first show or explicit refresh.
     changed
         Lightweight updates (dirty flag, title/status, parameter tweaks). Do
         **not** rebuild video tables or re-scan the filesystem here.

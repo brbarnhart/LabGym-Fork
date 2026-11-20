@@ -105,7 +105,7 @@ def fill_geometry_from_stores(analyzer: Any, stores: Dict[str, Any]) -> None:
                     center = (float(c[0]), float(c[1]))
                     analyzer.animal_centers[kind][tid][f] = center
                     last = center
-                    cnt = store.contours[row][f]
+                    cnt = store.contour_at(row, f)
                     analyzer.animal_contours[kind][tid][f] = cnt
                     h = store.heights[row, f]
                     analyzer.animal_heights[kind][tid][f] = (

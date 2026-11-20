@@ -197,3 +197,21 @@ _Avoid_: missing kind, absent kind (ambiguous)
 **Missing kind**:
 An animal kind someone asked to analyze that is not in that video’s accepted remapped tracklets at all.
 _Avoid_: empty kind, absent kind (ambiguous)
+
+## Workbench project
+
+**Project**:
+An experiment shared across workbenches: a named root, a video list, path roots, and analysis defaults. It points at videos, identity packages, example stores, and models; it is not those artifacts themselves.
+_Avoid_: dataset (ambiguous with example store), experiment folder (ok casually), workspace
+
+**Project swap**:
+Substituting the open project for another (open, open recent, or applying Edit Project). The new project’s names and defaults are known immediately; per-video on-disk status is not.
+_Avoid_: load (alone), session load, reload, refresh
+
+**Session load**:
+Opening one video and its identity package into Review IDs or Annotate ethogram so frames, outlines, and identities can be inspected. Distinct from a project swap.
+_Avoid_: load project, open video (when the identity package is also in play), autoload
+
+**Status unknown**:
+Per-video list state meaning whether tracklets or accepted identities exist on disk has not been resolved yet. It is not pending work and not done.
+_Avoid_: pending, checking (ok in UI copy), loading (ambiguous with session load)

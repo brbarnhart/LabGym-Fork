@@ -231,6 +231,8 @@ class BoutListWidget(QWidget):
         self.refresh()
 
     def _behavior_names(self) -> List[str]:
+        if self.manager is None:
+            return []
         return [b.name for b in self.manager.session.behaviors]
 
     def _rebuild_filter_combo(self) -> None:
@@ -262,6 +264,8 @@ class BoutListWidget(QWidget):
 
     def _collect_bouts(self) -> List[Tuple[str, int, Bout]]:
         """Gather (behavior_name, index_in_behavior, bout), optionally filtered."""
+        if self.manager is None:
+            return []
         all_bouts: List[Tuple[str, int, Bout]] = []
         for beh in self.manager.session.behaviors:
             name = beh.name
@@ -283,6 +287,8 @@ class BoutListWidget(QWidget):
             # During continuous playback (Δ=1) keep the list stable; jump on seeks
             scroll = abs(frame - prev) > 1
         self._current_frame = frame
+        if self.manager is None:
+            return
         self._apply_active_highlights(scroll_to_active=scroll)
 
     def _active_row_indices(self) -> List[int]:
@@ -296,6 +302,8 @@ class BoutListWidget(QWidget):
 
     def _open_at_frame(self) -> List[Tuple[str, int]]:
         """(behavior_name, start_frame) for live open bouts covering current frame."""
+        if self.manager is None:
+            return []
         result: List[Tuple[str, int]] = []
         opens = self.manager.get_open_starts()
         for name, start in opens.items():
@@ -424,6 +432,10 @@ class BoutListWidget(QWidget):
         preserve_view: keep scroll position (and nearby selection) after rebuild so
         delete/type-change edits in the middle of a long list don't jump to the top.
         """
+        if self.manager is None:
+            self.table.setRowCount(0)
+            self._row_meta = []
+            return
         # Keep filter options in sync with behaviors
         current_data = self.filter_combo.currentData() if self.filter_combo.count() else None
         names = self._behavior_names()
@@ -956,8 +968,12 @@ class BoutListWidget(QWidget):
         start = int(item.text())
         self.jump_requested.emit(start)
 
-    def set_manager(self, manager: AnnotationManager):
+    def set_manager(self, manager: Optional[AnnotationManager]) -> None:
         self.manager = manager
         self._filter_behavior = None
+        if manager is None:
+            self.table.setRowCount(0)
+            self._row_meta = []
+            return
         self._rebuild_filter_combo()
         self.refresh()

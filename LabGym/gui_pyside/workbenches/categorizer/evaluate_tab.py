@@ -413,7 +413,7 @@ class EvaluateTab(QWidget):
             self.ed_model.setText(name)
         try:
             ex = p.resolve_path(p.paths.examples_root or "examples")
-            if not self.ed_gt.text().strip() and Path(ex).is_dir():
+            if not self.ed_gt.text().strip():
                 self.ed_gt.setText(str(ex))
         except Exception as exc:
             self.log.append(f"Could not resolve project examples path: {exc}")

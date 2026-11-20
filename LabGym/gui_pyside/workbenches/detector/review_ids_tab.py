@@ -22,13 +22,9 @@ from PySide6.QtWidgets import (
 )
 
 from LabGym.gui_pyside.project.controller import ProjectController
+from LabGym.gui_pyside.project.video_disk_status import VideoDiskStatusMixin
 from LabGym.gui_pyside.widgets.path_browse import (
-    browse_existing_directory,
     set_line_edit_directory,
-)
-from LabGym.gui_pyside.project.paths import (
-    discover_tracklets_dir,
-    list_project_video_choices,
 )
 from LabGym.gui_pyside.workbenches.detector.hard_case_extract_dialog import (
     HardCaseExtractDialog,
@@ -45,12 +41,12 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_hard_cases import (
 from LabGym.gui_pyside.workbenches.detector.review_ids_markers import MarkersTable
 from LabGym.gui_pyside.workbenches.detector.review_ids_package import (
     DownstreamArtifactCheck,
+    ReviewPackageMetadata,
     check_downstream_artifacts,
     should_confirm_stale_downstream,
     video_path_for_review_package,
     clone_markers,
     events_for_kind,
-    load_review_package,
     resolve_video_path,
     save_review_package,
 )
@@ -61,15 +57,14 @@ from LabGym.gui_pyside.workbenches.detector.review_ids_render import (
     format_frame_status,
     read_preview_frame,
 )
+from LabGym.gui_pyside.workbenches.detector.review_ids_session_ui import (
+    ReviewIdsSessionMixin,
+)
 from LabGym.gui_pyside.workbenches.detector.risk_timeline import RiskTimeline
 from LabGym.gui_pyside.workbenches.detector.subjects_table import SubjectsTable
 from LabGym.id_review.dataset import make_swap_marker
 from LabGym.id_review.types import ContactEvent, SwitchMarker
-from LabGym.identity.package import (
-    migrate_uncorrected_public_to_raw,
-    needs_uncorrected_raw_migrate,
-    switch_edits_allowed,
-)
+from LabGym.identity.package import switch_edits_allowed
 
 
 class _HardCaseExtractWorker(QObject):
@@ -121,11 +116,12 @@ class _HardCaseExtractWorker(QObject):
             self.error.emit(str(exc))
 
 
-class ReviewIdsTab(QWidget):
+class ReviewIdsTab(ReviewIdsSessionMixin, VideoDiskStatusMixin, QWidget):
     """Full-video ID review + subject names/roles for an identity package folder."""
 
     request_edit_project = Signal()
     package_saved = Signal(str)  # review_dir
+    session_load_finished = Signal(bool)
 
     def __init__(self, project: ProjectController, parent=None):
         super().__init__(parent)
@@ -134,9 +130,11 @@ class ReviewIdsTab(QWidget):
         self.review_dir: str = ""
         self.events: List[ContactEvent] = []
         self.markers: List[SwitchMarker] = []
+        self._saved_markers: List[SwitchMarker] = []
         self._undo_stack: List[List[SwitchMarker]] = []
         self._stores: Dict[str, object] = {}
         self._baseline_stores: Dict[str, object] = {}
+        self._stores_cloned = False
         self._cap = VideoCaptureCache()
         self._playing = False
         self._updating = False
@@ -156,6 +154,15 @@ class ReviewIdsTab(QWidget):
         self._extract_worker: Optional[_HardCaseExtractWorker] = None
         self._progress_dlg: Optional[HardCaseProgressDialog] = None
         self._hard_extract_dlg: Optional[HardCaseExtractDialog] = None
+        self._video_names: Dict[str, str] = {}
+        self._init_video_disk_status()
+        self._session_thread: Optional[ReviewSessionLoadThread] = None
+        self._session_gen = 0
+        self._pending_bgr = None
+        self._session_canvas_error = ""
+        self._session_store_meta: dict = {}
+        self._session_video_path = ""
+        self._session_meta: Optional[ReviewPackageMetadata] = None
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._on_play_tick)
@@ -163,7 +170,7 @@ class ReviewIdsTab(QWidget):
         self._build_ui()
         self._bind_shortcuts()
         # Tracklet discovery per video is expensive — only on replace/open/edit.
-        self.project.project_replaced.connect(self.refresh_video_list)
+        self.project.project_replaced.connect(self._on_project_replaced)
         self.project.project_replaced.connect(self._prefills_hard_case_out)
         self.refresh_video_list()
         self._prefills_hard_case_out()
@@ -186,6 +193,12 @@ class ReviewIdsTab(QWidget):
         self.combo_video = QComboBox()
         self.combo_video.currentIndexChanged.connect(self._on_video_combo)
         pick.addWidget(self.combo_video, 1)
+        self.lbl_probe = QLabel("")
+        self.lbl_probe.setToolTip(
+            "Per-video disk check after Open. Combo items stay status unknown "
+            "(… ) until each probe finishes — never a fake ✓."
+        )
+        pick.addWidget(self.lbl_probe)
         self.btn_open_pkg = QPushButton("Open package folder…")
         self.btn_open_pkg.setToolTip("Open an id_review / tracklets directory directly")
         self.btn_open_pkg.clicked.connect(self._browse_package)
@@ -193,6 +206,13 @@ class ReviewIdsTab(QWidget):
         self.btn_load = QPushButton("Load")
         self.btn_load.clicked.connect(self._load_selected_video_package)
         pick.addWidget(self.btn_load)
+        self.btn_cancel_load = QPushButton("Cancel")
+        self.btn_cancel_load.setEnabled(False)
+        self.btn_cancel_load.setToolTip(
+            "Abort the in-flight session load. Choosing another video also replaces it."
+        )
+        self.btn_cancel_load.clicked.connect(lambda: self._cancel_session_load())
+        pick.addWidget(self.btn_cancel_load)
         self.btn_edit = QPushButton("Edit project…")
         self.btn_edit.clicked.connect(self.request_edit_project.emit)
         pick.addWidget(self.btn_edit)
@@ -383,144 +403,13 @@ class ReviewIdsTab(QWidget):
 
     # --- package load ---
 
-    def refresh_video_list(self) -> None:
-        # Preserve the selected video across rebuilds.
-        current = self.combo_video.currentData()
-        self.combo_video.blockSignals(True)
-        self.combo_video.clear()
-        self.combo_video.addItem("(open package folder…)", "")
-        for label, resolved in list_project_video_choices(self.project.project):
-            tracks = discover_tracklets_dir(self.project.project, resolved)
-            flag = "✓" if tracks else "·"
-            self.combo_video.addItem(f"{flag}  {label}", str(resolved))
-        if current:
-            for i in range(self.combo_video.count()):
-                if self.combo_video.itemData(i) == current:
-                    self.combo_video.setCurrentIndex(i)
-                    break
-        self.combo_video.blockSignals(False)
+    def showEvent(self, event) -> None:  # noqa: N802 — Qt
+        super().showEvent(event)
+        self._maybe_start_status_probes()
 
-    def _on_video_combo(self, _i: int) -> None:
-        pass
-
-    def _browse_package(self) -> None:
-        start = self.review_dir or self.project.project.root_dir or ""
-        d = browse_existing_directory(
-            self, start, "Select id_review / tracklets folder"
-        )
-        if d:
-            self._package_video_path = ""
-            self.load_package(d)
-
-    def _load_selected_video_package(self) -> None:
-        path = self.combo_video.currentData()
-        if not path:
-            self._browse_package()
-            return
-        tracks = discover_tracklets_dir(self.project.project, str(path))
-        if not tracks:
-            QMessageBox.warning(
-                self,
-                "Review IDs",
-                "No tracklets / id_review folder found for this video.\n"
-                "Run Detect + track first, or Open package folder…\n\n"
-                f"Video:\n{path}",
-            )
-            return
-        self.project.set_current_video(str(path), dirty=True)
-        self._package_video_path = str(path)
-        from LabGym.gui_pyside.project.paths import find_video_entry
-
-        entry = find_video_entry(self.project.project, str(path))
-        if entry is not None:
-            try:
-                rel = (
-                    str(
-                        Path(tracks)
-                        .resolve()
-                        .relative_to(Path(self.project.project.root_dir).resolve())
-                    )
-                    if self.project.project.root_dir
-                    else tracks
-                )
-            except (ValueError, OSError):
-                rel = tracks
-            if entry.detection_dir != rel:
-                entry.detection_dir = rel
-                self.project.mark_dirty()
-        self.load_package(tracks)
-
-    def load_package(self, review_dir: str) -> bool:
-        """Open an identity package for preview and switch-marker edits.
-
-        Offers migrate-to-raw when an uncorrected public pack has no raw
-        snapshot. Declining leaves files unchanged and keeps switch edits
-        locked.
-
-        Args:
-            review_dir: Path to the ``id_review`` package directory.
-
-        Returns:
-            True if the package loaded; False if load failed after a warning.
-        """
-        self._release_cap()
-        if needs_uncorrected_raw_migrate(review_dir):
-            reply = QMessageBox.question(
-                self,
-                "Move tracklets into raw?",
-                "This package has public tracklets but no raw snapshot. "
-                "That can mean the data is in a bad state.\n\n"
-                "Move the public tracklets into raw so switch edits can be "
-                "rebuilt later? Declining leaves the files unchanged and "
-                "keeps switch edits locked.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                migrate_uncorrected_public_to_raw(review_dir)
-        try:
-            pkg = load_review_package(review_dir)
-        except (FileNotFoundError, ValueError) as exc:
-            QMessageBox.warning(self, "Review IDs", str(exc))
-            self.setEnabled_controls(False)
-            return False
-
-        self.review_dir = pkg.review_dir
-        self.events = pkg.events
-        self.markers = pkg.markers
-        self._undo_stack.clear()
-        self._stores = pkg.stores
-        self._baseline_stores = pkg.baseline_stores
-        self._already_corrected = pkg.already_corrected
-        self._has_raw = bool(pkg.has_raw)
-        self.animal_kind = pkg.animal_kind
-        self.n_frames = pkg.n_frames
-        store = self._stores[self.animal_kind]
-        self.involved_ids = list(store.ids)
-        self.fps = pkg.fps
-        self.frame = 0
-        self._dirty = False
-        self._training_ranges = []
-        self._range_start = None
-        self._refresh_range_list()
-        self._prefills_hard_case_out()
-
-        self.kind_combo.blockSignals(True)
-        self.kind_combo.clear()
-        self.kind_combo.addItems(sorted(self._stores.keys()))
-        self.kind_combo.setCurrentText(self.animal_kind)
-        self.kind_combo.blockSignals(False)
-        self._refresh_id_combos()
-
-        self.subjects_table.set_subjects(pkg.subjects)
-        self.slider.setMaximum(max(0, self.n_frames - 1))
-        self.setEnabled_controls(True)
-        self._set_switch_edits_enabled(switch_edits_allowed(self.review_dir))
-        self._set_package_label(accepted=pkg.accepted, has_raw=self._has_raw)
-        self._seek(0)
-        self._refresh_marker_list()
-        self._update_undo_button()
-        return True
+    def hideEvent(self, event) -> None:  # noqa: N802 — Qt
+        self._cancel_status_probes()
+        super().hideEvent(event)
 
     def _set_switch_edits_enabled(self, on: bool) -> None:
         for w in (self.btn_mark, self.btn_remove, self.btn_del, self.btn_undo):
@@ -537,7 +426,7 @@ class ReviewIdsTab(QWidget):
 
     def _refresh_id_combos(self) -> None:
         store = self._stores.get(self.animal_kind)
-        ids = list(store.ids) if store else []
+        ids = list(store.ids) if store else list(self.involved_ids)
         self.id_a.blockSignals(True)
         self.id_b.blockSignals(True)
         self.id_a.clear()
@@ -566,14 +455,14 @@ class ReviewIdsTab(QWidget):
 
     def _video_meta(self):
         store = self._primary_store()
-        meta = dict(store.meta) if store else {}
+        meta = dict(store.meta) if store else dict(self._session_store_meta)
         if self.events and self.events[0].video:
             meta.setdefault("video", self.events[0].video)
-        video = resolve_video_path(
+        video = self._session_video_path or resolve_video_path(
             self.review_dir,
             meta,
             self.events,
-            self.project.current_video_path(),
+            self._package_video_path or self.project.current_video_path(),
         )
         fps = float(meta.get("fps") or self.fps or 10)
         return video, meta, fps
@@ -630,18 +519,55 @@ class ReviewIdsTab(QWidget):
         t = self.frame / fps if fps else 0.0
         store = self._primary_store()
 
-        frame, v_idx, err = read_preview_frame(
-            self._cap,
-            video_path=str(video) if video else "",
-            store_meta=meta,
-            analysis_frame=self.frame,
-            fps=fps,
-        )
-        if frame is None:
-            self.status.setText(
-                f"Frame {self.frame}/{self.n_frames - 1}  t={t:.2f}s  |  {err or 'no video'}"
+        frame = None
+        v_idx = None
+        err = None
+        load_in_flight = self._session_thread is not None
+        if (
+            self._pending_bgr is not None
+            and self.frame == 0
+            and self._cap.path is None
+        ):
+            frame = self._pending_bgr
+            v_idx = 0
+        elif (
+            load_in_flight
+            and self._cap.path is None
+            and not getattr(self._session_thread, "_skip_video", False)
+        ):
+            err = self._session_canvas_error or "loading video…"
+        elif video:
+            frame, v_idx, err = read_preview_frame(
+                self._cap,
+                video_path=str(video) if video else "",
+                store_meta=meta,
+                analysis_frame=self.frame,
+                fps=fps,
             )
-            self.video_label.setText("(no video)")
+        else:
+            err = self._session_canvas_error or "no video"
+        if frame is None:
+            note = err or self._session_canvas_error or "no video"
+            self.status.setText(
+                f"Frame {self.frame}/{self.n_frames - 1}  t={t:.2f}s  |  {note}"
+            )
+            self.video_label.setText(note if note else "(no video)")
+            return
+
+        if store is None:
+            self.status.setText(
+                format_frame_status(
+                    analysis_frame=self.frame,
+                    n_frames=self.n_frames,
+                    t_sec=t,
+                    video_idx=v_idx,
+                    n_markers=len(self.markers),
+                    in_risk=False,
+                    n_preview_markers=0,
+                )
+                + "  |  loading outlines…"
+            )
+            self.video_label.setPixmap(bgr_to_qpixmap(frame))
             return
 
         frame, n_prev = compose_preview_frame(
@@ -1006,6 +932,7 @@ class ReviewIdsTab(QWidget):
         self._dirty = True
 
     def _apply_marker_change(self) -> None:
+        self._ensure_mutable_stores()
         self.markers.sort(key=lambda x: x.frame)
         self._dirty = True
         self._refresh_marker_list()
@@ -1174,25 +1101,18 @@ class ReviewIdsTab(QWidget):
         self.min_risk = float(value)
         self._refresh_timeline()
 
-    def _on_kind(self, kind: str) -> None:
-        if not kind or kind not in self._stores:
-            return
-        self.animal_kind = kind
-        store = self._primary_store()
-        if store:
-            self.n_frames = store.n_frames
-            self.involved_ids = list(store.ids)
-            self.fps = float(store.meta.get("fps") or self.fps)
-        self._refresh_id_combos()
-        self._seek(min(self.frame, self.n_frames - 1))
+    def save_package(self, *, notify: bool = True) -> bool:
+        """Publish remapped tracklets after a fail-closed stale-file check.
 
-    # --- save ---
+        Args:
+            notify: When True, show the success dialog after a write.
 
-    def save_package(self) -> None:
-        """Publish remapped tracklets after a fail-closed stale-file check."""
+        Returns:
+            True if the package was saved (or there was nothing to save).
+        """
         if not self.review_dir:
             QMessageBox.information(self, "Save", "Load a package first.")
-            return
+            return False
         self._stop_play()
         from LabGym.id_review.raw_store import has_raw_snapshot
 
@@ -1214,7 +1134,7 @@ class ReviewIdsTab(QWidget):
             if should_confirm_stale_downstream(
                 will_rebuild=True, check=downstream
             ) and not self._confirm_stale_downstream(downstream):
-                return
+                return False
         else:
             downstream = DownstreamArtifactCheck(check_failed=False)
         result = save_review_package(
@@ -1227,13 +1147,14 @@ class ReviewIdsTab(QWidget):
         )
         if not result.ok:
             QMessageBox.critical(self, "Save failed", result.error)
-            return
+            return False
         self._already_corrected = bool(result.already_corrected)
         self._has_raw = bool(result.has_raw)
         if result.stores:
             self._stores = result.stores
             self._baseline_stores = result.baseline_stores
         self._dirty = False
+        self._saved_markers = clone_markers(self.markers)
         self._set_package_label(accepted=result.accepted, has_raw=self._has_raw)
         from LabGym.gui_pyside.project.paths import clear_tracklets_discovery_cache
 
@@ -1256,8 +1177,10 @@ class ReviewIdsTab(QWidget):
                 f"{result.remap_note}"
                 f"Subjects: {result.n_subjects}.{extra}"
             )
-        QMessageBox.information(self, "Saved", body)
+        if notify:
+            QMessageBox.information(self, "Saved", body)
         self._render()
+        return True
 
     def _confirm_stale_downstream(self, check: DownstreamArtifactCheck) -> bool:
         """Ask before save when artifacts exist or the lookup failed (default No)."""
