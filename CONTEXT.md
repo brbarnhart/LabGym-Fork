@@ -215,3 +215,9 @@ _Avoid_: load project, open video (when the identity package is also in play), a
 **Status unknown**:
 Per-video list state meaning whether tracklets or accepted identities exist on disk has not been resolved yet. It is not pending work and not done.
 _Avoid_: pending, checking (ok in UI copy), loading (ambiguous with session load)
+
+## Preprocessing
+
+**Crop window**:
+The axis-aligned rectangle of each frame that preprocessing keeps. Its edges are positions on the resized frame it was set on. One crop window is shared by every video in that preprocess run, including while another video is previewed. The rest of each frame is discarded in the preprocessed video.
+_Avoid_: ROI, selection, crop frame (the analysis operation that tightens a frame around animal outlines)
